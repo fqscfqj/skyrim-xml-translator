@@ -18,7 +18,7 @@ class ConfigManager:
                 "embedding": {
                     "api_key": "",
                     "base_url": "https://api.openai.com/v1",
-                    "model": "text-embedding-ada-002"
+                    "model": "text-embedding-3-large"
                 },
                 "threads": {
                     "translation": 5,

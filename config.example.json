@@ -2,12 +2,12 @@
     "llm": {
         "api_key": "<YOUR_LLM_API_KEY>",
         "base_url": "https://api.example.com/v1",
-        "model": "deepseek-chat"
+        "model": "gpt-3.5-turbo"
     },
     "embedding": {
         "api_key": "<YOUR_EMBEDDING_API_KEY>",
         "base_url": "https://api.example.com/v1",
-        "model": "qwen3-embedding-8b"
+        "model": "text-embedding-3-large"
     },
     "paths": {
         "glossary_file": "glossary.json",
