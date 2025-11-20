@@ -15,6 +15,7 @@ class RAGEngine:
         
         self.glossary_path = self.config.get("paths", "glossary_file", "glossary.json")
         self.vector_path = self.config.get("paths", "vector_index_file", "vector_index.npy")
+        self.terms_path = os.path.join(os.path.dirname(self.vector_path) if os.path.dirname(self.vector_path) else ".", "terms_index.json")
         
         self.load_data()
 
@@ -23,33 +24,49 @@ class RAGEngine:
         if os.path.exists(self.glossary_path):
             with open(self.glossary_path, 'r', encoding='utf-8') as f:
                 self.glossary = json.load(f)
-                self.terms = list(self.glossary.keys())
+        
+        # Load terms index if exists, otherwise fallback to glossary keys (risky but needed for migration)
+        if os.path.exists(self.terms_path):
+            with open(self.terms_path, 'r', encoding='utf-8') as f:
+                self.terms = json.load(f)
+        elif self.glossary:
+            self.terms = list(self.glossary.keys())
         
         if os.path.exists(self.vector_path):
             try:
                 self.vectors = np.load(self.vector_path)
             except:
                 self.vectors = None
+        
+        # Validation
+        if self.vectors is not None and len(self.terms) != self.vectors.shape[0]:
+            print("Warning: Vector index size mismatch. Rebuilding index is recommended.")
+            # We don't auto-rebuild here to avoid startup delay, but user should know.
 
     def save_glossary(self):
         with open(self.glossary_path, 'w', encoding='utf-8') as f:
             json.dump(self.glossary, f, indent=4, ensure_ascii=False)
 
+    def save_terms_index(self):
+        with open(self.terms_path, 'w', encoding='utf-8') as f:
+            json.dump(self.terms, f, indent=4, ensure_ascii=False)
+
     def add_term(self, term, translation):
-        """添加新术语并更新索引（简单起见，这里只更新内存，需调用 build_index 持久化）"""
+        """添加新术语并更新索引"""
         self.glossary[term] = translation
         self.save_glossary()
-        # 在实际生产中，这里应该增量更新向量，而不是每次都重全量构建
-        # 为了演示，我们标记需要重建，或者立即计算单个向量
+        
         try:
             vec = self.llm_client.get_embedding(term)
+            vec_np = np.array([vec], dtype=np.float32)
             if self.vectors is None:
-                self.vectors = np.array([vec])
+                self.vectors = vec_np
                 self.terms = [term]
             else:
-                self.vectors = np.vstack([self.vectors, vec])
+                self.vectors = np.vstack([self.vectors, vec_np])
                 self.terms.append(term)
             np.save(self.vector_path, self.vectors)
+            self.save_terms_index()
         except Exception as e:
             print(f"Error adding term vector: {e}")
 
@@ -65,9 +82,10 @@ class RAGEngine:
                 if self.vectors is not None:
                     self.vectors = np.delete(self.vectors, idx, axis=0)
                     np.save(self.vector_path, self.vectors)
+                self.save_terms_index()
 
     def add_terms_batch(self, terms_dict, num_threads=1, progress_callback=None, log_callback=None):
-        """批量添加术语并更新索引"""
+        """批量添加术语并更新索引 (优化内存占用)"""
         # 1. Update glossary
         self.glossary.update(terms_dict)
         self.save_glossary()
@@ -87,10 +105,13 @@ class RAGEngine:
             log_callback(f"Starting vectorization for {len(new_terms)} new terms with {num_threads} threads...")
 
         # 3. Batch embed
-        new_vectors = []
         total = len(new_terms)
         processed_count = 0
-
+        batch_size = 50  # Process in chunks to save memory
+        new_vectors_batches = []
+        new_terms_added = [] # Temporary list to ensure atomicity
+        
+        # Helper for embedding
         def embed_task(term):
             try:
                 vec = self.llm_client.get_embedding(term)
@@ -99,44 +120,66 @@ class RAGEngine:
                 return term, None, str(e)
 
         with ThreadPoolExecutor(max_workers=num_threads) as executor:
-            futures = {executor.submit(embed_task, term): term for term in new_terms}
-            
-            for future in as_completed(futures):
-                term, vec, error = future.result()
-                processed_count += 1
+            for i in range(0, total, batch_size):
+                batch_terms_input = new_terms[i : i + batch_size]
+                futures = {executor.submit(embed_task, term): term for term in batch_terms_input}
                 
-                if vec is not None:
-                    new_vectors.append(vec)
-                    self.terms.append(term)
-                    if log_callback:
-                        log_callback(f"Vectorized [{processed_count}/{total}]: {term}")
-                else:
-                    msg = f"Failed to embed term '{term}': {error}"
-                    print(msg)
-                    if log_callback:
-                        log_callback(msg)
+                batch_results = []
+                batch_terms_confirmed = []
                 
-                if progress_callback:
-                    progress_callback(int(processed_count / total * 100))
+                for future in as_completed(futures):
+                    term, vec, error = future.result()
+                    processed_count += 1
+                    
+                    if vec is not None:
+                        # Convert to numpy array immediately to save memory
+                        batch_results.append(np.array(vec, dtype=np.float32))
+                        batch_terms_confirmed.append(term)
+                        if log_callback and processed_count % 10 == 0:
+                            log_callback(f"Vectorized [{processed_count}/{total}]: {term}")
+                    else:
+                        msg = f"Failed to embed term '{term}': {error}"
+                        print(msg)
+                        if log_callback:
+                            log_callback(msg)
+                    
+                    if progress_callback:
+                        progress_callback(int(processed_count / total * 100))
+                
+                if batch_results:
+                    new_vectors_batches.append(np.vstack(batch_results))
+                    new_terms_added.extend(batch_terms_confirmed)
+                    
+                # Optional: Force garbage collection if needed, but scope exit should handle it
 
         # 4. Update vectors array
-        if new_vectors:
-            new_vectors_np = np.array(new_vectors)
+        if new_vectors_batches:
+            new_vectors_np = np.vstack(new_vectors_batches)
             if self.vectors is None:
                 self.vectors = new_vectors_np
             else:
                 self.vectors = np.vstack([self.vectors, new_vectors_np])
+            
+            # Update terms list ONLY after successful vectorization
+            self.terms.extend(new_terms_added)
+            
             np.save(self.vector_path, self.vectors)
+            self.save_terms_index()
 
     def build_index(self, num_threads=1, progress_callback=None, log_callback=None):
-        """批量构建所有术语的向量索引"""
+        """批量构建所有术语的向量索引 (优化内存占用)"""
         if not self.glossary:
             return
         
-        vectors = []
-        valid_terms = []
-        total = len(self.glossary)
+        # Reset internal state
+        self.vectors = None
+        self.terms = []
+        
+        all_terms = list(self.glossary.keys())
+        total = len(all_terms)
         processed_count = 0
+        batch_size = 50
+        vector_batches = []
         
         if log_callback:
             log_callback(f"Rebuilding index for {total} terms with {num_threads} threads...")
@@ -149,31 +192,39 @@ class RAGEngine:
                 return term, None, str(e)
 
         with ThreadPoolExecutor(max_workers=num_threads) as executor:
-            futures = {executor.submit(embed_task, term): term for term in self.glossary}
-            
-            for future in as_completed(futures):
-                term, vec, error = future.result()
-                processed_count += 1
+            for i in range(0, total, batch_size):
+                batch_terms = all_terms[i : i + batch_size]
+                futures = {executor.submit(embed_task, term): term for term in batch_terms}
                 
-                if vec is not None:
-                    vectors.append(vec)
-                    valid_terms.append(term)
-                    if log_callback and processed_count % 5 == 0:
-                        log_callback(f"Indexed [{processed_count}/{total}]: {term}")
-                else:
-                    msg = f"Failed to embed term '{term}': {error}"
-                    print(msg)
-                    if log_callback:
-                        log_callback(msg)
+                batch_vectors = []
+                batch_valid_terms = []
                 
-                if progress_callback:
-                    progress_callback(int(processed_count / total * 100))
+                for future in as_completed(futures):
+                    term, vec, error = future.result()
+                    processed_count += 1
+                    
+                    if vec is not None:
+                        batch_vectors.append(np.array(vec, dtype=np.float32))
+                        batch_valid_terms.append(term)
+                        if log_callback and processed_count % 10 == 0:
+                            log_callback(f"Indexed [{processed_count}/{total}]: {term}")
+                    else:
+                        msg = f"Failed to embed term '{term}': {error}"
+                        print(msg)
+                        if log_callback:
+                            log_callback(msg)
+                    
+                    if progress_callback:
+                        progress_callback(int(processed_count / total * 100))
+                
+                if batch_vectors:
+                    vector_batches.append(np.vstack(batch_vectors))
+                    self.terms.extend(batch_valid_terms)
 
-        
-        if vectors:
-            self.vectors = np.array(vectors)
-            self.terms = valid_terms
+        if vector_batches:
+            self.vectors = np.vstack(vector_batches)
             np.save(self.vector_path, self.vectors)
+            self.save_terms_index()
             print(f"Index built with {len(self.terms)} terms.")
 
     def extract_keywords(self, text):
