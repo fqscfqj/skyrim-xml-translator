@@ -351,11 +351,11 @@ class MainWindow(QMainWindow):
 
         layout.addRow(QLabel("<b>多线程设置</b>"))
         self.trans_threads = QSpinBox()
-        self.trans_threads.setRange(1, 20)
+        self.trans_threads.setRange(1, 99)
         self.trans_threads.setValue(self.config_manager.get("threads", "translation", 5))
         
         self.vec_threads = QSpinBox()
-        self.vec_threads.setRange(1, 20)
+        self.vec_threads.setRange(1, 99)
         self.vec_threads.setValue(self.config_manager.get("threads", "vectorization", 5))
 
         layout.addRow("翻译线程数:", self.trans_threads)
