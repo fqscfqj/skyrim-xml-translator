@@ -5,40 +5,62 @@ class ConfigManager:
     def __init__(self, config_path="config.json"):
         self.config_path = config_path
         self.config = self._load_config()
+        self._ensure_defaults()
 
     def _load_config(self):
         if not os.path.exists(self.config_path):
             # Return default structure if file doesn't exist
-            return {
-                "llm": {
-                    "api_key": "",
-                    "base_url": "https://api.openai.com/v1",
-                    "model": "gpt-3.5-turbo"
-                },
-                "embedding": {
-                    "api_key": "",
-                    "base_url": "https://api.openai.com/v1",
-                    "model": "text-embedding-3-large"
-                },
-                "threads": {
-                    "translation": 5,
-                    "vectorization": 5
-                },
-                "rag": {
-                    "max_terms": 30,
-                    "similarity_threshold": 0.75
-                },
-                "paths": {
-                    "glossary_file": "glossary.json",
-                    "vector_index_file": "vector_index.npy"
-                }
-            }
+            return self._get_default_config()
         try:
             with open(self.config_path, 'r', encoding='utf-8') as f:
                 return json.load(f)
         except Exception as e:
             print(f"Error loading config: {e}")
             return {}
+
+    def _get_default_config(self):
+        return {
+            "llm": {
+                "api_key": "",
+                "base_url": "https://api.openai.com/v1",
+                "model": "gpt-3.5-turbo",
+                "parameters": {
+                    "temperature": None,
+                    "top_p": None,
+                    "frequency_penalty": None,
+                    "presence_penalty": None,
+                    "max_tokens": None
+                }
+            },
+            "embedding": {
+                "api_key": "",
+                "base_url": "https://api.openai.com/v1",
+                "model": "text-embedding-3-large"
+            },
+            "threads": {
+                "translation": 5,
+                "vectorization": 5
+            },
+            "rag": {
+                "max_terms": 30,
+                "similarity_threshold": 0.75
+            },
+            "paths": {
+                "glossary_file": "glossary.json",
+                "vector_index_file": "vector_index.npy"
+            }
+        }
+
+    def _ensure_defaults(self):
+        defaults = self._get_default_config()
+        self._merge_dict(defaults, self.config)
+
+    def _merge_dict(self, defaults, target):
+        for key, value in defaults.items():
+            if key not in target:
+                target[key] = value
+            elif isinstance(value, dict) and isinstance(target.get(key), dict):
+                self._merge_dict(value, target[key])
 
     def save_config(self):
         try:

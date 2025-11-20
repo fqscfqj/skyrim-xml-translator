@@ -40,18 +40,34 @@ class LLMClient:
             print(f"Embedding error: {e}")
             raise
 
-    def chat_completion(self, messages, temperature=0.3):
+    def chat_completion(self, messages, temperature=None, top_p=None, frequency_penalty=None, presence_penalty=None, max_tokens=None):
         """LLM 对话补全"""
         if not self.llm_client:
             raise ValueError("LLM client not initialized. Please check API Key.")
 
         model = self.config.get("llm", "model", "gpt-3.5-turbo")
         try:
-            response = self.llm_client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=temperature
-            )
+            final_params = {}
+            stored_params = self.config.get("llm", "parameters", {}) or {}
+            for key, value in stored_params.items():
+                if value is not None:
+                    final_params[key] = value
+
+            override_params = {
+                "temperature": temperature,
+                "top_p": top_p,
+                "frequency_penalty": frequency_penalty,
+                "presence_penalty": presence_penalty,
+                "max_tokens": max_tokens
+            }
+            for key, value in override_params.items():
+                if value is not None:
+                    final_params[key] = value
+
+            request_args = {"model": model, "messages": messages}
+            request_args.update(final_params)
+
+            response = self.llm_client.chat.completions.create(**request_args)
             return response.choices[0].message.content
         except Exception as e:
             print(f"LLM error: {e}")

@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QLineEdit, QPushButton, QTextEdit, 
                              QTabWidget, QFileDialog, QCheckBox, QProgressBar, 
                              QListWidget, QMessageBox, QGroupBox, QFormLayout, QSpinBox,
-                             QTableWidget, QTableWidgetItem, QHeaderView, QSplitter)
+                             QTableWidget, QTableWidgetItem, QHeaderView, QSplitter, QDoubleSpinBox)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
 from src.config_manager import ConfigManager
@@ -124,6 +124,7 @@ class MainWindow(QMainWindow):
         self.rag_engine = RAGEngine(self.config_manager, self.llm_client)
         self.xml_processor = XMLProcessor()
         self.translator = Translator(self.llm_client, self.rag_engine)
+        self.model_param_controls = {}
 
         self.init_ui()
 
@@ -286,6 +287,58 @@ class MainWindow(QMainWindow):
         layout.addRow("API Key:", self.llm_key)
         layout.addRow("Model Name:", self.llm_model)
 
+        layout.addRow(QLabel("<b>LLM 参数 (可选)</b>"))
+        params = self.config_manager.get("llm", "parameters", {}) or {}
+
+        def add_param_control(name, label_text, widget):
+            checkbox = QCheckBox(label_text)
+            widget.setEnabled(False)
+            checkbox.stateChanged.connect(
+                lambda state, w=widget: w.setEnabled(state == Qt.CheckState.Checked)
+            )
+            row_widget = QWidget()
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.addWidget(checkbox)
+            row_layout.addWidget(widget)
+            row_layout.addStretch()
+            layout.addRow(row_widget)
+            self.model_param_controls[name] = (checkbox, widget)
+            stored_value = params.get(name)
+            if stored_value is not None:
+                checkbox.setChecked(True)
+                widget.setValue(stored_value)
+
+        temp_spin = QDoubleSpinBox()
+        temp_spin.setRange(0.0, 2.0)
+        temp_spin.setSingleStep(0.05)
+        temp_spin.setValue(0.3)
+        add_param_control("temperature", "启用温度 (temperature)", temp_spin)
+
+        top_p_spin = QDoubleSpinBox()
+        top_p_spin.setRange(0.0, 1.0)
+        top_p_spin.setSingleStep(0.05)
+        top_p_spin.setValue(1.0)
+        add_param_control("top_p", "启用 Top-p (top_p)", top_p_spin)
+
+        freq_spin = QDoubleSpinBox()
+        freq_spin.setRange(-2.0, 2.0)
+        freq_spin.setSingleStep(0.1)
+        freq_spin.setValue(0.0)
+        add_param_control("frequency_penalty", "启用频率惩罚 (frequency_penalty)", freq_spin)
+
+        pres_spin = QDoubleSpinBox()
+        pres_spin.setRange(-2.0, 2.0)
+        pres_spin.setSingleStep(0.1)
+        pres_spin.setValue(0.0)
+        add_param_control("presence_penalty", "启用出现惩罚 (presence_penalty)", pres_spin)
+
+        token_spin = QSpinBox()
+        token_spin.setRange(16, 8192)
+        token_spin.setSingleStep(16)
+        token_spin.setValue(512)
+        add_param_control("max_tokens", "启用最大 Tokens (max_tokens)", token_spin)
+
         layout.addRow(QLabel("<b>Embedding 设置</b>"))
         self.embed_base = QLineEdit(self.config_manager.get("embedding", "base_url"))
         self.embed_key = QLineEdit(self.config_manager.get("embedding", "api_key"))
@@ -309,7 +362,6 @@ class MainWindow(QMainWindow):
         layout.addRow("向量化线程数:", self.vec_threads)
 
         layout.addRow(QLabel("<b>RAG 设置</b>"))
-        from PyQt6.QtWidgets import QDoubleSpinBox
         self.rag_max_terms = QSpinBox()
         self.rag_max_terms.setRange(0, 200)
         self.rag_max_terms.setValue(self.config_manager.get("rag", "max_terms", 30))
@@ -550,6 +602,10 @@ class MainWindow(QMainWindow):
         
         self.config_manager.set("rag", "max_terms", self.rag_max_terms.value())
         self.config_manager.set("rag", "similarity_threshold", self.rag_threshold.value())
+
+        params = self.config_manager.config.setdefault("llm", {}).setdefault("parameters", {})
+        for name, (checkbox, widget) in self.model_param_controls.items():
+            params[name] = widget.value() if checkbox.isChecked() else None
         
         self.config_manager.save_config()
         self.llm_client.reload_config()
