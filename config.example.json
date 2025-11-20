@@ -1,0 +1,24 @@
+{
+    "llm": {
+        "api_key": "<YOUR_LLM_API_KEY>",
+        "base_url": "https://api.example.com/v1",
+        "model": "deepseek-chat"
+    },
+    "embedding": {
+        "api_key": "<YOUR_EMBEDDING_API_KEY>",
+        "base_url": "https://api.example.com/v1",
+        "model": "qwen3-embedding-8b"
+    },
+    "paths": {
+        "glossary_file": "glossary.json",
+        "vector_index_file": "vector_index.npy"
+    },
+    "threads": {
+        "translation": 5,
+        "vectorization": 10
+    },
+    "rag": {
+        "max_terms": 30,
+        "similarity_threshold": 0.75
+    }
+}

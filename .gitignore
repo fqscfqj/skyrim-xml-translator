@@ -1,0 +1,19 @@
+# Exclude generated / large files
+vector_index.npy
+glossary.json
+config.json
+*.xml
+
+# Python artifact ignores
+__pycache__/
+*.py[cod]
+*.egg-info/
+env/
+.venv/
+
+# VS Code
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
