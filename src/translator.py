@@ -7,7 +7,7 @@ class Translator:
         self.llm_client = llm_client
         self.rag_engine = rag_engine
 
-    def translate_text(self, text, use_rag=True):
+    def translate_text(self, text, use_rag=True, log_callback=None):
         if not text or not text.strip():
             return text
 
@@ -21,7 +21,7 @@ class Translator:
             keywords = self.rag_engine.extract_keywords(text)
             
             # 2. Search for terms
-            matched_terms = self.rag_engine.search_terms(keywords, threshold=threshold)
+            matched_terms = self.rag_engine.search_terms(keywords, threshold=threshold, log_callback=log_callback)
             
             # 3. Construct glossary context (Limit terms)
             if matched_terms:

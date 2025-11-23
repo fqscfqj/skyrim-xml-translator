@@ -7,7 +7,8 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QLineEdit, QPushButton, QTextEdit, 
                              QTabWidget, QFileDialog, QCheckBox, QProgressBar, 
                              QListWidget, QMessageBox, QGroupBox, QFormLayout, QSpinBox,
-                             QTableWidget, QTableWidgetItem, QHeaderView, QSplitter, QDoubleSpinBox)
+                             QTableWidget, QTableWidgetItem, QHeaderView, QSplitter, QDoubleSpinBox,
+                             QComboBox, QAbstractSpinBox)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
 from src.config_manager import ConfigManager
@@ -100,7 +101,7 @@ class Worker(QThread):
             if not self.is_running:
                 return None
             try:
-                translation = self.translator.translate_text(source)
+                translation = self.translator.translate_text(source, log_callback=self.log.emit)
                 return (row_idx, source, translation)
             except Exception as e:
                 return (row_idx, source, None, str(e))
@@ -137,6 +138,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Skyrim XML Translator Agent")
         self.resize(900, 700)
+        self.setAcceptDrops(True)
 
         self.config_manager = ConfigManager()
         self.llm_client = LLMClient(self.config_manager)
@@ -152,6 +154,18 @@ class MainWindow(QMainWindow):
 
         self.init_ui()
 
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.accept()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        files = [u.toLocalFile() for u in event.mimeData().urls()]
+        if files:
+            self.file_path_input.setText(files[0])
+            self.load_xml_to_table()
+
     def init_ui(self):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -162,6 +176,7 @@ class MainWindow(QMainWindow):
         
         # Tabs
         tabs = QTabWidget()
+        tabs.setMinimumHeight(150)  # Ensure tabs don't get too small but allow resizing
         tabs.addTab(self.create_translate_tab(), "翻译任务")
         tabs.addTab(self.create_glossary_tab(), "术语管理")
         tabs.addTab(self.create_config_tab(), "设置")
@@ -169,6 +184,7 @@ class MainWindow(QMainWindow):
 
         # Log
         log_group = QGroupBox("日志")
+        log_group.setMinimumHeight(100)  # Ensure log area can be resized smaller
         log_layout = QVBoxLayout()
         self.log_output = QTextEdit()
         self.log_output.setReadOnly(True)
@@ -177,7 +193,11 @@ class MainWindow(QMainWindow):
         splitter.addWidget(log_group)
 
         # Set initial sizes (70% tabs, 30% log)
-        splitter.setSizes([500, 200])
+        splitter.setSizes([600, 200])
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 1)
+        splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(5)  # Make handle easier to grab
 
         main_layout.addWidget(splitter)
 
@@ -197,10 +217,14 @@ class MainWindow(QMainWindow):
 
         save_btn = QPushButton("保存文件")
         save_btn.clicked.connect(self.save_xml_file)
+        
+        save_as_btn = QPushButton("另存为")
+        save_as_btn.clicked.connect(self.save_as_xml_file)
 
         top_layout.addWidget(self.file_path_input)
         top_layout.addWidget(browse_btn)
         top_layout.addWidget(save_btn)
+        top_layout.addWidget(save_as_btn)
         layout.addLayout(top_layout)
 
         # Options & Actions
@@ -209,12 +233,17 @@ class MainWindow(QMainWindow):
         
         self.start_btn = QPushButton("开始翻译")
         self.start_btn.clicked.connect(self.start_translation)
+        
+        self.trans_sel_btn = QPushButton("翻译选中")
+        self.trans_sel_btn.clicked.connect(self.translate_selected)
+        
         self.stop_btn = QPushButton("停止")
         self.stop_btn.clicked.connect(self.stop_translation)
         self.stop_btn.setEnabled(False)
         
         action_layout.addStretch()
         action_layout.addWidget(self.start_btn)
+        action_layout.addWidget(self.trans_sel_btn)
         action_layout.addWidget(self.stop_btn)
         layout.addLayout(action_layout)
 
@@ -362,30 +391,35 @@ class MainWindow(QMainWindow):
                 widget.setValue(stored_value)
 
         temp_spin = QDoubleSpinBox()
+        temp_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         temp_spin.setRange(0.0, 2.0)
         temp_spin.setSingleStep(0.05)
         temp_spin.setValue(0.3)
         add_param_control("temperature", "启用温度 (temperature)", temp_spin)
 
         top_p_spin = QDoubleSpinBox()
+        top_p_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         top_p_spin.setRange(0.0, 1.0)
         top_p_spin.setSingleStep(0.05)
         top_p_spin.setValue(1.0)
         add_param_control("top_p", "启用 Top-p (top_p)", top_p_spin)
 
         freq_spin = QDoubleSpinBox()
+        freq_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         freq_spin.setRange(-2.0, 2.0)
         freq_spin.setSingleStep(0.1)
         freq_spin.setValue(0.0)
         add_param_control("frequency_penalty", "启用频率惩罚 (frequency_penalty)", freq_spin)
 
         pres_spin = QDoubleSpinBox()
+        pres_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         pres_spin.setRange(-2.0, 2.0)
         pres_spin.setSingleStep(0.1)
         pres_spin.setValue(0.0)
         add_param_control("presence_penalty", "启用出现惩罚 (presence_penalty)", pres_spin)
 
         token_spin = QSpinBox()
+        token_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         token_spin.setRange(16, 8192)
         token_spin.setSingleStep(16)
         token_spin.setValue(512)
@@ -425,30 +459,35 @@ class MainWindow(QMainWindow):
                 widget.setValue(stored_value)
 
         s_temp_spin = QDoubleSpinBox()
+        s_temp_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         s_temp_spin.setRange(0.0, 2.0)
         s_temp_spin.setSingleStep(0.05)
         s_temp_spin.setValue(0.1) # Default low temp for extraction
         add_search_param_control("temperature", "启用温度 (temperature)", s_temp_spin)
 
         s_top_p_spin = QDoubleSpinBox()
+        s_top_p_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         s_top_p_spin.setRange(0.0, 1.0)
         s_top_p_spin.setSingleStep(0.05)
         s_top_p_spin.setValue(1.0)
         add_search_param_control("top_p", "启用 Top-p (top_p)", s_top_p_spin)
 
         s_freq_spin = QDoubleSpinBox()
+        s_freq_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         s_freq_spin.setRange(-2.0, 2.0)
         s_freq_spin.setSingleStep(0.1)
         s_freq_spin.setValue(0.0)
         add_search_param_control("frequency_penalty", "启用频率惩罚 (frequency_penalty)", s_freq_spin)
 
         s_pres_spin = QDoubleSpinBox()
+        s_pres_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         s_pres_spin.setRange(-2.0, 2.0)
         s_pres_spin.setSingleStep(0.1)
         s_pres_spin.setValue(0.0)
         add_search_param_control("presence_penalty", "启用出现惩罚 (presence_penalty)", s_pres_spin)
 
         s_token_spin = QSpinBox()
+        s_token_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         s_token_spin.setRange(16, 8192)
         s_token_spin.setSingleStep(16)
         s_token_spin.setValue(512)
@@ -462,6 +501,7 @@ class MainWindow(QMainWindow):
         self.embed_model = QLineEdit(self.config_manager.get("embedding", "model"))
         
         self.embed_dim = QSpinBox()
+        self.embed_dim.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.embed_dim.setRange(1, 8192)
         self.embed_dim.setValue(self.config_manager.get("embedding", "dimensions", 1536))
         self.embed_dim.setToolTip("设置 Embedding 模型的向量维度 (例如 OpenAI 为 1536)")
@@ -473,10 +513,12 @@ class MainWindow(QMainWindow):
 
         layout.addRow(QLabel("<b>多线程设置</b>"))
         self.trans_threads = QSpinBox()
+        self.trans_threads.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.trans_threads.setRange(1, 99)
         self.trans_threads.setValue(self.config_manager.get("threads", "translation", 5))
         
         self.vec_threads = QSpinBox()
+        self.vec_threads.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.vec_threads.setRange(1, 99)
         self.vec_threads.setValue(self.config_manager.get("threads", "vectorization", 5))
 
@@ -485,16 +527,24 @@ class MainWindow(QMainWindow):
 
         layout.addRow(QLabel("<b>RAG 设置</b>"))
         self.rag_max_terms = QSpinBox()
+        self.rag_max_terms.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.rag_max_terms.setRange(0, 200)
         self.rag_max_terms.setValue(self.config_manager.get("rag", "max_terms", 30))
         
         self.rag_threshold = QDoubleSpinBox()
+        self.rag_threshold.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.rag_threshold.setRange(0.0, 1.0)
         self.rag_threshold.setSingleStep(0.05)
         self.rag_threshold.setValue(self.config_manager.get("rag", "similarity_threshold", 0.75))
 
         layout.addRow("Prompt最大术语数:", self.rag_max_terms)
         layout.addRow("相似度阈值 (0-1):", self.rag_threshold)
+
+        layout.addRow(QLabel("<b>系统设置</b>"))
+        self.log_level_combo = QComboBox()
+        self.log_level_combo.addItems(["DEBUG", "INFO", "WARNING", "ERROR"])
+        self.log_level_combo.setCurrentText(self.config_manager.get("general", "log_level", "INFO"))
+        layout.addRow("日志等级:", self.log_level_combo)
 
         save_btn = QPushButton("保存配置")
         save_btn.clicked.connect(self.save_config)
@@ -602,6 +652,18 @@ class MainWindow(QMainWindow):
             self.log(f"Error saving file: {e}")
             QMessageBox.critical(self, "Error", f"Failed to save: {e}")
 
+    def save_as_xml_file(self):
+        fname, _ = QFileDialog.getSaveFileName(self, 'Save XML file', '', "XML files (*.xml)")
+        if fname:
+            self.log(f"Saving as: {fname}")
+            try:
+                self.xml_processor.save_file(fname)
+                self.log("File saved successfully.")
+                QMessageBox.information(self, "Success", "File saved.")
+            except Exception as e:
+                self.log(f"Error saving file: {e}")
+                QMessageBox.critical(self, "Error", f"Failed to save: {e}")
+
     def update_table_row(self, row, translation):
         dest_item = self.trans_table.item(row, 2)
         if dest_item:
@@ -631,6 +693,7 @@ class MainWindow(QMainWindow):
 
     def on_translation_finished(self):
         self.start_btn.setEnabled(True)
+        self.trans_sel_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.log("Task finished.")
 
@@ -779,6 +842,7 @@ class MainWindow(QMainWindow):
         
         self.config_manager.set("rag", "max_terms", self.rag_max_terms.value())
         self.config_manager.set("rag", "similarity_threshold", self.rag_threshold.value())
+        self.config_manager.set("general", "log_level", self.log_level_combo.currentText())
 
         params = self.config_manager.config.setdefault("llm", {}).setdefault("parameters", {})
         for name, (checkbox, widget) in self.model_param_controls.items():
@@ -803,3 +867,32 @@ class MainWindow(QMainWindow):
             self.glossary_worker.resume()
             self.pause_btn.setEnabled(True)
             self.resume_btn.setEnabled(False)
+
+    def translate_selected(self):
+        selected_rows = set()
+        for item in self.trans_table.selectedItems():
+            selected_rows.add(item.row())
+        
+        if not selected_rows:
+            QMessageBox.warning(self, "Warning", "No items selected.")
+            return
+
+        self.start_btn.setEnabled(False)
+        self.trans_sel_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
+        self.progress_bar.setValue(0)
+        self.log(f"Starting translation for {len(selected_rows)} selected items...")
+
+        items_to_process = []
+        for row in selected_rows:
+            source_item = self.trans_table.item(row, 1)
+            if source_item and source_item.text():
+                items_to_process.append((row, source_item.text()))
+
+        num_threads = self.config_manager.get("threads", "translation", 5)
+        self.worker = Worker(items_to_process, self.translator, num_threads)
+        self.worker.log.connect(self.log)
+        self.worker.progress.connect(self.progress_bar.setValue)
+        self.worker.result_ready.connect(self.update_table_row)
+        self.worker.finished.connect(self.on_translation_finished)
+        self.worker.start()

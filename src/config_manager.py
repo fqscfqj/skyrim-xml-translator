@@ -57,6 +57,9 @@ class ConfigManager:
                 "max_terms": 30,
                 "similarity_threshold": 0.75
             },
+            "general": {
+                "log_level": "INFO"
+            },
             "paths": {
                 "glossary_file": "glossary.json",
                 "vector_index_file": "vector_index.npy"

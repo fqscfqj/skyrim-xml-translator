@@ -306,13 +306,17 @@ class RAGEngine:
             print(f"Keyword extraction failed: {e}")
             return []
 
-    def search_terms(self, query_list, threshold=0.8):
+    def search_terms(self, query_list, threshold=0.8, log_callback=None):
         """
         对提取出的关键词列表进行向量检索
         返回: {term: translation}
         """
         if self.vectors is None or len(self.terms) == 0:
             return {}
+
+        log_level = self.config.get("general", "log_level", "INFO")
+        if log_level == "DEBUG" and log_callback:
+            log_callback(f"Searching keywords: {query_list}")
 
         results = {}
         for query in query_list:
@@ -332,6 +336,9 @@ class RAGEngine:
                     results[matched_term] = self.glossary[matched_term]
             except Exception as e:
                 print(f"Search error for '{query}': {e}")
+        
+        if log_level == "DEBUG" and log_callback and results:
+            log_callback(f"Found terms: {list(results.keys())}")
         
         return results
 
