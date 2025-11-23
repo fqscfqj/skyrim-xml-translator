@@ -27,18 +27,18 @@ class Translator:
                 pass
             
             # 2. Search for terms (Vector Search)
-            matched_terms = self.rag_engine.search_terms(keywords, threshold=threshold, log_callback=log_callback)
+            # max_terms now controls how many matches per keyword, not total terms
+            matched_terms = self.rag_engine.search_terms(keywords, threshold=threshold, log_callback=log_callback, top_k=max_terms)
             
             try:
                 log_emit(log_callback, self.rag_engine.config, 'DEBUG', f"RAG matched terms: {list(matched_terms.keys())}", module='translator', func='translate_text', extra={'rag_matches': list(matched_terms.keys())})
             except Exception:
                 pass
 
-            # 3. Construct glossary context (Limit terms)
+            # 3. Construct glossary context
             if matched_terms:
                 glossary_list = [f"{k} -> {v}" for k, v in matched_terms.items()]
-                if len(glossary_list) > max_terms:
-                    glossary_list = glossary_list[:max_terms]
+                # Removed global max_terms limit as per user request to use max_terms for per-keyword limit
                 glossary_context = "Glossary:\n" + "\n".join(glossary_list)
 
         # 4. Construct Prompt

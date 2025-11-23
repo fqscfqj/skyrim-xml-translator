@@ -351,8 +351,8 @@ class RAGEngine:
                 if containment_indices:
                     # Sort containment indices by similarity score (descending)
                     containment_indices.sort(key=lambda i: similarities[i], reverse=True)
-                    # Take top K containment matches (e.g. top 5)
-                    top_containment_indices = containment_indices[:5]
+                    # Take top K containment matches
+                    top_containment_indices = containment_indices[:top_k]
                     containment_matches = [(self.terms[i], float(similarities[i])) for i in top_containment_indices]
 
                 # 3. Combine Results
