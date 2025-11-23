@@ -9,6 +9,8 @@ except Exception:
 
 import os
 from typing import Optional, Any
+from src.logging_helper import emit as log_emit
+from src.config_manager import ConfigManager
 
 class XMLProcessor:
     def __init__(self):
@@ -32,7 +34,12 @@ class XMLProcessor:
             self.root = self.tree.getroot()
             return True
         except Exception as e:
-            print(f"Error loading XML: {e}")
+            # Use a local config manager for logging if available
+            try:
+                cfg = ConfigManager()
+            except Exception:
+                cfg = None
+            log_emit(None, cfg, 'ERROR', f"Error loading XML: {e}", exc=e, module='xml_processor', func='load_file')
             return False
 
     def get_strings(self):

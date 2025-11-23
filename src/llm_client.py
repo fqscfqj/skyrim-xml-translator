@@ -1,12 +1,15 @@
 from openai import OpenAI
 import os
+from src.logging_helper import emit as log_emit
+import traceback
 
 class LLMClient:
-    def __init__(self, config_manager):
+    def __init__(self, config_manager, log_callback=None):
         self.config = config_manager
         self.llm_client = None
         self.search_llm_client = None
         self.embed_client = None
+        self.log_callback = log_callback
         self._init_clients()
 
     def _init_clients(self):
@@ -47,7 +50,7 @@ class LLMClient:
             )
             return response.data[0].embedding
         except Exception as e:
-            print(f"Embedding error: {e}")
+            log_emit(self.log_callback, self.config, 'ERROR', f"Embedding error: {e}", exc=e, module='llm_client', func='get_embedding')
             raise
 
     def chat_completion(self, messages, temperature=None, top_p=None, frequency_penalty=None, presence_penalty=None, max_tokens=None):
@@ -77,10 +80,12 @@ class LLMClient:
             request_args = {"model": model, "messages": messages}
             request_args.update(final_params)
 
+            # Debug: log model and truncated prompt if debug enabled
+            log_emit(self.log_callback, self.config, 'DEBUG', f"LLM call: model={model} messages_len={len(messages)}", module='llm_client', func='chat_completion')
             response = self.llm_client.chat.completions.create(**request_args)
             return response.choices[0].message.content
         except Exception as e:
-            print(f"LLM error: {e}")
+            log_emit(self.log_callback, self.config, 'ERROR', f"LLM error: {e}", exc=e, module='llm_client', func='chat_completion')
             raise
 
     def chat_completion_search(self, messages, temperature=None, top_p=None, frequency_penalty=None, presence_penalty=None, max_tokens=None):
@@ -114,10 +119,11 @@ class LLMClient:
             request_args = {"model": model, "messages": messages}
             request_args.update(final_params)
 
+            log_emit(self.log_callback, self.config, 'DEBUG', f"Search LLM call: model={model} messages_len={len(messages)}", module='llm_client', func='chat_completion_search')
             response = client.chat.completions.create(**request_args)
             return response.choices[0].message.content
         except Exception as e:
-            print(f"Search LLM error: {e}")
+            log_emit(self.log_callback, self.config, 'ERROR', f"Search LLM error: {e}", exc=e, module='llm_client', func='chat_completion_search')
             # If search client fails and we have a main client, maybe we could fallback? 
             # But for now let's just raise or return empty.
             raise

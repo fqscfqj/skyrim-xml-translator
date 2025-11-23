@@ -1,5 +1,6 @@
 import json
 import os
+from src.logging_helper import emit as log_emit
 
 class ConfigManager:
     def __init__(self, config_path="config.json"):
@@ -15,7 +16,7 @@ class ConfigManager:
             with open(self.config_path, 'r', encoding='utf-8') as f:
                 return json.load(f)
         except Exception as e:
-            print(f"Error loading config: {e}")
+            log_emit(None, None, 'ERROR', f"Error loading config: {e}", exc=e, module='config_manager', func='_load_config')
             return {}
 
     def _get_default_config(self):
@@ -82,7 +83,7 @@ class ConfigManager:
             with open(self.config_path, 'w', encoding='utf-8') as f:
                 json.dump(self.config, f, indent=4, ensure_ascii=False)
         except Exception as e:
-            print(f"Error saving config: {e}")
+            log_emit(None, None, 'ERROR', f"Error saving config: {e}", exc=e, module='config_manager', func='save_config')
 
     def get(self, section, key, default=None):
         return self.config.get(section, {}).get(key, default)

@@ -1,6 +1,7 @@
 import json
 from src.llm_client import LLMClient
 from src.rag_engine import RAGEngine
+from src.logging_helper import emit as log_emit
 
 class Translator:
     def __init__(self, llm_client: LLMClient, rag_engine: RAGEngine):
@@ -54,6 +55,7 @@ Rules:
 
         # 5. Call LLM
         try:
+            log_emit(self.llm_client.log_callback, self.rag_engine.config, 'DEBUG', f"Translate call: message_len={len(text)} use_rag={use_rag}", module='translator', func='translate_text')
             response = self.llm_client.chat_completion(messages)
             # Parse JSON
             try:
@@ -63,8 +65,8 @@ Rules:
                 return data.get("translation", text)
             except json.JSONDecodeError:
                 # Fallback if not valid JSON, though prompt asks for it
-                print(f"JSON Parse Error. Response: {response}")
+                log_emit(self.llm_client.log_callback, self.rag_engine.config, 'ERROR', f"JSON Parse Error. Response: {response}", module='translator', func='translate_text')
                 return response.strip()
         except Exception as e:
-            print(f"Translation failed: {e}")
+            log_emit(self.llm_client.log_callback, self.rag_engine.config, 'ERROR', f"Translation failed: {e}", exc=e, module='translator', func='translate_text')
             return text # Return original on failure

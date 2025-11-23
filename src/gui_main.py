@@ -17,6 +17,7 @@ from src.llm_client import LLMClient
 from src.rag_engine import RAGEngine
 from src.xml_processor import XMLProcessor
 from src.translator import Translator
+from src.logging_helper import emit as log_emit
 
 class GlossaryWorker(QThread):
     progress = pyqtSignal(int)
@@ -32,19 +33,19 @@ class GlossaryWorker(QThread):
 
     def run(self):
         if self.mode == 'rebuild':
-            self.log.emit(f"Rebuilding index with {self.num_threads} threads...")
+            log_emit(self.log.emit, self.rag_engine.config, 'INFO', f"Rebuilding index with {self.num_threads} threads...", module='gui_main', func='GlossaryWorker.run')
             try:
                 self.rag_engine.build_index(num_threads=self.num_threads, progress_callback=self.progress.emit, log_callback=self.log.emit)
-                self.log.emit("Index rebuilt successfully.")
+                log_emit(self.log.emit, self.rag_engine.config, 'INFO', "Index rebuilt successfully.", module='gui_main', func='GlossaryWorker.run')
             except Exception as e:
-                self.log.emit(f"Error rebuilding index: {e}")
+                log_emit(self.log.emit, self.rag_engine.config, 'ERROR', f"Error rebuilding index: {e}", exc=e, module='gui_main', func='GlossaryWorker.run')
         
         elif self.mode == 'import':
-            self.log.emit(f"Importing from {self.data}...")
+            log_emit(self.log.emit, self.rag_engine.config, 'INFO', f"Importing from {self.data}...", module='gui_main', func='GlossaryWorker.run')
             try:
                 # self.data may be None if the caller didn't provide a path; guard against it
                 if not self.data:
-                    self.log.emit("No import file specified for glossary import.")
+                    log_emit(self.log.emit, self.rag_engine.config, 'WARNING', "No import file specified for glossary import.", module='gui_main', func='GlossaryWorker.run')
                     self.finished.emit()
                     return
 
@@ -56,13 +57,13 @@ class GlossaryWorker(QThread):
                             terms[row[0].strip()] = row[1].strip()
                 
                 if terms:
-                    self.log.emit(f"Found {len(terms)} terms. Processing with {self.num_threads} threads...")
+                    log_emit(self.log.emit, self.rag_engine.config, 'INFO', f"Found {len(terms)} terms. Processing with {self.num_threads} threads...", module='gui_main', func='GlossaryWorker.run')
                     self.rag_engine.add_terms_batch(terms, num_threads=self.num_threads, progress_callback=self.progress.emit, log_callback=self.log.emit)
-                    self.log.emit("Import completed.")
+                    log_emit(self.log.emit, self.rag_engine.config, 'INFO', "Import completed.", module='gui_main', func='GlossaryWorker.run')
                 else:
-                    self.log.emit("No valid terms found in CSV.")
+                    log_emit(self.log.emit, self.rag_engine.config, 'WARNING', "No valid terms found in CSV.", module='gui_main', func='GlossaryWorker.run')
             except Exception as e:
-                self.log.emit(f"Error importing CSV: {e}")
+                log_emit(self.log.emit, self.rag_engine.config, 'ERROR', f"Error importing CSV: {e}", exc=e, module='gui_main', func='GlossaryWorker.run')
         
         self.finished.emit()
 
@@ -72,11 +73,11 @@ class GlossaryWorker(QThread):
 
     def pause(self):
         self.rag_engine.pause_flag = True
-        self.log.emit("Task paused.")
+        log_emit(self.log.emit, self.rag_engine.config, 'INFO', "Task paused.", module='gui_main', func='GlossaryWorker.pause')
 
     def resume(self):
         self.rag_engine.pause_flag = False
-        self.log.emit("Task resumed.")
+        log_emit(self.log.emit, self.rag_engine.config, 'INFO', "Task resumed.", module='gui_main', func='GlossaryWorker.resume')
 
 class Worker(QThread):
     progress = pyqtSignal(int)
@@ -93,7 +94,7 @@ class Worker(QThread):
 
     def run(self):
         total = len(self.items_to_process)
-        self.log.emit(f"Starting translation for {total} items with {self.num_threads} threads.")
+        log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', f"Starting translation for {total} items with {self.num_threads} threads.", module='gui_main', func='Worker.run')
 
         processed_count = 0
 
@@ -120,15 +121,15 @@ class Worker(QThread):
                     if len(result) == 3:
                         row_idx, source, translation = result
                         self.result_ready.emit(row_idx, translation)
-                        self.log.emit(f"[{processed_count+1}/{total}] {source[:20]}... -> {translation[:20]}...")
+                        log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', f"[{processed_count+1}/{total}] {source[:20]}... -> {translation[:20]}...", module='gui_main', func='Worker.run')
                     else:
                         row_idx, source, _, error = result
-                        self.log.emit(f"Error translating {source[:20]}...: {error}")
+                        log_emit(self.log.emit, self.translator.rag_engine.config, 'ERROR', f"Error translating {source[:20]}...: {error}", module='gui_main', func='Worker.run')
                 
                 processed_count += 1
                 self.progress.emit(int(processed_count / total * 100))
 
-        self.log.emit("Translation task finished.")
+        log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', "Translation task finished.", module='gui_main', func='Worker.run')
         self.finished.emit()
 
     def stop(self):
@@ -142,7 +143,7 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
 
         self.config_manager = ConfigManager()
-        self.llm_client = LLMClient(self.config_manager)
+        self.llm_client = LLMClient(self.config_manager, log_callback=self.log)
         self.rag_engine = RAGEngine(self.config_manager, self.llm_client)
         self.xml_processor = XMLProcessor()
         self.translator = Translator(self.llm_client, self.rag_engine)
@@ -575,7 +576,13 @@ class MainWindow(QMainWindow):
             self.load_xml_to_table()
 
     def log(self, message):
-        self.log_output.append(message)
+        # Keep compatibility: if someone forgot to format, we still append a timestamped INFO message
+        if message.startswith('['):
+            # A formatted message coming from logger
+            self.log_output.append(message)
+        else:
+            formatted = f"[{__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [INFO] {message}"
+            self.log_output.append(formatted)
 
     def start_translation(self):
         # Ensure file is loaded
@@ -586,7 +593,7 @@ class MainWindow(QMainWindow):
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.progress_bar.setValue(0)
-        self.log("Starting translation task...")
+        log_emit(self.log, self.config_manager, 'INFO', "Starting translation task...", module='gui_main', func='start_translation')
 
         # Collect items to translate from table
         items_to_process = []
@@ -607,7 +614,7 @@ class MainWindow(QMainWindow):
             items_to_process.append((row, source_text))
 
         if not items_to_process:
-            self.log("Nothing to translate.")
+            log_emit(self.log, self.config_manager, 'WARNING', "Nothing to translate.", module='gui_main', func='start_translation')
             self.on_translation_finished()
             return
 
@@ -654,7 +661,7 @@ class MainWindow(QMainWindow):
             self.trans_table.setItem(i, 2, dest_item)
 
         self.trans_table.blockSignals(False)
-        self.log(f"Loaded {len(strings)} strings.")
+        log_emit(self.log, self.config_manager, 'INFO', f"Loaded {len(strings)} strings.", module='gui_main', func='load_xml_to_table')
         return True
 
     def save_xml_file(self):

@@ -1,6 +1,7 @@
 import json
 import os
 import numpy as np
+from src.logging_helper import emit as log_emit
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from sklearn.metrics.pairwise import cosine_similarity
 from src.llm_client import LLMClient
@@ -42,14 +43,14 @@ class RAGEngine:
                 self.vectors = np.load(self.vector_path)
                 # Check dimensions
                 if self.vectors is not None and self.vectors.shape[1] != self.embed_dim:
-                    print(f"Warning: Loaded vectors dimension {self.vectors.shape[1]} does not match config {self.embed_dim}.")
+                    log_emit(None, self.config, 'WARNING', f"Warning: Loaded vectors dimension {self.vectors.shape[1]} does not match config {self.embed_dim}.", module='rag_engine', func='load_data')
                     # We don't clear it automatically, but user might experience errors if they try to append.
             except:
                 self.vectors = None
         
         # Validation
         if self.vectors is not None and len(self.terms) != self.vectors.shape[0]:
-            print("Warning: Vector index size mismatch. Rebuilding index is recommended.")
+            log_emit(None, self.config, 'WARNING', "Warning: Vector index size mismatch. Rebuilding index is recommended.", module='rag_engine', func='load_data')
             # We don't auto-rebuild here to avoid startup delay, but user should know.
 
     def save_glossary(self):
@@ -77,7 +78,7 @@ class RAGEngine:
             np.save(self.vector_path, self.vectors)
             self.save_terms_index()
         except Exception as e:
-            print(f"Error adding term vector: {e}")
+            log_emit(None, self.config, 'ERROR', f"Error adding term vector: {e}", exc=e, module='rag_engine', func='add_term')
 
     def delete_term(self, term):
         """删除术语并更新索引"""
@@ -110,11 +111,11 @@ class RAGEngine:
         
         if not new_terms:
             if log_callback:
-                log_callback("No new terms to vectorize.")
+                log_emit(log_callback, self.config, 'INFO', "No new terms to vectorize.", module='rag_engine', func='add_terms_batch')
             return
 
         if log_callback:
-            log_callback(f"Starting vectorization for {len(new_terms)} new terms with {num_threads} threads...")
+            log_emit(log_callback, self.config, 'INFO', f"Starting vectorization for {len(new_terms)} new terms with {num_threads} threads...", module='rag_engine', func='add_terms_batch')
 
         # 3. Batch embed
         total = len(new_terms)
@@ -134,7 +135,7 @@ class RAGEngine:
         with ThreadPoolExecutor(max_workers=num_threads) as executor:
             for i in range(0, total, batch_size):
                 if self.stop_flag:
-                    if log_callback: log_callback("Vectorization stopped by user.")
+                    if log_callback: log_emit(log_callback, self.config, 'WARNING', "Vectorization stopped by user.", module='rag_engine', func='add_terms_batch')
                     break
                 
                 while self.pause_flag:
@@ -159,12 +160,12 @@ class RAGEngine:
                         batch_results.append(np.array(vec, dtype=np.float32))
                         batch_terms_confirmed.append(term)
                         if log_callback and processed_count % 10 == 0:
-                            log_callback(f"Vectorized [{processed_count}/{total}]: {term}")
+                            log_emit(log_callback, self.config, 'DEBUG', f"Vectorized [{processed_count}/{total}]: {term}", module='rag_engine', func='add_terms_batch')
                     else:
                         msg = f"Failed to embed term '{term}': {error}"
-                        print(msg)
+                        log_emit(None, self.config, 'ERROR', msg, module='rag_engine', func='add_terms_batch')
                         if log_callback:
-                            log_callback(msg)
+                            log_emit(log_callback, self.config, 'ERROR', msg, module='rag_engine', func='add_terms_batch')
                     
                     if progress_callback:
                         progress_callback(int(processed_count / total * 100))
@@ -213,14 +214,14 @@ class RAGEngine:
         total = len(terms_to_process)
         if total == 0:
             if log_callback:
-                log_callback("All terms are already indexed.")
+                log_emit(log_callback, self.config, 'INFO', "All terms are already indexed.", module='rag_engine', func='build_index')
             return
 
         processed_count = 0
         batch_size = 50
         
         if log_callback:
-            log_callback(f"Building index for {total} missing terms with {num_threads} threads...")
+            log_emit(log_callback, self.config, 'INFO', f"Building index for {total} missing terms with {num_threads} threads...", module='rag_engine', func='build_index')
 
         def embed_task(term):
             try:
@@ -234,7 +235,7 @@ class RAGEngine:
         with ThreadPoolExecutor(max_workers=num_threads) as executor:
             for i in range(0, total, batch_size):
                 if self.stop_flag:
-                    if log_callback: log_callback("Index building stopped by user.")
+                    if log_callback: log_emit(log_callback, self.config, 'WARNING', "Index building stopped by user.", module='rag_engine', func='build_index')
                     break
                 
                 while self.pause_flag:
@@ -257,13 +258,13 @@ class RAGEngine:
                     if vec is not None:
                         batch_vectors.append(np.array(vec, dtype=np.float32))
                         batch_valid_terms.append(term)
-                        if log_callback and processed_count % 10 == 0:
-                            log_callback(f"Indexed [{processed_count}/{total}]: {term}")
+                            if log_callback and processed_count % 10 == 0:
+                                log_emit(log_callback, self.config, 'DEBUG', f"Indexed [{processed_count}/{total}]: {term}", module='rag_engine', func='build_index')
                     else:
                         msg = f"Failed to embed term '{term}': {error}"
-                        print(msg)
-                        if log_callback:
-                            log_callback(msg)
+                            log_emit(None, self.config, 'ERROR', msg, module='rag_engine', func='build_index')
+                            if log_callback:
+                                log_emit(log_callback, self.config, 'ERROR', msg, module='rag_engine', func='build_index')
                     
                     if progress_callback:
                         progress_callback(int(processed_count / total * 100))
@@ -283,7 +284,7 @@ class RAGEngine:
                     self.save_terms_index()
 
         if log_callback:
-            log_callback(f"Index update completed. Total terms: {len(self.terms)}")
+            log_emit(log_callback, self.config, 'INFO', f"Index update completed. Total terms: {len(self.terms)}", module='rag_engine', func='build_index')
 
     def extract_keywords(self, text):
         """使用 LLM 提取文本中的专有名词/实体"""
@@ -303,7 +304,7 @@ class RAGEngine:
             keywords = json.loads(response)
             return keywords if isinstance(keywords, list) else []
         except Exception as e:
-            print(f"Keyword extraction failed: {e}")
+            log_emit(None, self.config, 'ERROR', f"Keyword extraction failed: {e}", exc=e, module='rag_engine', func='extract_keywords')
             return []
 
     def search_terms(self, query_list, threshold=0.8, log_callback=None):
@@ -316,7 +317,7 @@ class RAGEngine:
 
         log_level = self.config.get("general", "log_level", "INFO")
         if log_level == "DEBUG" and log_callback:
-            log_callback(f"Searching keywords: {query_list}")
+            log_emit(log_callback, self.config, 'DEBUG', f"Searching keywords: {query_list}", module='rag_engine', func='search_terms')
 
         results = {}
         for query in query_list:
@@ -335,10 +336,10 @@ class RAGEngine:
                     matched_term = self.terms[best_idx]
                     results[matched_term] = self.glossary[matched_term]
             except Exception as e:
-                print(f"Search error for '{query}': {e}")
+                log_emit(None, self.config, 'ERROR', f"Search error for '{query}': {e}", exc=e, module='rag_engine', func='search_terms')
         
         if log_level == "DEBUG" and log_callback and results:
-            log_callback(f"Found terms: {list(results.keys())}")
+            log_emit(log_callback, self.config, 'DEBUG', f"Found terms: {list(results.keys())}", module='rag_engine', func='search_terms')
         
         return results
 

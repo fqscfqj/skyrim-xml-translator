@@ -40,4 +40,8 @@
         "max_terms": 30,
         "similarity_threshold": 0.75
     }
+    ,
+    "general": {
+        "log_level": "INFO"
+    }
 }
