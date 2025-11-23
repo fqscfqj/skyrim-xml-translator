@@ -1,17 +1,34 @@
-from lxml import etree
+try:
+    # Prefer lxml if available for better XML features (pretty_print, advanced parser options)
+    from lxml import etree  # type: ignore
+    LXML_AVAILABLE = True
+except Exception:
+    # Fall back to stdlib ElementTree if lxml is not installed
+    import xml.etree.ElementTree as etree  # type: ignore
+    LXML_AVAILABLE = False
+
 import os
+from typing import Optional, Any
 
 class XMLProcessor:
     def __init__(self):
-        self.tree = None
-        self.root = None
-        self.file_path = None
+        self.tree: Optional[Any] = None
+        self.root: Optional[Any] = None
+        self.file_path: Optional[str] = None
 
-    def load_file(self, file_path):
+    def load_file(self, file_path: str) -> bool:
         self.file_path = file_path
-        parser = etree.XMLParser(remove_blank_text=False, strip_cdata=False)
         try:
-            self.tree = etree.parse(file_path, parser)
+            if LXML_AVAILABLE:
+                # Some versions of lxml may not support all XMLParser named args
+                try:
+                    parser = etree.XMLParser(remove_blank_text=False, strip_cdata=False)  # type: ignore[arg-type]
+                except TypeError:
+                    parser = etree.XMLParser(remove_blank_text=False)  # type: ignore[arg-type]
+                self.tree = etree.parse(file_path, parser)
+            else:
+                # xml.etree.ElementTree doesn't use the same parser options
+                self.tree = etree.parse(file_path)
             self.root = self.tree.getroot()
             return True
         except Exception as e:
@@ -46,7 +63,7 @@ class XMLProcessor:
                 dest_text = dest_node.text if dest_node is not None and dest_node.text else ""
                 yield string_node, id_text, source_text, dest_text
 
-    def update_dest(self, string_node, translation, overwrite=False):
+    def update_dest(self, string_node, translation: str, overwrite: bool = False) -> None:
         dest_node = string_node.find("Dest")
         if dest_node is None:
             dest_node = etree.SubElement(string_node, "Dest")
@@ -59,4 +76,13 @@ class XMLProcessor:
             output_path = self.file_path
         
         if self.tree:
-            self.tree.write(output_path, encoding="utf-8", xml_declaration=True, pretty_print=True)
+            try:
+                if LXML_AVAILABLE:
+                    # lxml supports pretty_print
+                    self.tree.write(output_path, encoding="utf-8", xml_declaration=True, pretty_print=True)
+                else:
+                    # stdlib ElementTree doesn't support pretty_print argument
+                    self.tree.write(output_path, encoding="utf-8", xml_declaration=True)
+            except TypeError:
+                # Fallback for unexpected implementations
+                self.tree.write(output_path, encoding="utf-8", xml_declaration=True)
