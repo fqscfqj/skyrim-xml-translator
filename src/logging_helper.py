@@ -1,6 +1,7 @@
 import datetime
 import traceback
 import inspect
+import os
 from typing import Optional, Callable
 
 
@@ -14,6 +15,42 @@ LEVELS = {
 
 def _now_ts():
     return datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+
+def _resolve_log_file_path(config_manager):
+    fallback = os.path.join(os.getcwd(), 'logs', 'app.log')
+    base_dir = os.getcwd()
+    if config_manager:
+        cfg_path = getattr(config_manager, 'config_path', None)
+        if cfg_path:
+            base_dir = os.path.abspath(os.path.dirname(os.path.abspath(cfg_path)) or base_dir)
+    candidate = None
+    if config_manager:
+        try:
+            candidate = config_manager.get('general', 'log_file')
+        except Exception:
+            candidate = None
+    if not candidate:
+        return os.path.abspath(fallback)
+    candidate = os.path.expanduser(os.path.expandvars(candidate))
+    if not os.path.isabs(candidate):
+        candidate = os.path.join(base_dir, candidate)
+    return os.path.abspath(candidate)
+
+
+def _write_log_to_disk(path: Optional[str], message: str) -> None:
+    if not path:
+        return
+    try:
+        log_dir = os.path.dirname(path)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write(message)
+            if not message.endswith('\n'):
+                f.write('\n')
+    except Exception:
+        pass
 
 
 def should_emit(config_manager, level: str) -> bool:
@@ -90,6 +127,7 @@ def emit(log_callback: Optional[Callable[[str], None]], config_manager, level: s
             pass
 
     formatted = format_log_message(level, message, module=module, func=func, lineno=lineno, exc=exc, extra=extra)
+    _write_log_to_disk(_resolve_log_file_path(config_manager), formatted)
     if log_callback:
         try:
             log_callback(formatted)

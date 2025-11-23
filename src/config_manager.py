@@ -23,7 +23,8 @@ class ConfigManager:
         return {
             "general": {
                 "log_level": "INFO",
-                "prompt_style": "default"  # Options: "default", "nsfw"
+                "prompt_style": "default",  # Options: "default", "nsfw"
+                "log_file": "logs/app.log"
             },
             "llm": {
                 "api_key": "",
@@ -67,9 +68,6 @@ class ConfigManager:
             "rag": {
                 "max_terms": 30,
                 "similarity_threshold": 0.75
-            },
-            "general": {
-                "log_level": "INFO"
             },
             "paths": {
                 "glossary_file": "glossary.json",
