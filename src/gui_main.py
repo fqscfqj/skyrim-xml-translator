@@ -247,7 +247,7 @@ class MainWindow(QMainWindow):
         action_layout = QHBoxLayout()
         # Overwrite existing translations option removed — always overwrite now
         
-        self.start_btn = QPushButton("开始翻译")
+        self.start_btn = QPushButton("翻译全部")
         self.start_btn.clicked.connect(self.start_translation)
         
         self.trans_sel_btn = QPushButton("翻译选中")
