@@ -74,22 +74,44 @@ class XMLProcessor:
         dest_node = string_node.find("Dest")
         if dest_node is None:
             dest_node = etree.SubElement(string_node, "Dest")
-        
+        # Normalize translation to string and guard against None
+        safe_translation = str(translation) if translation is not None else ""
         if not dest_node.text or overwrite:
-            dest_node.text = translation
+            dest_node.text = safe_translation
 
     def save_file(self, output_path=None):
         if output_path is None:
             output_path = self.file_path
         
         if self.tree:
+            cfg = None
             try:
+                try:
+                    cfg = ConfigManager()
+                except Exception:
+                    cfg = None
                 if LXML_AVAILABLE:
                     # lxml supports pretty_print
                     self.tree.write(output_path, encoding="utf-8", xml_declaration=True, pretty_print=True)
                 else:
                     # stdlib ElementTree doesn't support pretty_print argument
                     self.tree.write(output_path, encoding="utf-8", xml_declaration=True)
+                return True
             except TypeError:
                 # Fallback for unexpected implementations
-                self.tree.write(output_path, encoding="utf-8", xml_declaration=True)
+                try:
+                    self.tree.write(output_path, encoding="utf-8", xml_declaration=True)
+                    return True
+                except Exception as e:
+                    try:
+                        log_emit(None, cfg, 'ERROR', f"Error saving XML: {e}", exc=e, module='xml_processor', func='save_file')
+                    except Exception:
+                        pass
+                    return False
+            except Exception as e:
+                try:
+                    log_emit(None, cfg, 'ERROR', f"Error saving XML: {e}", exc=e, module='xml_processor', func='save_file')
+                except Exception:
+                    pass
+                return False
+        return False

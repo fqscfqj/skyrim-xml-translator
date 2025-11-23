@@ -10,8 +10,9 @@ class Translator:
         self.rag_engine = rag_engine
 
     def translate_text(self, text, use_rag=True, log_callback=None):
-        if not text or not text.strip():
-            return text
+        if not text or not str(text).strip():
+            # Normalize empty inputs to empty string
+            return ""
 
         glossary_context = ""
         if use_rag:
@@ -72,7 +73,8 @@ Rules:
                 # Clean potential markdown code blocks
                 clean_response = response.replace("```json", "").replace("```", "").strip()
                 data = json.loads(clean_response)
-                return data.get("translation", text)
+                # Ensure returned translation is a string
+                return str(data.get("translation", text))
             except json.JSONDecodeError:
                 # Fallback if not valid JSON, though prompt asks for it
                 log_emit(self.llm_client.log_callback, self.rag_engine.config, 'WARNING', f"JSON Parse Error. Response: {response}", module='translator', func='translate_text')
@@ -84,7 +86,7 @@ Rules:
                     if m:
                         json_match = m.group(0)
                         data = json.loads(json_match)
-                        return data.get("translation", response.strip())
+                        return str(data.get("translation", response.strip()))
                 except Exception:
                     json_match = None
 
@@ -95,13 +97,13 @@ Rules:
                     clean_followup = followup_response.replace("```json", "").replace("```", "").strip()
                     try:
                         data = json.loads(clean_followup)
-                        return data.get("translation", response.strip())
+                        return str(data.get("translation", response.strip()))
                     except json.JSONDecodeError:
                         log_emit(self.llm_client.log_callback, self.rag_engine.config, 'WARNING', f"Followup JSON Parse Error. Response: {followup_response}", module='translator', func='translate_text')
                 except Exception:
                     # If the followup fails, fall back to raw response
                     pass
-                return response.strip()
+                return str(response.strip())
         except Exception as e:
             log_emit(self.llm_client.log_callback, self.rag_engine.config, 'ERROR', f"Translation failed: {e}", exc=e, module='translator', func='translate_text')
-            return text # Return original on failure
+            return str(text)

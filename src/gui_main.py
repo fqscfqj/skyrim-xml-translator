@@ -32,16 +32,17 @@ class GlossaryWorker(QThread):
         self.num_threads = num_threads
 
     def run(self):
-        if self.mode == 'rebuild':
-            log_emit(self.log.emit, self.rag_engine.config, 'INFO', f"Rebuilding index with {self.num_threads} threads...", module='gui_main', func='GlossaryWorker.run')
-            try:
-                self.rag_engine.build_index(num_threads=self.num_threads, progress_callback=self.progress.emit, log_callback=self.log.emit)
-                log_emit(self.log.emit, self.rag_engine.config, 'INFO', "Index rebuilt successfully.", module='gui_main', func='GlossaryWorker.run')
-            except Exception as e:
-                log_emit(self.log.emit, self.rag_engine.config, 'ERROR', f"Error rebuilding index: {e}", exc=e, module='gui_main', func='GlossaryWorker.run')
+        try:
+            if self.mode == 'rebuild':
+                log_emit(self.log.emit, self.rag_engine.config, 'INFO', f"Rebuilding index with {self.num_threads} threads...", module='gui_main', func='GlossaryWorker.run')
+                try:
+                    self.rag_engine.build_index(num_threads=self.num_threads, progress_callback=self.progress.emit, log_callback=self.log.emit)
+                    log_emit(self.log.emit, self.rag_engine.config, 'INFO', "Index rebuilt successfully.", module='gui_main', func='GlossaryWorker.run')
+                except Exception as e:
+                    log_emit(self.log.emit, self.rag_engine.config, 'ERROR', f"Error rebuilding index: {e}", exc=e, module='gui_main', func='GlossaryWorker.run')
         
-        elif self.mode == 'import':
-            log_emit(self.log.emit, self.rag_engine.config, 'INFO', f"Importing from {self.data}...", module='gui_main', func='GlossaryWorker.run')
+            elif self.mode == 'import':
+                log_emit(self.log.emit, self.rag_engine.config, 'INFO', f"Importing from {self.data}...", module='gui_main', func='GlossaryWorker.run')
             try:
                 # self.data may be None if the caller didn't provide a path; guard against it
                 if not self.data:
@@ -65,7 +66,13 @@ class GlossaryWorker(QThread):
             except Exception as e:
                 log_emit(self.log.emit, self.rag_engine.config, 'ERROR', f"Error importing CSV: {e}", exc=e, module='gui_main', func='GlossaryWorker.run')
         
-        self.finished.emit()
+            self.finished.emit()
+        except Exception as e:
+            log_emit(self.log.emit, self.rag_engine.config, 'ERROR', f"GlossaryWorker error: {e}", exc=e, module='gui_main', func='GlossaryWorker.run')
+            try:
+                self.finished.emit()
+            except Exception:
+                pass
 
     def stop(self):
         self.rag_engine.stop_flag = True
@@ -93,44 +100,54 @@ class Worker(QThread):
         self.is_running = True
 
     def run(self):
-        total = len(self.items_to_process)
-        log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', f"Starting translation for {total} items with {self.num_threads} threads.", module='gui_main', func='Worker.run')
+        try:
+            total = len(self.items_to_process)
+            log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', f"Starting translation for {total} items with {self.num_threads} threads.", module='gui_main', func='Worker.run')
 
-        processed_count = 0
+            processed_count = 0
 
-        def translate_task(item):
-            row_idx, source = item
-            if not self.is_running:
-                return None
-            try:
-                translation = self.translator.translate_text(source, log_callback=self.log.emit)
-                return (row_idx, source, translation)
-            except Exception as e:
-                return (row_idx, source, None, str(e))
-
-        with ThreadPoolExecutor(max_workers=self.num_threads) as executor:
-            futures = {executor.submit(translate_task, item): item for item in self.items_to_process}
-            
-            for future in as_completed(futures):
+            def translate_task(item):
+                row_idx, source = item
                 if not self.is_running:
-                    executor.shutdown(wait=False)
-                    break
-                
-                result = future.result()
-                if result:
-                    if len(result) == 3:
-                        row_idx, source, translation = result
-                        self.result_ready.emit(row_idx, translation)
-                        log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', f"[{processed_count+1}/{total}] {source[:20]}... -> {translation[:20]}...", module='gui_main', func='Worker.run')
-                    else:
-                        row_idx, source, _, error = result
-                        log_emit(self.log.emit, self.translator.rag_engine.config, 'ERROR', f"Error translating {source[:20]}...: {error}", module='gui_main', func='Worker.run')
-                
-                processed_count += 1
-                self.progress.emit(int(processed_count / total * 100))
+                    return None
+                try:
+                    translation = self.translator.translate_text(source, log_callback=self.log.emit)
+                    return (row_idx, source, translation)
+                except Exception as e:
+                    return (row_idx, source, None, str(e))
 
-        log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', "Translation task finished.", module='gui_main', func='Worker.run')
-        self.finished.emit()
+            with ThreadPoolExecutor(max_workers=self.num_threads) as executor:
+                futures = {executor.submit(translate_task, item): item for item in self.items_to_process}
+
+                for future in as_completed(futures):
+                    if not self.is_running:
+                        executor.shutdown(wait=False)
+                        break
+
+                    result = future.result()
+                    if result:
+                        if len(result) == 3:
+                            row_idx, source, translation = result
+                            # Ensure we don't assume translation is str (defensive)
+                            safe_translation = str(translation) if translation is not None else ""
+                            safe_source = str(source) if source is not None else ""
+                            self.result_ready.emit(row_idx, safe_translation)
+                            log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', f"[{processed_count+1}/{total}] {safe_source[:20]}... -> {safe_translation[:20]}...", module='gui_main', func='Worker.run')
+                        else:
+                            row_idx, source, _, error = result
+                            log_emit(self.log.emit, self.translator.rag_engine.config, 'ERROR', f"Error translating {str(source)[:20]}...: {error}", module='gui_main', func='Worker.run')
+
+                    processed_count += 1
+                    self.progress.emit(int(processed_count / total * 100))
+
+                log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', "Translation task finished.", module='gui_main', func='Worker.run')
+                self.finished.emit()
+        except Exception as e:
+            log_emit(self.log.emit, self.translator.rag_engine.config, 'ERROR', f"Worker thread error: {e}", exc=e, module='gui_main', func='Worker.run')
+            try:
+                self.finished.emit()
+            except Exception:
+                pass
 
     def stop(self):
         self.is_running = False
@@ -704,13 +721,21 @@ class MainWindow(QMainWindow):
         if dest_item:
             # Update UI
             self.trans_table.blockSignals(True)
-            dest_item.setText(translation)
+            try:
+                dest_item.setText(translation if translation is not None else "")
+            except Exception as e:
+                # Guard against non-string values passed to setText
+                dest_item.setText(str(translation) if translation is not None else "")
             self.trans_table.blockSignals(False)
             
             # Update XML Node
             node = dest_item.data(Qt.ItemDataRole.UserRole)
             if node is not None:
-                self.xml_processor.update_dest(node, translation, overwrite=True)
+                try:
+                    # Ensure XML node text is a string
+                    self.xml_processor.update_dest(node, str(translation) if translation is not None else "", overwrite=True)
+                except Exception as e:
+                    self.log(f"Error updating XML node for row {row}: {e}")
 
     def on_table_item_changed(self, item):
         # Only care about Dest column (index 2)
