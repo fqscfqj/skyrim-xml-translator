@@ -144,6 +144,10 @@ class MainWindow(QMainWindow):
         self.xml_processor = XMLProcessor()
         self.translator = Translator(self.llm_client, self.rag_engine)
         self.model_param_controls = {}
+        
+        # Pagination state
+        self.current_page = 1
+        self.items_per_page = 200
 
         self.init_ui()
 
@@ -266,9 +270,25 @@ class MainWindow(QMainWindow):
         # List Terms
         self.term_list = QListWidget()
         self.term_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
-        self.refresh_term_list()
+        
         layout.addWidget(QLabel("当前术语表 (支持多选删除):"))
         layout.addWidget(self.term_list)
+
+        # Pagination Controls
+        page_layout = QHBoxLayout()
+        self.prev_btn = QPushButton("上一页")
+        self.prev_btn.clicked.connect(self.prev_page)
+        self.next_btn = QPushButton("下一页")
+        self.next_btn.clicked.connect(self.next_page)
+        self.page_label = QLabel("Page 1 / 1")
+        self.page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        page_layout.addWidget(self.prev_btn)
+        page_layout.addWidget(self.page_label)
+        page_layout.addWidget(self.next_btn)
+        layout.addLayout(page_layout)
+
+        self.refresh_term_list()
 
         # Delete Term
         action_layout = QHBoxLayout()
@@ -378,10 +398,16 @@ class MainWindow(QMainWindow):
         self.embed_key = QLineEdit(self.config_manager.get("embedding", "api_key"))
         self.embed_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.embed_model = QLineEdit(self.config_manager.get("embedding", "model"))
+        
+        self.embed_dim = QSpinBox()
+        self.embed_dim.setRange(1, 8192)
+        self.embed_dim.setValue(self.config_manager.get("embedding", "dimensions", 1536))
+        self.embed_dim.setToolTip("设置 Embedding 模型的向量维度 (例如 OpenAI 为 1536)")
 
         layout.addRow("Base URL:", self.embed_base)
         layout.addRow("API Key:", self.embed_key)
         layout.addRow("Model Name:", self.embed_model)
+        layout.addRow("Dimensions:", self.embed_dim)
 
         layout.addRow(QLabel("<b>多线程设置</b>"))
         self.trans_threads = QSpinBox()
@@ -587,19 +613,49 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'search_input'):
             filter_text = self.search_input.text().lower()
 
-        self.term_list.clear()
+        # Reset to page 1 if searching (optional, but good UX)
+        # But we need to be careful not to reset if just refreshing after delete on same page
+        # For simplicity, let's keep current page unless out of bounds, but if filter changes...
+        # Let's just filter first.
         
-        max_display = 200
-        count = 0
-        
+        all_items = []
         for term, trans in self.rag_engine.glossary.items():
             display_text = f"{term} -> {trans}"
             if not filter_text or filter_text in display_text.lower():
-                self.term_list.addItem(display_text)
-                count += 1
-                if count >= max_display:
-                    self.term_list.addItem("... (Too many items, please search) ...")
-                    break
+                all_items.append(display_text)
+        
+        total_items = len(all_items)
+        total_pages = (total_items + self.items_per_page - 1) // self.items_per_page
+        if total_pages < 1: total_pages = 1
+        
+        if self.current_page > total_pages:
+            self.current_page = total_pages
+        if self.current_page < 1:
+            self.current_page = 1
+            
+        start_idx = (self.current_page - 1) * self.items_per_page
+        end_idx = start_idx + self.items_per_page
+        page_items = all_items[start_idx:end_idx]
+        
+        self.term_list.clear()
+        for item in page_items:
+            self.term_list.addItem(item)
+            
+        self.page_label.setText(f"Page {self.current_page} / {total_pages} (Total: {total_items})")
+        self.prev_btn.setEnabled(self.current_page > 1)
+        self.next_btn.setEnabled(self.current_page < total_pages)
+
+    def prev_page(self):
+        if self.current_page > 1:
+            self.current_page -= 1
+            self.refresh_term_list()
+
+    def next_page(self):
+        # We need to know total pages, so we might need to recalculate or store it.
+        # Recalculating is safer to ensure sync with filter.
+        # But refresh_term_list handles bounds checking, so we can just increment and call it.
+        self.current_page += 1
+        self.refresh_term_list()
 
     def rebuild_index(self):
         self.log("Rebuilding/Updating vector index...")
@@ -650,6 +706,7 @@ class MainWindow(QMainWindow):
         self.config_manager.set("embedding", "base_url", self.embed_base.text())
         self.config_manager.set("embedding", "api_key", self.embed_key.text())
         self.config_manager.set("embedding", "model", self.embed_model.text())
+        self.config_manager.set("embedding", "dimensions", self.embed_dim.value())
         
         self.config_manager.set("threads", "translation", self.trans_threads.value())
         self.config_manager.set("threads", "vectorization", self.vec_threads.value())

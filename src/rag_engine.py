@@ -17,6 +17,8 @@ class RAGEngine:
         self.vector_path = self.config.get("paths", "vector_index_file", "vector_index.npy")
         self.terms_path = os.path.join(os.path.dirname(self.vector_path) if os.path.dirname(self.vector_path) else ".", "terms_index.json")
         
+        self.embed_dim = self.config.get("embedding", "dimensions", 1536)
+
         self.stop_flag = False
         self.pause_flag = False
 
@@ -38,6 +40,10 @@ class RAGEngine:
         if os.path.exists(self.vector_path):
             try:
                 self.vectors = np.load(self.vector_path)
+                # Check dimensions
+                if self.vectors is not None and self.vectors.shape[1] != self.embed_dim:
+                    print(f"Warning: Loaded vectors dimension {self.vectors.shape[1]} does not match config {self.embed_dim}.")
+                    # We don't clear it automatically, but user might experience errors if they try to append.
             except:
                 self.vectors = None
         
