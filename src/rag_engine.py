@@ -405,50 +405,7 @@ class RAGEngine:
 
     def match_terms_regex(self, text, log_callback=None, max_matches_per_term=5):
         """
-        使用正则匹配文本中出现的术语表词汇
-        返回: {term: translation}
+        [Deprecated] Regex/Exact matching is disabled.
+        Returns empty dict.
         """
-        if not self.glossary:
-            return {}
-            
-        found_terms = {}
-        # 简单的遍历匹配，对于超大词表可能需要优化 (例如 Aho-Corasick)
-        # 这里假设词表规模适中
-        # 优先匹配较长的词，避免短词误判 (例如 "Fire" vs "Fireball")
-        sorted_terms = sorted(self.glossary.keys(), key=len, reverse=True)
-        
-        for term in sorted_terms:
-            # 使用正则查找所有匹配项，并记录位置与上下文
-            try:
-                # For ASCII words we might want word boundaries, but for mixed/Chinese text we use exact substring search via regex
-                pattern = re.compile(re.escape(term), flags=re.IGNORECASE)
-                matches_iter = pattern.finditer(text)
-                matches = []
-                for m in matches_iter:
-                    matches.append((m.start(), m.end()))
-                    if len(matches) >= max_matches_per_term:
-                        break
-
-                if matches:
-                    found_terms[term] = self.glossary[term]
-                    # Build a small list of snippets for logging to help debugging
-                    snippets = []
-                    for s, e in matches:
-                        context_start = max(0, s - 20)
-                        context_end = min(len(text), e + 20)
-                        snippet = text[context_start:context_end].replace('\n', '\\n')
-                        snippets.append({'span': (s, e), 'snippet': snippet})
-                    try:
-                        log_emit(log_callback, self.config, 'DEBUG', f"Regex matched term '{term}' count={len(matches)} snippets={snippets}", module='rag_engine', func='match_terms_regex', extra={'term': term, 'matches': matches, 'snippets': snippets})
-                    except Exception:
-                        pass
-            except Exception as e:
-                # If regex failed, fallback to simple containment
-                if term in text:
-                    found_terms[term] = self.glossary[term]
-                    try:
-                        log_emit(log_callback, self.config, 'DEBUG', f"Fallback containment matched term '{term}'", module='rag_engine', func='match_terms_regex', extra={'term': term})
-                    except Exception:
-                        pass
-                
-        return found_terms
+        return {}

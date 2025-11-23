@@ -27,24 +27,14 @@ class Translator:
                 pass
             
             # 2. Search for terms (Vector Search)
-            matched_terms_rag = self.rag_engine.search_terms(keywords, threshold=threshold, log_callback=log_callback)
+            matched_terms = self.rag_engine.search_terms(keywords, threshold=threshold, log_callback=log_callback)
             
-            # 3. Regex Match (Exact Match)
-            matched_terms_regex = self.rag_engine.match_terms_regex(text, log_callback=log_callback)
             try:
-                log_emit(log_callback, self.rag_engine.config, 'DEBUG', f"Regex matched terms: {list(matched_terms_regex.keys())}", module='translator', func='translate_text', extra={'regex_matches': list(matched_terms_regex.keys())})
-            except Exception:
-                pass
-            
-            # Merge results: Regex matches take precedence or supplement RAG?
-            # Usually exact match is more reliable for specific terms.
-            matched_terms = {**matched_terms_rag, **matched_terms_regex}
-            try:
-                log_emit(log_callback, self.rag_engine.config, 'DEBUG', f"RAG matched terms: {list(matched_terms_rag.keys())} | Regex: {list(matched_terms_regex.keys())} | Merged: {list(matched_terms.keys())}", module='translator', func='translate_text', extra={'rag_matches': list(matched_terms_rag.keys()), 'regex_matches': list(matched_terms_regex.keys()), 'merged': list(matched_terms.keys())})
+                log_emit(log_callback, self.rag_engine.config, 'DEBUG', f"RAG matched terms: {list(matched_terms.keys())}", module='translator', func='translate_text', extra={'rag_matches': list(matched_terms.keys())})
             except Exception:
                 pass
 
-            # 4. Construct glossary context (Limit terms)
+            # 3. Construct glossary context (Limit terms)
             if matched_terms:
                 glossary_list = [f"{k} -> {v}" for k, v in matched_terms.items()]
                 if len(glossary_list) > max_terms:
