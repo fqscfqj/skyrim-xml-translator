@@ -287,7 +287,7 @@ class RAGEngine:
         if log_callback:
             log_emit(log_callback, self.config, 'INFO', f"Index update completed. Total terms: {len(self.terms)}", module='rag_engine', func='build_index')
 
-    def extract_keywords(self, text):
+    def extract_keywords(self, text, log_callback=None):
         """使用 LLM 提取文本中的专有名词/实体"""
         prompt = f"""
         Identify all proper nouns, specific terminology, names, places, and unique items in the following text.
@@ -303,12 +303,17 @@ class RAGEngine:
             # 清理 markdown 代码块标记
             response = response.replace("```json", "").replace("```", "").strip()
             keywords = json.loads(response)
+            # Log extracted keywords (debug only)
+            try:
+                log_emit(log_callback, self.config, 'DEBUG', f"Extracted keywords: {keywords}", module='rag_engine', func='extract_keywords', extra={'keywords': keywords})
+            except Exception:
+                pass
             return keywords if isinstance(keywords, list) else []
         except Exception as e:
             log_emit(None, self.config, 'ERROR', f"Keyword extraction failed: {e}", exc=e, module='rag_engine', func='extract_keywords')
             return []
 
-    def search_terms(self, query_list, threshold=0.8, log_callback=None):
+    def search_terms(self, query_list, threshold=0.8, log_callback=None, top_k=3):
         """
         对提取出的关键词列表进行向量检索
         返回: {term: translation}
@@ -316,9 +321,11 @@ class RAGEngine:
         if self.vectors is None or len(self.terms) == 0:
             return {}
 
-        log_level = self.config.get("general", "log_level", "INFO")
-        if log_level == "DEBUG" and log_callback:
-            log_emit(log_callback, self.config, 'DEBUG', f"Searching keywords: {query_list}", module='rag_engine', func='search_terms')
+        # Log that we're starting a vector search for these keywords
+        try:
+            log_emit(log_callback, self.config, 'DEBUG', f"Searching keywords: {query_list}", module='rag_engine', func='search_terms', extra={'query_list_len': len(query_list)})
+        except Exception:
+            pass
 
         results = {}
         for query in query_list:
@@ -329,18 +336,36 @@ class RAGEngine:
                 # 计算相似度
                 similarities = cosine_similarity(query_vec, self.vectors)[0]
                 
+                # Sorted top matches
+                ranked_idx = np.argsort(similarities)[::-1]
+                ranked = [(self.terms[idx], float(similarities[idx])) for idx in ranked_idx[:top_k]]
+
                 # 找到最佳匹配
-                best_idx = np.argmax(similarities)
-                best_score = similarities[best_idx]
-                
+                best_idx = ranked_idx[0]
+                best_score = float(similarities[best_idx])
+                best_term = self.terms[best_idx]
+
+                # Log per-query ranking details
+                try:
+                    log_emit(log_callback, self.config, 'DEBUG', f"Query '{query}' top matches: {ranked}", module='rag_engine', func='search_terms', extra={'query': query, 'top_matches': ranked})
+                except Exception:
+                    pass
+
                 if best_score >= threshold:
-                    matched_term = self.terms[best_idx]
+                    matched_term = best_term
                     results[matched_term] = self.glossary[matched_term]
+                    try:
+                        log_emit(log_callback, self.config, 'DEBUG', f"Query '{query}' matched term '{matched_term}' score={best_score}", module='rag_engine', func='search_terms', extra={'query': query, 'matched_term': matched_term, 'score': best_score})
+                    except Exception:
+                        pass
             except Exception as e:
                 log_emit(None, self.config, 'ERROR', f"Search error for '{query}': {e}", exc=e, module='rag_engine', func='search_terms')
         
-        if log_level == "DEBUG" and log_callback and results:
-            log_emit(log_callback, self.config, 'DEBUG', f"Found terms: {list(results.keys())}", module='rag_engine', func='search_terms')
+        if results and log_callback:
+            try:
+                log_emit(log_callback, self.config, 'DEBUG', f"Found terms: {list(results.keys())}", module='rag_engine', func='search_terms', extra={'found_count': len(results)})
+            except Exception:
+                pass
         
         return results
 
@@ -378,7 +403,7 @@ class RAGEngine:
                 
         return deleted_count
 
-    def match_terms_regex(self, text):
+    def match_terms_regex(self, text, log_callback=None, max_matches_per_term=5):
         """
         使用正则匹配文本中出现的术语表词汇
         返回: {term: translation}
@@ -393,10 +418,37 @@ class RAGEngine:
         sorted_terms = sorted(self.glossary.keys(), key=len, reverse=True)
         
         for term in sorted_terms:
-            # 使用简单的字符串包含检查，速度快
-            # 如果需要更严格的单词边界匹配，可以使用 re.search(r'\b' + re.escape(term) + r'\b', text)
-            # 考虑到中文/英文混合，以及游戏术语的特殊性，直接包含往往更有效，但要注意短词干扰
-            if term in text:
-                found_terms[term] = self.glossary[term]
+            # 使用正则查找所有匹配项，并记录位置与上下文
+            try:
+                # For ASCII words we might want word boundaries, but for mixed/Chinese text we use exact substring search via regex
+                pattern = re.compile(re.escape(term), flags=re.IGNORECASE)
+                matches_iter = pattern.finditer(text)
+                matches = []
+                for m in matches_iter:
+                    matches.append((m.start(), m.end()))
+                    if len(matches) >= max_matches_per_term:
+                        break
+
+                if matches:
+                    found_terms[term] = self.glossary[term]
+                    # Build a small list of snippets for logging to help debugging
+                    snippets = []
+                    for s, e in matches:
+                        context_start = max(0, s - 20)
+                        context_end = min(len(text), e + 20)
+                        snippet = text[context_start:context_end].replace('\n', '\\n')
+                        snippets.append({'span': (s, e), 'snippet': snippet})
+                    try:
+                        log_emit(log_callback, self.config, 'DEBUG', f"Regex matched term '{term}' count={len(matches)} snippets={snippets}", module='rag_engine', func='match_terms_regex', extra={'term': term, 'matches': matches, 'snippets': snippets})
+                    except Exception:
+                        pass
+            except Exception as e:
+                # If regex failed, fallback to simple containment
+                if term in text:
+                    found_terms[term] = self.glossary[term]
+                    try:
+                        log_emit(log_callback, self.config, 'DEBUG', f"Fallback containment matched term '{term}'", module='rag_engine', func='match_terms_regex', extra={'term': term})
+                    except Exception:
+                        pass
                 
         return found_terms

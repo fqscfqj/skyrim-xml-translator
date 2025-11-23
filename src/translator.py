@@ -19,17 +19,30 @@ class Translator:
             max_terms = self.rag_engine.config.get("rag", "max_terms", 30)
 
             # 1. Extract keywords (RAG)
-            keywords = self.rag_engine.extract_keywords(text)
+            keywords = self.rag_engine.extract_keywords(text, log_callback=log_callback)
+            # Log extraction result
+            try:
+                log_emit(log_callback, self.rag_engine.config, 'DEBUG', f"Keywords extracted: {keywords}", module='translator', func='translate_text', extra={'keywords': keywords})
+            except Exception:
+                pass
             
             # 2. Search for terms (Vector Search)
             matched_terms_rag = self.rag_engine.search_terms(keywords, threshold=threshold, log_callback=log_callback)
             
             # 3. Regex Match (Exact Match)
-            matched_terms_regex = self.rag_engine.match_terms_regex(text)
+            matched_terms_regex = self.rag_engine.match_terms_regex(text, log_callback=log_callback)
+            try:
+                log_emit(log_callback, self.rag_engine.config, 'DEBUG', f"Regex matched terms: {list(matched_terms_regex.keys())}", module='translator', func='translate_text', extra={'regex_matches': list(matched_terms_regex.keys())})
+            except Exception:
+                pass
             
             # Merge results: Regex matches take precedence or supplement RAG?
             # Usually exact match is more reliable for specific terms.
             matched_terms = {**matched_terms_rag, **matched_terms_regex}
+            try:
+                log_emit(log_callback, self.rag_engine.config, 'DEBUG', f"RAG matched terms: {list(matched_terms_rag.keys())} | Regex: {list(matched_terms_regex.keys())} | Merged: {list(matched_terms.keys())}", module='translator', func='translate_text', extra={'rag_matches': list(matched_terms_rag.keys()), 'regex_matches': list(matched_terms_regex.keys()), 'merged': list(matched_terms.keys())})
+            except Exception:
+                pass
 
             # 4. Construct glossary context (Limit terms)
             if matched_terms:
