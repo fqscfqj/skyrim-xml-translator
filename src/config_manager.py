@@ -21,6 +21,10 @@ class ConfigManager:
 
     def _get_default_config(self):
         return {
+            "general": {
+                "log_level": "INFO",
+                "prompt_style": "default"  # Options: "default", "nsfw"
+            },
             "llm": {
                 "api_key": "",
                 "base_url": "https://api.openai.com/v1",

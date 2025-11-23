@@ -42,6 +42,7 @@
     }
     ,
     "general": {
-        "log_level": "INFO"
+        "log_level": "INFO",
+        "prompt_style": "default"
     }
 }
