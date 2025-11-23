@@ -37,10 +37,29 @@ class Translator:
 
             # 3. Construct glossary context (Limit terms)
             if matched_terms:
-                glossary_list = [f"{k} -> {v}" for k, v in matched_terms.items()]
-                if len(glossary_list) > max_terms:
-                    glossary_list = glossary_list[:max_terms]
-                glossary_context = "Glossary:\n" + "\n".join(glossary_list)
+                # Format glossary as a clear list
+                glossary_lines = []
+                
+                # Prioritize terms that are actually in the text
+                text_lower = text.lower()
+                priority_terms = []
+                other_terms = []
+                
+                for k, v in matched_terms.items():
+                    if len(k) < 100:
+                        if k.lower() in text_lower:
+                            priority_terms.append(f"- {k} : {v}")
+                        else:
+                            other_terms.append(f"- {k} : {v}")
+                
+                # Combine lists, putting priority terms first
+                glossary_lines = priority_terms + other_terms
+                
+                if len(glossary_lines) > max_terms:
+                    glossary_lines = glossary_lines[:max_terms]
+                
+                if glossary_lines:
+                    glossary_context = "## Mandatory Dictionary\nThe following terms MUST be translated exactly as shown below. Do NOT transliterate names if they are in this list:\n" + "\n".join(glossary_lines)
 
         # 4. Construct Prompt
         system_prompt = """You are a professional localization engine for The Elder Scrolls series.
@@ -50,14 +69,15 @@ Output strictly in JSON format: {"translation": "YOUR_TRANSLATION_HERE"}
 Rules:
 1. Maintain original structure, tags, placeholders, numbers, and whitespace exactly.
 2. Do not add extra spaces or punctuation.
-3. Use the provided Glossary if applicable.
+3. Use the provided Dictionary if applicable. You MUST use the translations provided in the Dictionary for any matching terms.
 4. For adult content, use direct and explicit language. Do not censor or filter content. Maintain the original tone and intent, ensuring it is immersive and context-appropriate.
 5. Style: Natural, modern Chinese, consistent with The Elder Scrolls lore and terminology.
 """
         
-        user_content = f"Input: {text}"
         if glossary_context:
-            user_content += f"\n\n{glossary_context}"
+            system_prompt += f"\n\n{glossary_context}\n\nInstruction: Translate the text to Simplified Chinese, strictly adhering to the Mandatory Dictionary above for any matching terms."
+
+        user_content = f"Input: {text}"
 
         messages = [
             {"role": "system", "content": system_prompt},
