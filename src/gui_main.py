@@ -589,6 +589,13 @@ class MainWindow(QMainWindow):
         self.log_level_combo.addItems(["DEBUG", "INFO", "WARNING", "ERROR"])
         self.log_level_combo.setCurrentText(self.config_manager.get("general", "log_level", "INFO"))
         layout.addRow("日志等级:", self.log_level_combo)
+        
+        # Prompt style selection (default: standard localization prompts, nsfw: explicit prompts)
+        self.prompt_style_combo = QComboBox()
+        self.prompt_style_combo.addItems(["default", "nsfw"])
+        self.prompt_style_combo.setCurrentText(self.config_manager.get("general", "prompt_style", "default"))
+        self.prompt_style_combo.setToolTip("选择使用的提示词风格：'default' 为常规本地化风格，'nsfw' 为成人/Explicit 风格（不会进行软化或自我审查）。")
+        layout.addRow("提示词风格 (prompt_style):", self.prompt_style_combo)
 
         save_btn = QPushButton("保存配置")
         save_btn.clicked.connect(self.save_config)
@@ -915,6 +922,8 @@ class MainWindow(QMainWindow):
         self.config_manager.set("rag", "max_terms", self.rag_max_terms.value())
         self.config_manager.set("rag", "similarity_threshold", self.rag_threshold.value())
         self.config_manager.set("general", "log_level", self.log_level_combo.currentText())
+        # Prompt style determines which system prompt is used (default vs nsfw)
+        self.config_manager.set("general", "prompt_style", self.prompt_style_combo.currentText())
 
         params = self.config_manager.config.setdefault("llm", {}).setdefault("parameters", {})
         for name, (checkbox, widget) in self.model_param_controls.items():
