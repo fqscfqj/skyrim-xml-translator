@@ -1,6 +1,6 @@
 import sys
 import os
-from typing import Optional
+from typing import Optional, cast
 import csv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QTableWidget, QTableWidgetItem, QHeaderView, QSplitter, QDoubleSpinBox,
                              QComboBox, QAbstractSpinBox)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QDragEnterEvent, QDropEvent
 
 from src.config_manager import ConfigManager
 from src.llm_client import LLMClient
@@ -154,14 +155,28 @@ class MainWindow(QMainWindow):
 
         self.init_ui()
 
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.accept()
+    def dragEnterEvent(self, a0: Optional[QDragEnterEvent]) -> None:
+        # Parameter name and Optional handling match the PyQt6 stub signature to satisfy static type checkers
+        if a0 is None:
+            return
+        event_obj = cast(QDragEnterEvent, a0)
+        md = event_obj.mimeData()
+        if md is None:
+            return
+        if md.hasUrls():
+            event_obj.accept()
         else:
-            event.ignore()
+            event_obj.ignore()
 
-    def dropEvent(self, event):
-        files = [u.toLocalFile() for u in event.mimeData().urls()]
+    def dropEvent(self, a0: Optional[QDropEvent]) -> None:
+        # Parameter name and Optional handling match the PyQt6 stub signature to satisfy static type checkers
+        if a0 is None:
+            return
+        event_obj = cast(QDropEvent, a0)
+        md = event_obj.mimeData()
+        if md is None:
+            return
+        files = [u.toLocalFile() for u in md.urls()]
         if files:
             self.file_path_input.setText(files[0])
             self.load_xml_to_table()
