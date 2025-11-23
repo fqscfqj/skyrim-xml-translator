@@ -192,22 +192,19 @@ class MainWindow(QMainWindow):
         browse_btn = QPushButton("浏览")
         browse_btn.clicked.connect(self.browse_file)
         
-        load_btn = QPushButton("加载文件")
-        load_btn.clicked.connect(self.load_xml_to_table)
+        # "加载文件" button removed — file selection will auto-load via browse_file()
 
         save_btn = QPushButton("保存文件")
         save_btn.clicked.connect(self.save_xml_file)
 
         top_layout.addWidget(self.file_path_input)
         top_layout.addWidget(browse_btn)
-        top_layout.addWidget(load_btn)
         top_layout.addWidget(save_btn)
         layout.addLayout(top_layout)
 
         # Options & Actions
         action_layout = QHBoxLayout()
-        self.overwrite_check = QCheckBox("覆盖已有翻译")
-        action_layout.addWidget(self.overwrite_check)
+        # Overwrite existing translations option removed — always overwrite now
         
         self.start_btn = QPushButton("开始翻译")
         self.start_btn.clicked.connect(self.start_translation)
@@ -463,7 +460,7 @@ class MainWindow(QMainWindow):
 
         # Collect items to translate from table
         items_to_process = []
-        overwrite = self.overwrite_check.isChecked()
+        # Always overwrite translations; the option has been removed in UI
         
         for row in range(self.trans_table.rowCount()):
             source_item = self.trans_table.item(row, 1)
@@ -475,8 +472,7 @@ class MainWindow(QMainWindow):
             source_text = source_item.text()
             dest_text = dest_item.text() if dest_item else ""
             
-            if dest_text.strip() and not overwrite:
-                continue
+            # Always overwrite the Dest column contents, so do not skip items
                 
             items_to_process.append((row, source_text))
 

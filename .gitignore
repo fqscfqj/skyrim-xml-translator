@@ -2,6 +2,7 @@
 vector_index.npy
 glossary.json
 config.json
+terms_index.json
 *.xml
 
 # Python artifact ignores
