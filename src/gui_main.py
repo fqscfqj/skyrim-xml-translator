@@ -64,6 +64,18 @@ class GlossaryWorker(QThread):
         
         self.finished.emit()
 
+    def stop(self):
+        self.rag_engine.stop_flag = True
+        self.rag_engine.pause_flag = False
+
+    def pause(self):
+        self.rag_engine.pause_flag = True
+        self.log.emit("Task paused.")
+
+    def resume(self):
+        self.rag_engine.pause_flag = False
+        self.log.emit("Task resumed.")
+
 class Worker(QThread):
     progress = pyqtSignal(int)
     log = pyqtSignal(str)
@@ -270,9 +282,22 @@ class MainWindow(QMainWindow):
         layout.addLayout(action_layout)
 
         # Rebuild Index
-        rebuild_btn = QPushButton("重建向量索引 (耗时操作)")
+        rebuild_layout = QHBoxLayout()
+        rebuild_btn = QPushButton("重建/更新向量索引")
         rebuild_btn.clicked.connect(self.rebuild_index)
-        layout.addWidget(rebuild_btn)
+        
+        self.pause_btn = QPushButton("暂停")
+        self.pause_btn.clicked.connect(self.pause_glossary_task)
+        self.pause_btn.setEnabled(False)
+        
+        self.resume_btn = QPushButton("继续")
+        self.resume_btn.clicked.connect(self.resume_glossary_task)
+        self.resume_btn.setEnabled(False)
+
+        rebuild_layout.addWidget(rebuild_btn)
+        rebuild_layout.addWidget(self.pause_btn)
+        rebuild_layout.addWidget(self.resume_btn)
+        layout.addLayout(rebuild_layout)
         
         # Progress Bar for Glossary Operations
         self.glossary_progress = QProgressBar()
@@ -544,14 +569,18 @@ class MainWindow(QMainWindow):
                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         
         if confirm == QMessageBox.StandardButton.Yes:
+            terms_to_delete = []
             for item in selected_items:
                 # Format is "Term -> Translation"
                 text = item.text()
-                term = text.split(" -> ")[0]
-                self.rag_engine.delete_term(term)
+                if " -> " in text:
+                    term = text.split(" -> ")[0]
+                    terms_to_delete.append(term)
             
-            self.refresh_term_list()
-            self.log(f"Deleted {len(selected_items)} terms.")
+            if terms_to_delete:
+                self.rag_engine.delete_terms_batch(terms_to_delete)
+                self.refresh_term_list()
+                self.log(f"Deleted {len(terms_to_delete)} terms.")
 
     def refresh_term_list(self):
         filter_text = ""
@@ -559,15 +588,26 @@ class MainWindow(QMainWindow):
             filter_text = self.search_input.text().lower()
 
         self.term_list.clear()
+        
+        max_display = 200
+        count = 0
+        
         for term, trans in self.rag_engine.glossary.items():
             display_text = f"{term} -> {trans}"
             if not filter_text or filter_text in display_text.lower():
                 self.term_list.addItem(display_text)
+                count += 1
+                if count >= max_display:
+                    self.term_list.addItem("... (Too many items, please search) ...")
+                    break
 
     def rebuild_index(self):
-        self.log("Rebuilding vector index...")
+        self.log("Rebuilding/Updating vector index...")
         self.glossary_progress.setVisible(True)
         self.glossary_progress.setValue(0)
+        
+        self.pause_btn.setEnabled(True)
+        self.resume_btn.setEnabled(False)
         
         num_threads = self.config_manager.get("threads", "vectorization", 5)
         self.glossary_worker = GlossaryWorker(self.rag_engine, 'rebuild', num_threads=num_threads)
@@ -585,6 +625,9 @@ class MainWindow(QMainWindow):
         self.glossary_progress.setVisible(True)
         self.glossary_progress.setValue(0)
         
+        self.pause_btn.setEnabled(True)
+        self.resume_btn.setEnabled(False)
+        
         num_threads = self.config_manager.get("threads", "vectorization", 5)
         self.glossary_worker = GlossaryWorker(self.rag_engine, 'import', data=fname, num_threads=num_threads)
         self.glossary_worker.log.connect(self.log)
@@ -594,6 +637,8 @@ class MainWindow(QMainWindow):
 
     def on_glossary_task_finished(self):
         self.glossary_progress.setVisible(False)
+        self.pause_btn.setEnabled(False)
+        self.resume_btn.setEnabled(False)
         self.refresh_term_list()
         QMessageBox.information(self, "Success", "Operation completed.")
 
@@ -619,3 +664,15 @@ class MainWindow(QMainWindow):
         self.config_manager.save_config()
         self.llm_client.reload_config()
         QMessageBox.information(self, "Success", "Configuration saved and reloaded.")
+
+    def pause_glossary_task(self):
+        if hasattr(self, 'glossary_worker') and self.glossary_worker.isRunning():
+            self.glossary_worker.pause()
+            self.pause_btn.setEnabled(False)
+            self.resume_btn.setEnabled(True)
+
+    def resume_glossary_task(self):
+        if hasattr(self, 'glossary_worker') and self.glossary_worker.isRunning():
+            self.glossary_worker.resume()
+            self.pause_btn.setEnabled(True)
+            self.resume_btn.setEnabled(False)

@@ -17,6 +17,9 @@ class RAGEngine:
         self.vector_path = self.config.get("paths", "vector_index_file", "vector_index.npy")
         self.terms_path = os.path.join(os.path.dirname(self.vector_path) if os.path.dirname(self.vector_path) else ".", "terms_index.json")
         
+        self.stop_flag = False
+        self.pause_flag = False
+
         self.load_data()
 
     def load_data(self):
@@ -86,6 +89,9 @@ class RAGEngine:
 
     def add_terms_batch(self, terms_dict, num_threads=1, progress_callback=None, log_callback=None):
         """批量添加术语并更新索引 (优化内存占用)"""
+        self.stop_flag = False
+        self.pause_flag = False
+
         # 1. Update glossary
         self.glossary.update(terms_dict)
         self.save_glossary()
@@ -121,6 +127,15 @@ class RAGEngine:
 
         with ThreadPoolExecutor(max_workers=num_threads) as executor:
             for i in range(0, total, batch_size):
+                if self.stop_flag:
+                    if log_callback: log_callback("Vectorization stopped by user.")
+                    break
+                
+                while self.pause_flag:
+                    import time
+                    time.sleep(0.1)
+                    if self.stop_flag: break
+
                 batch_terms_input = new_terms[i : i + batch_size]
                 futures = {executor.submit(embed_task, term): term for term in batch_terms_input}
                 
@@ -128,6 +143,8 @@ class RAGEngine:
                 batch_terms_confirmed = []
                 
                 for future in as_completed(futures):
+                    if self.stop_flag: break
+                    
                     term, vec, error = future.result()
                     processed_count += 1
                     
@@ -167,22 +184,37 @@ class RAGEngine:
             self.save_terms_index()
 
     def build_index(self, num_threads=1, progress_callback=None, log_callback=None):
-        """批量构建所有术语的向量索引 (优化内存占用)"""
+        """批量构建所有术语的向量索引 (支持断点续传)"""
+        self.stop_flag = False
+        self.pause_flag = False
+
         if not self.glossary:
             return
         
-        # Reset internal state
-        self.vectors = None
-        self.terms = []
-        
+        # Identify terms that are NOT yet in the index
         all_terms = list(self.glossary.keys())
-        total = len(all_terms)
+        terms_to_process = []
+        
+        # If we have existing vectors and terms, we only want to process the missing ones
+        # unless we want to force a full rebuild. But "build_index" usually implies ensuring everything is indexed.
+        # Given the user asked for "resume", we should check what's already done.
+        
+        existing_terms_set = set(self.terms)
+        for term in all_terms:
+            if term not in existing_terms_set:
+                terms_to_process.append(term)
+        
+        total = len(terms_to_process)
+        if total == 0:
+            if log_callback:
+                log_callback("All terms are already indexed.")
+            return
+
         processed_count = 0
         batch_size = 50
-        vector_batches = []
         
         if log_callback:
-            log_callback(f"Rebuilding index for {total} terms with {num_threads} threads...")
+            log_callback(f"Building index for {total} missing terms with {num_threads} threads...")
 
         def embed_task(term):
             try:
@@ -191,15 +223,28 @@ class RAGEngine:
             except Exception as e:
                 return term, None, str(e)
 
+        # We will append to existing vectors/terms incrementally
+        
         with ThreadPoolExecutor(max_workers=num_threads) as executor:
             for i in range(0, total, batch_size):
-                batch_terms = all_terms[i : i + batch_size]
+                if self.stop_flag:
+                    if log_callback: log_callback("Index building stopped by user.")
+                    break
+                
+                while self.pause_flag:
+                    import time
+                    time.sleep(0.1)
+                    if self.stop_flag: break
+
+                batch_terms = terms_to_process[i : i + batch_size]
                 futures = {executor.submit(embed_task, term): term for term in batch_terms}
                 
                 batch_vectors = []
                 batch_valid_terms = []
                 
                 for future in as_completed(futures):
+                    if self.stop_flag: break
+
                     term, vec, error = future.result()
                     processed_count += 1
                     
@@ -217,15 +262,22 @@ class RAGEngine:
                     if progress_callback:
                         progress_callback(int(processed_count / total * 100))
                 
+                # Save progress after each batch
                 if batch_vectors:
-                    vector_batches.append(np.vstack(batch_vectors))
+                    new_vectors_np = np.vstack(batch_vectors)
+                    if self.vectors is None:
+                        self.vectors = new_vectors_np
+                    else:
+                        self.vectors = np.vstack([self.vectors, new_vectors_np])
+                    
                     self.terms.extend(batch_valid_terms)
+                    
+                    # Save to disk immediately to support resume later if crashed/stopped
+                    np.save(self.vector_path, self.vectors)
+                    self.save_terms_index()
 
-        if vector_batches:
-            self.vectors = np.vstack(vector_batches)
-            np.save(self.vector_path, self.vectors)
-            self.save_terms_index()
-            print(f"Index built with {len(self.terms)} terms.")
+        if log_callback:
+            log_callback(f"Index update completed. Total terms: {len(self.terms)}")
 
     def extract_keywords(self, text):
         """使用 LLM 提取文本中的专有名词/实体"""
@@ -276,3 +328,37 @@ class RAGEngine:
                 print(f"Search error for '{query}': {e}")
         
         return results
+
+    def delete_terms_batch(self, terms_list):
+        """批量删除术语并更新索引"""
+        deleted_count = 0
+        indices_to_delete = []
+        
+        # 1. Update glossary and collect indices
+        for term in terms_list:
+            if term in self.glossary:
+                del self.glossary[term]
+                deleted_count += 1
+                
+                if term in self.terms:
+                    idx = self.terms.index(term)
+                    indices_to_delete.append(idx)
+        
+        if deleted_count > 0:
+            self.save_glossary()
+            
+            # 2. Update vectors and terms list
+            if indices_to_delete and self.vectors is not None:
+                # Sort indices in descending order to avoid shifting issues when popping
+                indices_to_delete.sort(reverse=True)
+                
+                # Remove from vectors
+                self.vectors = np.delete(self.vectors, indices_to_delete, axis=0)
+                np.save(self.vector_path, self.vectors)
+                
+                # Remove from terms list
+                for idx in indices_to_delete:
+                    self.terms.pop(idx)
+                self.save_terms_index()
+                
+        return deleted_count
