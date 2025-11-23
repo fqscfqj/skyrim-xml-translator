@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import numpy as np
 from src.logging_helper import emit as log_emit
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -376,3 +377,26 @@ class RAGEngine:
                 self.save_terms_index()
                 
         return deleted_count
+
+    def match_terms_regex(self, text):
+        """
+        使用正则匹配文本中出现的术语表词汇
+        返回: {term: translation}
+        """
+        if not self.glossary:
+            return {}
+            
+        found_terms = {}
+        # 简单的遍历匹配，对于超大词表可能需要优化 (例如 Aho-Corasick)
+        # 这里假设词表规模适中
+        # 优先匹配较长的词，避免短词误判 (例如 "Fire" vs "Fireball")
+        sorted_terms = sorted(self.glossary.keys(), key=len, reverse=True)
+        
+        for term in sorted_terms:
+            # 使用简单的字符串包含检查，速度快
+            # 如果需要更严格的单词边界匹配，可以使用 re.search(r'\b' + re.escape(term) + r'\b', text)
+            # 考虑到中文/英文混合，以及游戏术语的特殊性，直接包含往往更有效，但要注意短词干扰
+            if term in text:
+                found_terms[term] = self.glossary[term]
+                
+        return found_terms

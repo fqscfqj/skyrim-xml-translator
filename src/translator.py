@@ -18,13 +18,20 @@ class Translator:
             threshold = self.rag_engine.config.get("rag", "similarity_threshold", 0.75)
             max_terms = self.rag_engine.config.get("rag", "max_terms", 30)
 
-            # 1. Extract keywords
+            # 1. Extract keywords (RAG)
             keywords = self.rag_engine.extract_keywords(text)
             
-            # 2. Search for terms
-            matched_terms = self.rag_engine.search_terms(keywords, threshold=threshold, log_callback=log_callback)
+            # 2. Search for terms (Vector Search)
+            matched_terms_rag = self.rag_engine.search_terms(keywords, threshold=threshold, log_callback=log_callback)
             
-            # 3. Construct glossary context (Limit terms)
+            # 3. Regex Match (Exact Match)
+            matched_terms_regex = self.rag_engine.match_terms_regex(text)
+            
+            # Merge results: Regex matches take precedence or supplement RAG?
+            # Usually exact match is more reliable for specific terms.
+            matched_terms = {**matched_terms_rag, **matched_terms_regex}
+
+            # 4. Construct glossary context (Limit terms)
             if matched_terms:
                 glossary_list = [f"{k} -> {v}" for k, v in matched_terms.items()]
                 if len(glossary_list) > max_terms:
@@ -40,8 +47,8 @@ Rules:
 1. Maintain original structure, tags, placeholders, numbers, and whitespace exactly.
 2. Do not add extra spaces or punctuation.
 3. Use the provided Glossary if applicable.
-4. For adult content, use direct and explicit language.
-5. Style: Natural, modern Chinese, consistent with game lore.
+4. For adult content, use direct and explicit language. Do not censor or filter content. Maintain the original tone and intent, ensuring it is immersive and context-appropriate.
+5. Style: Natural, modern Chinese, consistent with The Elder Scrolls lore and terminology.
 """
         
         user_content = f"Input: {text}"
