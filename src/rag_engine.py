@@ -336,28 +336,53 @@ class RAGEngine:
                 # 计算相似度
                 similarities = cosine_similarity(query_vec, self.vectors)[0]
                 
-                # Sorted top matches
+                # 1. Pure Vector Matches (Semantic)
                 ranked_idx = np.argsort(similarities)[::-1]
-                ranked = [(self.terms[idx], float(similarities[idx])) for idx in ranked_idx[:top_k]]
+                
+                # 2. Containment Matches (Contextual)
+                # Find terms that contain the query string (case-insensitive)
+                # We scan all terms. For 70k terms this is fast enough in Python.
+                query_lower = query.lower()
+                containment_indices = [i for i, t in enumerate(self.terms) if query_lower in t.lower()]
+                
+                # Rank containment matches by their vector similarity to the query
+                # This helps pick the most relevant sentences among those containing the term
+                containment_matches = []
+                if containment_indices:
+                    # Sort containment indices by similarity score (descending)
+                    containment_indices.sort(key=lambda i: similarities[i], reverse=True)
+                    # Take top K containment matches (e.g. top 5)
+                    top_containment_indices = containment_indices[:5]
+                    containment_matches = [(self.terms[i], float(similarities[i])) for i in top_containment_indices]
 
-                # 找到最佳匹配
-                best_idx = ranked_idx[0]
-                best_score = float(similarities[best_idx])
-                best_term = self.terms[best_idx]
-
+                # 3. Combine Results
+                # Get top vector matches
+                vector_matches = [(self.terms[idx], float(similarities[idx])) for idx in ranked_idx[:top_k]]
+                
+                # Merge lists, prioritizing containment if it's a "good enough" match?
+                # Actually, we just want to return them. The threshold applies to vector matches.
+                # For containment matches, we might want a lower threshold or no threshold because the user explicitly wants them.
+                # Let's include containment matches regardless of threshold, or with a lower one?
+                # The user said "System didn't match it".
+                # Let's add them to results.
+                
                 # Log per-query ranking details
                 try:
-                    log_emit(log_callback, self.config, 'DEBUG', f"Query '{query}' top matches: {ranked}", module='rag_engine', func='search_terms', extra={'query': query, 'top_matches': ranked})
+                    log_emit(log_callback, self.config, 'DEBUG', f"Query '{query}' top matches: {vector_matches} | Containment: {containment_matches}", module='rag_engine', func='search_terms', extra={'query': query, 'top_matches': vector_matches, 'containment': containment_matches})
                 except Exception:
                     pass
 
-                if best_score >= threshold:
-                    matched_term = best_term
-                    results[matched_term] = self.glossary[matched_term]
-                    try:
-                        log_emit(log_callback, self.config, 'DEBUG', f"Query '{query}' matched term '{matched_term}' score={best_score}", module='rag_engine', func='search_terms', extra={'query': query, 'matched_term': matched_term, 'score': best_score})
-                    except Exception:
-                        pass
+                # Add vector matches that pass threshold
+                for term, score in vector_matches:
+                    if score >= threshold and term in self.glossary:
+                        results[term] = self.glossary[term]
+
+                # Add containment matches (maybe limit total count?)
+                # We add them even if score is low, because they contain the exact keyword.
+                for term, score in containment_matches:
+                    if term in self.glossary:
+                        results[term] = self.glossary[term]
+
             except Exception as e:
                 log_emit(None, self.config, 'ERROR', f"Search error for '{query}': {e}", exc=e, module='rag_engine', func='search_terms')
         
