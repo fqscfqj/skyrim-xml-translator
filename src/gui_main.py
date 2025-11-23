@@ -1,5 +1,6 @@
 import sys
 import os
+from typing import Optional
 import csv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
@@ -20,11 +21,11 @@ class GlossaryWorker(QThread):
     log = pyqtSignal(str)
     finished = pyqtSignal()
 
-    def __init__(self, rag_engine, mode, data=None, num_threads=1):
+    def __init__(self, rag_engine: RAGEngine, mode: str, data: Optional[str] = None, num_threads: int = 1):
         super().__init__()
         self.rag_engine = rag_engine
         self.mode = mode # 'rebuild' or 'import'
-        self.data = data # file path for import
+        self.data: Optional[str] = data # file path for import
         self.num_threads = num_threads
 
     def run(self):
@@ -39,6 +40,12 @@ class GlossaryWorker(QThread):
         elif self.mode == 'import':
             self.log.emit(f"Importing from {self.data}...")
             try:
+                # self.data may be None if the caller didn't provide a path; guard against it
+                if not self.data:
+                    self.log.emit("No import file specified for glossary import.")
+                    self.finished.emit()
+                    return
+
                 terms = {}
                 with open(self.data, 'r', encoding='utf-8') as f:
                     reader = csv.reader(f)
@@ -201,10 +208,12 @@ class MainWindow(QMainWindow):
         self.trans_table = QTableWidget()
         self.trans_table.setColumnCount(3)
         self.trans_table.setHorizontalHeaderLabels(["ID", "原文 (Source)", "译文 (Dest)"])
-        header = self.trans_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        header: Optional[QHeaderView] = self.trans_table.horizontalHeader()
+        # horizontalHeader() can return None according to type stubs; guard for None to satisfy Pylance
+        if header is not None:
+            header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+            header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.trans_table.itemChanged.connect(self.on_table_item_changed)
         layout.addWidget(self.trans_table)
 
