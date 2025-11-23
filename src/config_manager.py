@@ -32,6 +32,9 @@ class ConfigManager:
                     "presence_penalty": None,
                     "max_tokens": None
                 }
+                ,
+                "max_retries": 3,
+                "backoff_base": 0.5
             },
             "llm_search": {
                 "api_key": "",
@@ -44,6 +47,9 @@ class ConfigManager:
                     "presence_penalty": None,
                     "max_tokens": None
                 }
+                ,
+                "max_retries": 3,
+                "backoff_base": 0.5
             },
             "embedding": {
                 "api_key": "",

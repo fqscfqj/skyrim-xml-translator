@@ -1,4 +1,5 @@
 import json
+import re
 from src.llm_client import LLMClient
 from src.rag_engine import RAGEngine
 from src.logging_helper import emit as log_emit
@@ -74,7 +75,32 @@ Rules:
                 return data.get("translation", text)
             except json.JSONDecodeError:
                 # Fallback if not valid JSON, though prompt asks for it
-                log_emit(self.llm_client.log_callback, self.rag_engine.config, 'ERROR', f"JSON Parse Error. Response: {response}", module='translator', func='translate_text')
+                log_emit(self.llm_client.log_callback, self.rag_engine.config, 'WARNING', f"JSON Parse Error. Response: {response}", module='translator', func='translate_text')
+                # Try to find a JSON substring in the response
+                json_match = None
+                try:
+                    # Find a first-to-last brace substring
+                    m = re.search(r"\{.*\}", response, flags=re.DOTALL)
+                    if m:
+                        json_match = m.group(0)
+                        data = json.loads(json_match)
+                        return data.get("translation", response.strip())
+                except Exception:
+                    json_match = None
+
+                # If we couldn't extract JSON, try asking the LLM once to reformat as JSON
+                try:
+                    followup_msg = messages + [{"role": "user", "content": "Please reformat your previous reply into strict JSON: {\"translation\": \"...\"}. Respond only with JSON."}]
+                    followup_response = self.llm_client.chat_completion(followup_msg)
+                    clean_followup = followup_response.replace("```json", "").replace("```", "").strip()
+                    try:
+                        data = json.loads(clean_followup)
+                        return data.get("translation", response.strip())
+                    except json.JSONDecodeError:
+                        log_emit(self.llm_client.log_callback, self.rag_engine.config, 'WARNING', f"Followup JSON Parse Error. Response: {followup_response}", module='translator', func='translate_text')
+                except Exception:
+                    # If the followup fails, fall back to raw response
+                    pass
                 return response.strip()
         except Exception as e:
             log_emit(self.llm_client.log_callback, self.rag_engine.config, 'ERROR', f"Translation failed: {e}", exc=e, module='translator', func='translate_text')
