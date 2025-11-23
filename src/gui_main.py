@@ -261,6 +261,16 @@ class MainWindow(QMainWindow):
         action_layout.addWidget(self.start_btn)
         action_layout.addWidget(self.trans_sel_btn)
         action_layout.addWidget(self.stop_btn)
+        # Add clear buttons: Clear All translations and Clear Selected translations
+        self.clear_all_btn = QPushButton("清空翻译")
+        self.clear_all_btn.clicked.connect(self.clear_all_translations)
+        self.clear_all_btn.setEnabled(False)
+        action_layout.addWidget(self.clear_all_btn)
+
+        self.clear_sel_btn = QPushButton("清空已选择的翻译")
+        self.clear_sel_btn.clicked.connect(self.clear_selected_translations)
+        self.clear_sel_btn.setEnabled(False)
+        action_layout.addWidget(self.clear_sel_btn)
         layout.addLayout(action_layout)
 
         # Table
@@ -274,6 +284,7 @@ class MainWindow(QMainWindow):
             header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
             header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.trans_table.itemChanged.connect(self.on_table_item_changed)
+        self.trans_table.itemSelectionChanged.connect(self.on_table_selection_changed)
         layout.addWidget(self.trans_table)
 
         # Progress
@@ -662,6 +673,8 @@ class MainWindow(QMainWindow):
 
         self.trans_table.blockSignals(False)
         log_emit(self.log, self.config_manager, 'INFO', f"Loaded {len(strings)} strings.", module='gui_main', func='load_xml_to_table')
+        # Update UI button enabled state
+        self.update_translate_buttons_enabled()
         return True
 
     def save_xml_file(self):
@@ -707,6 +720,18 @@ class MainWindow(QMainWindow):
                 new_text = item.text()
                 self.xml_processor.update_dest(node, new_text, overwrite=True)
                 # self.log(f"Updated translation manually for row {item.row()}")
+        # Update button enabled state (in case manual edit changed content)
+        self.update_translate_buttons_enabled()
+
+    def on_table_selection_changed(self):
+        self.update_translate_buttons_enabled()
+
+    def update_translate_buttons_enabled(self):
+        # Enable/disable clear buttons based on table content/selection
+        has_rows = self.trans_table.rowCount() > 0
+        self.clear_all_btn.setEnabled(has_rows)
+        has_selection = len(self.trans_table.selectedItems()) > 0
+        self.clear_sel_btn.setEnabled(has_selection)
 
     def stop_translation(self):
         if self.worker:
@@ -918,3 +943,63 @@ class MainWindow(QMainWindow):
         self.worker.result_ready.connect(self.update_table_row)
         self.worker.finished.connect(self.on_translation_finished)
         self.worker.start()
+
+    def clear_all_translations(self):
+        # Confirm with user
+        if self.trans_table.rowCount() == 0:
+            QMessageBox.information(self, "Info", "没有可清空的翻译。")
+            return
+
+        confirm = QMessageBox.question(self, "Confirm Clear All", "确定要清空所有译文吗？此操作不可撤销。",
+                           QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        self.trans_table.blockSignals(True)
+        for row in range(self.trans_table.rowCount()):
+            dest_item = self.trans_table.item(row, 2)
+            if dest_item is None:
+                dest_item = QTableWidgetItem("")
+                self.trans_table.setItem(row, 2, dest_item)
+            else:
+                dest_item.setText("")
+            # Update XML Node
+            node = dest_item.data(Qt.ItemDataRole.UserRole)
+            if node is not None:
+                try:
+                    self.xml_processor.update_dest(node, "", overwrite=True)
+                except Exception as e:
+                    self.log(f"Error clearing translation for row {row}: {e}")
+        self.trans_table.blockSignals(False)
+        self.log("Cleared all translations.")
+
+    def clear_selected_translations(self):
+        selected_rows = set()
+        for item in self.trans_table.selectedItems():
+            selected_rows.add(item.row())
+
+        if not selected_rows:
+            QMessageBox.information(self, "Info", "没有选择任何条目。")
+            return
+
+        confirm = QMessageBox.question(self, "Confirm Clear Selected", f"确定要清空 {len(selected_rows)} 个已选择的译文吗？",
+                                       QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        self.trans_table.blockSignals(True)
+        for row in selected_rows:
+            dest_item = self.trans_table.item(row, 2)
+            if dest_item is None:
+                dest_item = QTableWidgetItem("")
+                self.trans_table.setItem(row, 2, dest_item)
+            else:
+                dest_item.setText("")
+            node = dest_item.data(Qt.ItemDataRole.UserRole)
+            if node is not None:
+                try:
+                    self.xml_processor.update_dest(node, "", overwrite=True)
+                except Exception as e:
+                    self.log(f"Error clearing translation for row {row}: {e}")
+        self.trans_table.blockSignals(False)
+        self.log(f"Cleared translations for {len(selected_rows)} selected rows.")

@@ -258,13 +258,13 @@ class RAGEngine:
                     if vec is not None:
                         batch_vectors.append(np.array(vec, dtype=np.float32))
                         batch_valid_terms.append(term)
-                            if log_callback and processed_count % 10 == 0:
-                                log_emit(log_callback, self.config, 'DEBUG', f"Indexed [{processed_count}/{total}]: {term}", module='rag_engine', func='build_index')
+                        if log_callback and processed_count % 10 == 0:
+                            log_emit(log_callback, self.config, 'DEBUG', f"Indexed [{processed_count}/{total}]: {term}", module='rag_engine', func='build_index')
                     else:
                         msg = f"Failed to embed term '{term}': {error}"
-                            log_emit(None, self.config, 'ERROR', msg, module='rag_engine', func='build_index')
-                            if log_callback:
-                                log_emit(log_callback, self.config, 'ERROR', msg, module='rag_engine', func='build_index')
+                        log_emit(None, self.config, 'ERROR', msg, module='rag_engine', func='build_index')
+                        if log_callback:
+                            log_emit(log_callback, self.config, 'ERROR', msg, module='rag_engine', func='build_index')
                     
                     if progress_callback:
                         progress_callback(int(processed_count / total * 100))
