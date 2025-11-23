@@ -11,6 +11,18 @@
             "max_tokens": null
         }
     },
+    "llm_search": {
+        "api_key": "<YOUR_SEARCH_LLM_API_KEY>",
+        "base_url": "https://api.example.com/v1",
+        "model": "gpt-3.5-turbo",
+        "parameters": {
+            "temperature": null,
+            "top_p": null,
+            "frequency_penalty": null,
+            "presence_penalty": null,
+            "max_tokens": null
+        }
+    },
     "embedding": {
         "api_key": "<YOUR_EMBEDDING_API_KEY>",
         "base_url": "https://api.example.com/v1",

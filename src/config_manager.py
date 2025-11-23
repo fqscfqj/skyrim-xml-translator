@@ -32,6 +32,18 @@ class ConfigManager:
                     "max_tokens": None
                 }
             },
+            "llm_search": {
+                "api_key": "",
+                "base_url": "https://api.openai.com/v1",
+                "model": "gpt-3.5-turbo",
+                "parameters": {
+                    "temperature": None,
+                    "top_p": None,
+                    "frequency_penalty": None,
+                    "presence_penalty": None,
+                    "max_tokens": None
+                }
+            },
             "embedding": {
                 "api_key": "",
                 "base_url": "https://api.openai.com/v1",

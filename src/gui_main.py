@@ -144,6 +144,7 @@ class MainWindow(QMainWindow):
         self.xml_processor = XMLProcessor()
         self.translator = Translator(self.llm_client, self.rag_engine)
         self.model_param_controls = {}
+        self.search_param_controls = {}
         
         # Pagination state
         self.current_page = 1
@@ -389,6 +390,70 @@ class MainWindow(QMainWindow):
         token_spin.setSingleStep(16)
         token_spin.setValue(512)
         add_param_control("max_tokens", "启用最大 Tokens (max_tokens)", token_spin)
+
+        # --- Search LLM Settings ---
+        layout.addRow(QLabel("<b>搜索模型设置 (可选 - 用于提取关键词)</b>"))
+        self.search_base = QLineEdit(self.config_manager.get("llm_search", "base_url"))
+        self.search_key = QLineEdit(self.config_manager.get("llm_search", "api_key"))
+        self.search_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.search_model = QLineEdit(self.config_manager.get("llm_search", "model"))
+        
+        layout.addRow("Search Base URL:", self.search_base)
+        layout.addRow("Search API Key:", self.search_key)
+        layout.addRow("Search Model:", self.search_model)
+
+        layout.addRow(QLabel("<b>搜索模型参数 (可选)</b>"))
+        search_params = self.config_manager.get("llm_search", "parameters", {}) or {}
+
+        def add_search_param_control(name, label_text, widget):
+            checkbox = QCheckBox(label_text)
+            widget.setEnabled(False)
+            checkbox.stateChanged.connect(
+                lambda state, w=widget: w.setEnabled(state == Qt.CheckState.Checked)
+            )
+            row_widget = QWidget()
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.addWidget(checkbox)
+            row_layout.addWidget(widget)
+            row_layout.addStretch()
+            layout.addRow(row_widget)
+            self.search_param_controls[name] = (checkbox, widget)
+            stored_value = search_params.get(name)
+            if stored_value is not None:
+                checkbox.setChecked(True)
+                widget.setValue(stored_value)
+
+        s_temp_spin = QDoubleSpinBox()
+        s_temp_spin.setRange(0.0, 2.0)
+        s_temp_spin.setSingleStep(0.05)
+        s_temp_spin.setValue(0.1) # Default low temp for extraction
+        add_search_param_control("temperature", "启用温度 (temperature)", s_temp_spin)
+
+        s_top_p_spin = QDoubleSpinBox()
+        s_top_p_spin.setRange(0.0, 1.0)
+        s_top_p_spin.setSingleStep(0.05)
+        s_top_p_spin.setValue(1.0)
+        add_search_param_control("top_p", "启用 Top-p (top_p)", s_top_p_spin)
+
+        s_freq_spin = QDoubleSpinBox()
+        s_freq_spin.setRange(-2.0, 2.0)
+        s_freq_spin.setSingleStep(0.1)
+        s_freq_spin.setValue(0.0)
+        add_search_param_control("frequency_penalty", "启用频率惩罚 (frequency_penalty)", s_freq_spin)
+
+        s_pres_spin = QDoubleSpinBox()
+        s_pres_spin.setRange(-2.0, 2.0)
+        s_pres_spin.setSingleStep(0.1)
+        s_pres_spin.setValue(0.0)
+        add_search_param_control("presence_penalty", "启用出现惩罚 (presence_penalty)", s_pres_spin)
+
+        s_token_spin = QSpinBox()
+        s_token_spin.setRange(16, 8192)
+        s_token_spin.setSingleStep(16)
+        s_token_spin.setValue(512)
+        add_search_param_control("max_tokens", "启用最大 Tokens (max_tokens)", s_token_spin)
+        # ---------------------------
 
         layout.addRow(QLabel("<b>Embedding 设置</b>"))
         self.embed_base = QLineEdit(self.config_manager.get("embedding", "base_url"))
@@ -699,6 +764,11 @@ class MainWindow(QMainWindow):
         self.config_manager.set("llm", "api_key", self.llm_key.text())
         self.config_manager.set("llm", "model", self.llm_model.text())
         
+        # Save Search LLM Config
+        self.config_manager.set("llm_search", "base_url", self.search_base.text())
+        self.config_manager.set("llm_search", "api_key", self.search_key.text())
+        self.config_manager.set("llm_search", "model", self.search_model.text())
+
         self.config_manager.set("embedding", "base_url", self.embed_base.text())
         self.config_manager.set("embedding", "api_key", self.embed_key.text())
         self.config_manager.set("embedding", "model", self.embed_model.text())
@@ -713,6 +783,10 @@ class MainWindow(QMainWindow):
         params = self.config_manager.config.setdefault("llm", {}).setdefault("parameters", {})
         for name, (checkbox, widget) in self.model_param_controls.items():
             params[name] = widget.value() if checkbox.isChecked() else None
+            
+        search_params = self.config_manager.config.setdefault("llm_search", {}).setdefault("parameters", {})
+        for name, (checkbox, widget) in self.search_param_controls.items():
+            search_params[name] = widget.value() if checkbox.isChecked() else None
         
         self.config_manager.save_config()
         self.llm_client.reload_config()

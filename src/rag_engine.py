@@ -297,7 +297,7 @@ class RAGEngine:
         """
         messages = [{"role": "user", "content": prompt}]
         try:
-            response = self.llm_client.chat_completion(messages, temperature=0.1)
+            response = self.llm_client.chat_completion_search(messages, temperature=0.1)
             # 清理 markdown 代码块标记
             response = response.replace("```json", "").replace("```", "").strip()
             keywords = json.loads(response)
