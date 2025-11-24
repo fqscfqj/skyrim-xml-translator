@@ -4,6 +4,7 @@ glossary.json
 config.json
 terms_index.json
 *.xml
+logs/
 
 # Python artifact ignores
 __pycache__/
