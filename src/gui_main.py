@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QTabWidget, QFileDialog, QCheckBox, QProgressBar, 
                              QListWidget, QMessageBox, QGroupBox, QFormLayout, QSpinBox,
                              QTableWidget, QTableWidgetItem, QHeaderView, QSplitter, QDoubleSpinBox,
-                             QComboBox, QAbstractSpinBox)
+                             QComboBox, QAbstractSpinBox, QScrollArea)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent
 
@@ -400,20 +400,30 @@ class MainWindow(QMainWindow):
         return widget
 
     def create_config_tab(self):
-        widget = QWidget()
-        layout = QFormLayout()
+        container = QWidget()
+        container_layout = QVBoxLayout(container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
 
-        layout.addRow(QLabel(f"<b>{i18n.t('group_llm_settings')}</b>"))
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        form_widget = QWidget()
+        form_layout = QFormLayout(form_widget)
+
+        # Wrap settings in a scroll area so controls remain usable on smaller windows.
+        form_layout.addRow(QLabel(f"<b>{i18n.t('group_llm_settings')}</b>"))
         self.llm_base = QLineEdit(self.config_manager.get("llm", "base_url"))
         self.llm_key = QLineEdit(self.config_manager.get("llm", "api_key"))
         self.llm_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.llm_model = QLineEdit(self.config_manager.get("llm", "model"))
         
-        layout.addRow(i18n.t("label_base_url"), self.llm_base)
-        layout.addRow(i18n.t("label_api_key"), self.llm_key)
-        layout.addRow(i18n.t("label_model_name"), self.llm_model)
+        form_layout.addRow(i18n.t("label_base_url"), self.llm_base)
+        form_layout.addRow(i18n.t("label_api_key"), self.llm_key)
+        form_layout.addRow(i18n.t("label_model_name"), self.llm_model)
 
-        layout.addRow(QLabel(f"<b>{i18n.t('group_llm_params')}</b>"))
+        form_layout.addRow(QLabel(f"<b>{i18n.t('group_llm_params')}</b>"))
         params = self.config_manager.get("llm", "parameters", {}) or {}
 
         def add_param_control(name, label_text, widget):
@@ -428,7 +438,7 @@ class MainWindow(QMainWindow):
             row_layout.addWidget(checkbox)
             row_layout.addWidget(widget)
             row_layout.addStretch()
-            layout.addRow(row_widget)
+            form_layout.addRow(row_widget)
             self.model_param_controls[name] = (checkbox, widget)
             stored_value = params.get(name)
             if stored_value is not None:
@@ -471,17 +481,17 @@ class MainWindow(QMainWindow):
         add_param_control("max_tokens", i18n.t("param_max_tokens"), token_spin)
 
         # --- Search LLM Settings ---
-        layout.addRow(QLabel(f"<b>{i18n.t('group_search_llm_settings')}</b>"))
+        form_layout.addRow(QLabel(f"<b>{i18n.t('group_search_llm_settings')}</b>"))
         self.search_base = QLineEdit(self.config_manager.get("llm_search", "base_url"))
         self.search_key = QLineEdit(self.config_manager.get("llm_search", "api_key"))
         self.search_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.search_model = QLineEdit(self.config_manager.get("llm_search", "model"))
         
-        layout.addRow(i18n.t("label_search_base_url"), self.search_base)
-        layout.addRow(i18n.t("label_search_api_key"), self.search_key)
-        layout.addRow(i18n.t("label_search_model"), self.search_model)
+        form_layout.addRow(i18n.t("label_search_base_url"), self.search_base)
+        form_layout.addRow(i18n.t("label_search_api_key"), self.search_key)
+        form_layout.addRow(i18n.t("label_search_model"), self.search_model)
 
-        layout.addRow(QLabel(f"<b>{i18n.t('group_search_llm_params')}</b>"))
+        form_layout.addRow(QLabel(f"<b>{i18n.t('group_search_llm_params')}</b>"))
         search_params = self.config_manager.get("llm_search", "parameters", {}) or {}
 
         def add_search_param_control(name, label_text, widget):
@@ -496,7 +506,7 @@ class MainWindow(QMainWindow):
             row_layout.addWidget(checkbox)
             row_layout.addWidget(widget)
             row_layout.addStretch()
-            layout.addRow(row_widget)
+            form_layout.addRow(row_widget)
             self.search_param_controls[name] = (checkbox, widget)
             stored_value = search_params.get(name)
             if stored_value is not None:
@@ -539,7 +549,7 @@ class MainWindow(QMainWindow):
         add_search_param_control("max_tokens", i18n.t("param_max_tokens"), s_token_spin)
         # ---------------------------
 
-        layout.addRow(QLabel(f"<b>{i18n.t('group_embedding_settings')}</b>"))
+        form_layout.addRow(QLabel(f"<b>{i18n.t('group_embedding_settings')}</b>"))
         self.embed_base = QLineEdit(self.config_manager.get("embedding", "base_url"))
         self.embed_key = QLineEdit(self.config_manager.get("embedding", "api_key"))
         self.embed_key.setEchoMode(QLineEdit.EchoMode.Password)
@@ -551,12 +561,12 @@ class MainWindow(QMainWindow):
         self.embed_dim.setValue(self.config_manager.get("embedding", "dimensions", 1536))
         self.embed_dim.setToolTip(i18n.t("tooltip_embed_dim"))
 
-        layout.addRow(i18n.t("label_base_url"), self.embed_base)
-        layout.addRow(i18n.t("label_api_key"), self.embed_key)
-        layout.addRow(i18n.t("label_model_name"), self.embed_model)
-        layout.addRow(i18n.t("label_dimensions"), self.embed_dim)
+        form_layout.addRow(i18n.t("label_base_url"), self.embed_base)
+        form_layout.addRow(i18n.t("label_api_key"), self.embed_key)
+        form_layout.addRow(i18n.t("label_model_name"), self.embed_model)
+        form_layout.addRow(i18n.t("label_dimensions"), self.embed_dim)
 
-        layout.addRow(QLabel(f"<b>{i18n.t('group_threads')}</b>"))
+        form_layout.addRow(QLabel(f"<b>{i18n.t('group_threads')}</b>"))
         self.trans_threads = QSpinBox()
         self.trans_threads.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.trans_threads.setRange(1, 99)
@@ -567,10 +577,10 @@ class MainWindow(QMainWindow):
         self.vec_threads.setRange(1, 99)
         self.vec_threads.setValue(self.config_manager.get("threads", "vectorization", 5))
 
-        layout.addRow(i18n.t("label_trans_threads"), self.trans_threads)
-        layout.addRow(i18n.t("label_vec_threads"), self.vec_threads)
+        form_layout.addRow(i18n.t("label_trans_threads"), self.trans_threads)
+        form_layout.addRow(i18n.t("label_vec_threads"), self.vec_threads)
 
-        layout.addRow(QLabel(f"<b>{i18n.t('group_rag_settings')}</b>"))
+        form_layout.addRow(QLabel(f"<b>{i18n.t('group_rag_settings')}</b>"))
         self.rag_max_terms = QSpinBox()
         self.rag_max_terms.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.rag_max_terms.setRange(0, 200)
@@ -582,28 +592,30 @@ class MainWindow(QMainWindow):
         self.rag_threshold.setSingleStep(0.05)
         self.rag_threshold.setValue(self.config_manager.get("rag", "similarity_threshold", 0.75))
 
-        layout.addRow(i18n.t("label_rag_max_terms"), self.rag_max_terms)
-        layout.addRow(i18n.t("label_rag_threshold"), self.rag_threshold)
+        form_layout.addRow(i18n.t("label_rag_max_terms"), self.rag_max_terms)
+        form_layout.addRow(i18n.t("label_rag_threshold"), self.rag_threshold)
 
-        layout.addRow(QLabel(f"<b>{i18n.t('group_system_settings')}</b>"))
+        form_layout.addRow(QLabel(f"<b>{i18n.t('group_system_settings')}</b>"))
         self.log_level_combo = QComboBox()
         self.log_level_combo.addItems(["DEBUG", "INFO", "WARNING", "ERROR"])
         self.log_level_combo.setCurrentText(self.config_manager.get("general", "log_level", "INFO"))
-        layout.addRow(i18n.t("label_log_level"), self.log_level_combo)
+        form_layout.addRow(i18n.t("label_log_level"), self.log_level_combo)
         
         # Prompt style selection (default: standard localization prompts, nsfw: explicit prompts)
         self.prompt_style_combo = QComboBox()
         self.prompt_style_combo.addItems(["default", "nsfw"])
         self.prompt_style_combo.setCurrentText(self.config_manager.get("general", "prompt_style", "default"))
         self.prompt_style_combo.setToolTip(i18n.t("tooltip_prompt_style"))
-        layout.addRow(i18n.t("label_prompt_style"), self.prompt_style_combo)
+        form_layout.addRow(i18n.t("label_prompt_style"), self.prompt_style_combo)
 
         save_btn = QPushButton(i18n.t("btn_save_config"))
         save_btn.clicked.connect(self.save_config)
-        layout.addRow(save_btn)
+        form_layout.addRow(save_btn)
 
-        widget.setLayout(layout)
-        return widget
+        scroll_area.setWidget(form_widget)
+        container_layout.addWidget(scroll_area)
+
+        return container
 
     def browse_file(self):
         fname, _ = QFileDialog.getOpenFileName(self, i18n.t("title_open_xml"), 'e:\\Github\\trx2', "XML files (*.xml)")
