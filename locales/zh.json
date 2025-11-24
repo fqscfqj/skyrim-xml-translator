@@ -68,7 +68,7 @@
     "label_trans_threads": "翻译线程数:",
     "label_vec_threads": "向量化线程数:",
     "group_rag_settings": "RAG 设置",
-    "label_rag_max_terms": "Prompt最大术语数:",
+    "label_rag_max_terms": "每个词汇最大术语数:",
     "label_rag_threshold": "相似度阈值 (0-1):",
     "group_system_settings": "系统设置",
     "label_log_level": "日志等级:",

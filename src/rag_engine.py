@@ -313,7 +313,7 @@ class RAGEngine:
             log_emit(None, self.config, 'ERROR', f"Keyword extraction failed: {e}", exc=e, module='rag_engine', func='extract_keywords')
             return []
 
-    def search_terms(self, query_list, threshold=0.8, log_callback=None, top_k=3):
+    def search_terms(self, query_list, threshold=0.8, log_callback=None, top_k=3, max_terms_per_keyword=None):
         """
         对提取出的关键词列表进行向量检索
         返回: {term: translation}
@@ -328,7 +328,24 @@ class RAGEngine:
             pass
 
         results = {}
+        per_keyword_limit = max_terms_per_keyword if max_terms_per_keyword is not None else None
         for query in query_list:
+            if per_keyword_limit is not None and per_keyword_limit <= 0:
+                continue
+
+            query_selected_terms = []
+
+            def can_add_more():
+                return per_keyword_limit is None or len(query_selected_terms) < per_keyword_limit
+
+            def add_term_if_possible(term):
+                if not can_add_more():
+                    return False
+                if term in self.glossary and term not in query_selected_terms:
+                    query_selected_terms.append(term)
+                    return True
+                return False
+
             try:
                 query_vec = self.llm_client.get_embedding(query)
                 query_vec = np.array(query_vec).reshape(1, -1)
@@ -374,14 +391,21 @@ class RAGEngine:
 
                 # Add vector matches that pass threshold
                 for term, score in vector_matches:
-                    if score >= threshold and term in self.glossary:
-                        results[term] = self.glossary[term]
+                    if score >= threshold:
+                        add_term_if_possible(term)
+                    if not can_add_more():
+                        break
 
                 # Add containment matches (maybe limit total count?)
                 # We add them even if score is low, because they contain the exact keyword.
-                for term, score in containment_matches:
-                    if term in self.glossary:
-                        results[term] = self.glossary[term]
+                if can_add_more():
+                    for term, score in containment_matches:
+                        add_term_if_possible(term)
+                        if not can_add_more():
+                            break
+
+                for term in query_selected_terms:
+                    results[term] = self.glossary[term]
 
             except Exception as e:
                 log_emit(None, self.config, 'ERROR', f"Search error for '{query}': {e}", exc=e, module='rag_engine', func='search_terms')

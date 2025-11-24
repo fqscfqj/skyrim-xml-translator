@@ -18,7 +18,7 @@ class Translator:
         if use_rag:
             # Get RAG settings
             threshold = self.rag_engine.config.get("rag", "similarity_threshold", 0.75)
-            max_terms = self.rag_engine.config.get("rag", "max_terms", 30)
+            max_terms_per_keyword = self.rag_engine.config.get("rag", "max_terms", 30)
 
             # 1. Extract keywords (RAG)
             keywords = self.rag_engine.extract_keywords(text, log_callback=log_callback)
@@ -29,7 +29,12 @@ class Translator:
                 pass
             
             # 2. Search for terms (Vector Search)
-            matched_terms = self.rag_engine.search_terms(keywords, threshold=threshold, log_callback=log_callback)
+            matched_terms = self.rag_engine.search_terms(
+                keywords,
+                threshold=threshold,
+                log_callback=log_callback,
+                max_terms_per_keyword=max_terms_per_keyword,
+            )
             try:
                 log_emit(log_callback, self.rag_engine.config, 'DEBUG', f"RAG matched terms: {list(matched_terms.keys())}", module='translator', func='translate_text', extra={'rag_matches': list(matched_terms.keys())})
             except Exception:
@@ -54,9 +59,6 @@ class Translator:
                 
                 # Combine lists, putting priority terms first
                 glossary_lines = priority_terms + other_terms
-                
-                if len(glossary_lines) > max_terms:
-                    glossary_lines = glossary_lines[:max_terms]
                 
                 if glossary_lines:
                     glossary_context = "## Mandatory Dictionary\nThe following terms MUST be translated exactly as shown below. Do NOT transliterate names if they are in this list:\n" + "\n".join(glossary_lines)
