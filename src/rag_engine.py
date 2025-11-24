@@ -14,6 +14,7 @@ class RAGEngine:
         self.glossary = {} # {term: translation}
         self.vectors = None # numpy array
         self.terms = [] # list of terms corresponding to vectors
+        self._glossary_lookup = {}
         
         self.glossary_path = self.config.get("paths", "glossary_file", "glossary.json")
         self.vector_path = self.config.get("paths", "vector_index_file", "vector_index.npy")
@@ -25,6 +26,15 @@ class RAGEngine:
         self.pause_flag = False
 
         self.load_data()
+
+    def _rebuild_glossary_lookup(self):
+        """Build a lowercase lookup map for instant exact hits."""
+        lookup = {}
+        for term in self.glossary.keys():
+            normalized = term.strip().lower()
+            if normalized and normalized not in lookup:
+                lookup[normalized] = term
+        self._glossary_lookup = lookup
 
     def load_data(self):
         """加载术语表和向量索引"""
@@ -54,6 +64,8 @@ class RAGEngine:
             log_emit(None, self.config, 'WARNING', "Warning: Vector index size mismatch. Rebuilding index is recommended.", module='rag_engine', func='load_data')
             # We don't auto-rebuild here to avoid startup delay, but user should know.
 
+        self._rebuild_glossary_lookup()
+
     def save_glossary(self):
         with open(self.glossary_path, 'w', encoding='utf-8') as f:
             json.dump(self.glossary, f, indent=4, ensure_ascii=False)
@@ -66,6 +78,7 @@ class RAGEngine:
         """添加新术语并更新索引"""
         self.glossary[term] = translation
         self.save_glossary()
+        self._rebuild_glossary_lookup()
         
         try:
             vec = self.llm_client.get_embedding(term)
@@ -86,6 +99,7 @@ class RAGEngine:
         if term in self.glossary:
             del self.glossary[term]
             self.save_glossary()
+            self._rebuild_glossary_lookup()
             
             if term in self.terms:
                 idx = self.terms.index(term)
@@ -103,6 +117,7 @@ class RAGEngine:
         # 1. Update glossary
         self.glossary.update(terms_dict)
         self.save_glossary()
+        self._rebuild_glossary_lookup()
         
         # 2. Identify new terms that need embedding
         new_terms = []
@@ -313,12 +328,13 @@ class RAGEngine:
             log_emit(None, self.config, 'ERROR', f"Keyword extraction failed: {e}", exc=e, module='rag_engine', func='extract_keywords')
             return []
 
-    def search_terms(self, query_list, threshold=0.8, log_callback=None, top_k=3, max_terms_per_keyword=None):
+    def search_terms(self, query_list, threshold=0.8, log_callback=None, top_k=3, max_terms_per_keyword=None, return_debug=False):
         """
         对提取出的关键词列表进行向量检索
         返回: {term: translation}
         """
-        if self.vectors is None or len(self.terms) == 0:
+        vector_ready = self.vectors is not None and len(self.terms) > 0
+        if not vector_ready and not self._glossary_lookup:
             return {}
 
         # Log that we're starting a vector search for these keywords
@@ -328,12 +344,16 @@ class RAGEngine:
             pass
 
         results = {}
+        debug_info = [] if return_debug else None
         per_keyword_limit = max_terms_per_keyword if max_terms_per_keyword is not None else None
         for query in query_list:
             if per_keyword_limit is not None and per_keyword_limit <= 0:
                 continue
 
             query_selected_terms = []
+            query_details = {"query": query, "direct_match": None, "vector_matches": [], "containment_matches": [], "selected_terms": query_selected_terms}
+            if return_debug:
+                debug_info.append(query_details)
 
             def can_add_more():
                 return per_keyword_limit is None or len(query_selected_terms) < per_keyword_limit
@@ -347,34 +367,43 @@ class RAGEngine:
                 return False
 
             try:
-                query_vec = self.llm_client.get_embedding(query)
-                query_vec = np.array(query_vec).reshape(1, -1)
-                
-                # 计算相似度
-                similarities = cosine_similarity(query_vec, self.vectors)[0]
-                
-                # 1. Pure Vector Matches (Semantic)
-                ranked_idx = np.argsort(similarities)[::-1]
-                
-                # 2. Containment Matches (Contextual)
-                # Find terms that contain the query string (case-insensitive)
-                # We scan all terms. For 70k terms this is fast enough in Python.
                 query_lower = query.lower()
-                containment_indices = [i for i, t in enumerate(self.terms) if query_lower in t.lower()]
-                
-                # Rank containment matches by their vector similarity to the query
-                # This helps pick the most relevant sentences among those containing the term
                 containment_matches = []
-                if containment_indices:
-                    # Sort containment indices by similarity score (descending)
-                    containment_indices.sort(key=lambda i: similarities[i], reverse=True)
-                    # Take top 5 containment matches
-                    top_containment_indices = containment_indices[:5]
-                    containment_matches = [(self.terms[i], float(similarities[i])) for i in top_containment_indices]
+                vector_matches = []
+                if vector_ready:
+                    query_vec = self.llm_client.get_embedding(query)
+                    query_vec = np.array(query_vec).reshape(1, -1)
+                    
+                    # 计算相似度
+                    similarities = cosine_similarity(query_vec, self.vectors)[0]
+                    
+                    # 1. Pure Vector Matches (Semantic)
+                    ranked_idx = np.argsort(similarities)[::-1]
+                    
+                    # 2. Containment Matches (Contextual)
+                    # Find terms that contain the query string (case-insensitive)
+                    # We scan all terms. For 70k terms this is fast enough in Python.
+                    containment_indices = [i for i, t in enumerate(self.terms) if query_lower in t.lower()]
+                    
+                    # Rank containment matches by their vector similarity to the query
+                    # This helps pick the most relevant sentences among those containing the term
+                    if containment_indices:
+                        # Sort containment indices by similarity score (descending)
+                        containment_indices.sort(key=lambda i: similarities[i], reverse=True)
+                        # Take top 5 containment matches
+                        top_containment_indices = containment_indices[:5]
+                        containment_matches = [(self.terms[i], float(similarities[i])) for i in top_containment_indices]
 
-                # 3. Combine Results
-                # Get top vector matches
-                vector_matches = [(self.terms[idx], float(similarities[idx])) for idx in ranked_idx[:top_k]]
+                    # 3. Combine Results
+                    # Get top vector matches, skipping indices that exceed the current terms list
+                    vector_matches = []
+                    for idx in ranked_idx[:top_k]:
+                        if idx < len(self.terms):
+                            vector_matches.append((self.terms[idx], float(similarities[idx])))
+
+                if return_debug:
+                    query_details["vector_matches"] = vector_matches
+                    query_details["containment_matches"] = containment_matches
                 
                 # Merge lists, prioritizing containment if it's a "good enough" match?
                 # Actually, we just want to return them. The threshold applies to vector matches.
@@ -389,20 +418,27 @@ class RAGEngine:
                 except Exception:
                     pass
 
-                # Add vector matches that pass threshold
-                for term, score in vector_matches:
-                    if score >= threshold:
-                        add_term_if_possible(term)
-                    if not can_add_more():
-                        break
+                # 0. Exact glossary hit (case-insensitive)
+                normalized_query = query_lower.strip()
+                direct_term = self._glossary_lookup.get(normalized_query)
+                if direct_term:
+                    if add_term_if_possible(direct_term) and return_debug:
+                        query_details["direct_match"] = direct_term
 
-                # Add containment matches (maybe limit total count?)
-                # We add them even if score is low, because they contain the exact keyword.
+                # 1. Containment matches should have priority because they include the literal keyword
                 if can_add_more():
                     for term, score in containment_matches:
                         add_term_if_possible(term)
                         if not can_add_more():
                             break
+
+                # 2. Fill the remaining slots with semantic vector matches
+                if can_add_more():
+                    for term, score in vector_matches:
+                        if score >= threshold:
+                            add_term_if_possible(term)
+                            if not can_add_more():
+                                break
 
                 for term in query_selected_terms:
                     results[term] = self.glossary[term]
@@ -416,6 +452,8 @@ class RAGEngine:
             except Exception:
                 pass
         
+        if return_debug:
+            return results, debug_info
         return results
 
     def delete_terms_batch(self, terms_list):
@@ -435,6 +473,7 @@ class RAGEngine:
         
         if deleted_count > 0:
             self.save_glossary()
+            self._rebuild_glossary_lookup()
             
             # 2. Update vectors and terms list
             if indices_to_delete and self.vectors is not None:
