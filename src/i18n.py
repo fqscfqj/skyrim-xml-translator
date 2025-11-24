@@ -10,7 +10,9 @@ class I18n:
         
         if getattr(sys, 'frozen', False):
             # Running as compiled exe
-            base_path = sys._MEIPASS
+            # Use getattr to avoid direct access to a private attribute (sys._MEIPASS),
+            # which Pylance flags as an unknown attribute on sys.
+            base_path = getattr(sys, '_MEIPASS', os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         else:
             # Running as script
             base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
