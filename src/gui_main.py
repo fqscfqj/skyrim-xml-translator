@@ -18,6 +18,7 @@ from src.rag_engine import RAGEngine
 from src.xml_processor import XMLProcessor
 from src.translator import Translator
 from src.logging_helper import emit as log_emit
+from src.i18n import i18n
 
 class GlossaryWorker(QThread):
     progress = pyqtSignal(int)
@@ -34,19 +35,19 @@ class GlossaryWorker(QThread):
     def run(self):
         try:
             if self.mode == 'rebuild':
-                log_emit(self.log.emit, self.rag_engine.config, 'INFO', f"Rebuilding index with {self.num_threads} threads...", module='gui_main', func='GlossaryWorker.run')
+                log_emit(self.log.emit, self.rag_engine.config, 'INFO', i18n.t("msg_rebuilding_index").format(threads=self.num_threads), module='gui_main', func='GlossaryWorker.run')
                 try:
                     self.rag_engine.build_index(num_threads=self.num_threads, progress_callback=self.progress.emit, log_callback=self.log.emit)
-                    log_emit(self.log.emit, self.rag_engine.config, 'INFO', "Index rebuilt successfully.", module='gui_main', func='GlossaryWorker.run')
+                    log_emit(self.log.emit, self.rag_engine.config, 'INFO', i18n.t("msg_index_rebuilt"), module='gui_main', func='GlossaryWorker.run')
                 except Exception as e:
-                    log_emit(self.log.emit, self.rag_engine.config, 'ERROR', f"Error rebuilding index: {e}", exc=e, module='gui_main', func='GlossaryWorker.run')
+                    log_emit(self.log.emit, self.rag_engine.config, 'ERROR', i18n.t("msg_error_rebuilding").format(error=e), exc=e, module='gui_main', func='GlossaryWorker.run')
         
             elif self.mode == 'import':
-                log_emit(self.log.emit, self.rag_engine.config, 'INFO', f"Importing from {self.data}...", module='gui_main', func='GlossaryWorker.run')
+                log_emit(self.log.emit, self.rag_engine.config, 'INFO', i18n.t("msg_importing").format(path=self.data), module='gui_main', func='GlossaryWorker.run')
             try:
                 # self.data may be None if the caller didn't provide a path; guard against it
                 if not self.data:
-                    log_emit(self.log.emit, self.rag_engine.config, 'WARNING', "No import file specified for glossary import.", module='gui_main', func='GlossaryWorker.run')
+                    log_emit(self.log.emit, self.rag_engine.config, 'WARNING', i18n.t("msg_no_import_file"), module='gui_main', func='GlossaryWorker.run')
                     self.finished.emit()
                     return
 
@@ -58,17 +59,17 @@ class GlossaryWorker(QThread):
                             terms[row[0].strip()] = row[1].strip()
                 
                 if terms:
-                    log_emit(self.log.emit, self.rag_engine.config, 'INFO', f"Found {len(terms)} terms. Processing with {self.num_threads} threads...", module='gui_main', func='GlossaryWorker.run')
+                    log_emit(self.log.emit, self.rag_engine.config, 'INFO', i18n.t("msg_found_terms").format(count=len(terms), threads=self.num_threads), module='gui_main', func='GlossaryWorker.run')
                     self.rag_engine.add_terms_batch(terms, num_threads=self.num_threads, progress_callback=self.progress.emit, log_callback=self.log.emit)
-                    log_emit(self.log.emit, self.rag_engine.config, 'INFO', "Import completed.", module='gui_main', func='GlossaryWorker.run')
+                    log_emit(self.log.emit, self.rag_engine.config, 'INFO', i18n.t("msg_import_completed"), module='gui_main', func='GlossaryWorker.run')
                 else:
-                    log_emit(self.log.emit, self.rag_engine.config, 'WARNING', "No valid terms found in CSV.", module='gui_main', func='GlossaryWorker.run')
+                    log_emit(self.log.emit, self.rag_engine.config, 'WARNING', i18n.t("msg_no_valid_terms"), module='gui_main', func='GlossaryWorker.run')
             except Exception as e:
-                log_emit(self.log.emit, self.rag_engine.config, 'ERROR', f"Error importing CSV: {e}", exc=e, module='gui_main', func='GlossaryWorker.run')
+                log_emit(self.log.emit, self.rag_engine.config, 'ERROR', i18n.t("msg_error_importing").format(error=e), exc=e, module='gui_main', func='GlossaryWorker.run')
         
             self.finished.emit()
         except Exception as e:
-            log_emit(self.log.emit, self.rag_engine.config, 'ERROR', f"GlossaryWorker error: {e}", exc=e, module='gui_main', func='GlossaryWorker.run')
+            log_emit(self.log.emit, self.rag_engine.config, 'ERROR', i18n.t("msg_glossary_worker_error").format(error=e), exc=e, module='gui_main', func='GlossaryWorker.run')
             try:
                 self.finished.emit()
             except Exception:
@@ -80,11 +81,11 @@ class GlossaryWorker(QThread):
 
     def pause(self):
         self.rag_engine.pause_flag = True
-        log_emit(self.log.emit, self.rag_engine.config, 'INFO', "Task paused.", module='gui_main', func='GlossaryWorker.pause')
+        log_emit(self.log.emit, self.rag_engine.config, 'INFO', i18n.t("msg_task_paused"), module='gui_main', func='GlossaryWorker.pause')
 
     def resume(self):
         self.rag_engine.pause_flag = False
-        log_emit(self.log.emit, self.rag_engine.config, 'INFO', "Task resumed.", module='gui_main', func='GlossaryWorker.resume')
+        log_emit(self.log.emit, self.rag_engine.config, 'INFO', i18n.t("msg_task_resumed"), module='gui_main', func='GlossaryWorker.resume')
 
 class Worker(QThread):
     progress = pyqtSignal(int)
@@ -102,7 +103,7 @@ class Worker(QThread):
     def run(self):
         try:
             total = len(self.items_to_process)
-            log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', f"Starting translation for {total} items with {self.num_threads} threads.", module='gui_main', func='Worker.run')
+            log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', i18n.t("msg_starting_translation").format(total=total, threads=self.num_threads), module='gui_main', func='Worker.run')
 
             processed_count = 0
 
@@ -140,10 +141,10 @@ class Worker(QThread):
                     processed_count += 1
                     self.progress.emit(int(processed_count / total * 100))
 
-                log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', "Translation task finished.", module='gui_main', func='Worker.run')
+                log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', i18n.t("msg_translation_finished"), module='gui_main', func='Worker.run')
                 self.finished.emit()
         except Exception as e:
-            log_emit(self.log.emit, self.translator.rag_engine.config, 'ERROR', f"Worker thread error: {e}", exc=e, module='gui_main', func='Worker.run')
+            log_emit(self.log.emit, self.translator.rag_engine.config, 'ERROR', i18n.t("msg_worker_error").format(error=e), exc=e, module='gui_main', func='Worker.run')
             try:
                 self.finished.emit()
             except Exception:
@@ -155,7 +156,7 @@ class Worker(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Skyrim XML Translator Agent")
+        self.setWindowTitle(i18n.t("window_title"))
         self.resize(900, 700)
         self.setAcceptDrops(True)
 
@@ -210,13 +211,13 @@ class MainWindow(QMainWindow):
         # Tabs
         tabs = QTabWidget()
         tabs.setMinimumHeight(150)  # Ensure tabs don't get too small but allow resizing
-        tabs.addTab(self.create_translate_tab(), "翻译任务")
-        tabs.addTab(self.create_glossary_tab(), "术语管理")
-        tabs.addTab(self.create_config_tab(), "设置")
+        tabs.addTab(self.create_translate_tab(), i18n.t("tab_translation"))
+        tabs.addTab(self.create_glossary_tab(), i18n.t("tab_glossary"))
+        tabs.addTab(self.create_config_tab(), i18n.t("tab_settings"))
         splitter.addWidget(tabs)
 
         # Log
-        log_group = QGroupBox("日志")
+        log_group = QGroupBox(i18n.t("group_log"))
         log_group.setMinimumHeight(100)  # Ensure log area can be resized smaller
         log_layout = QVBoxLayout()
         self.log_output = QTextEdit()
@@ -242,16 +243,16 @@ class MainWindow(QMainWindow):
         top_layout = QHBoxLayout()
         
         self.file_path_input = QLineEdit()
-        self.file_path_input.setPlaceholderText("选择 XML 文件...")
-        browse_btn = QPushButton("浏览")
+        self.file_path_input.setPlaceholderText(i18n.t("placeholder_select_xml"))
+        browse_btn = QPushButton(i18n.t("btn_browse"))
         browse_btn.clicked.connect(self.browse_file)
         
         # "加载文件" button removed — file selection will auto-load via browse_file()
 
-        save_btn = QPushButton("保存文件")
+        save_btn = QPushButton(i18n.t("btn_save_file"))
         save_btn.clicked.connect(self.save_xml_file)
         
-        save_as_btn = QPushButton("另存为")
+        save_as_btn = QPushButton(i18n.t("btn_save_as"))
         save_as_btn.clicked.connect(self.save_as_xml_file)
 
         top_layout.addWidget(self.file_path_input)
@@ -264,13 +265,13 @@ class MainWindow(QMainWindow):
         action_layout = QHBoxLayout()
         # Overwrite existing translations option removed — always overwrite now
         
-        self.start_btn = QPushButton("翻译全部")
+        self.start_btn = QPushButton(i18n.t("btn_translate_all"))
         self.start_btn.clicked.connect(self.start_translation)
         
-        self.trans_sel_btn = QPushButton("翻译选中")
+        self.trans_sel_btn = QPushButton(i18n.t("btn_translate_selected"))
         self.trans_sel_btn.clicked.connect(self.translate_selected)
         
-        self.stop_btn = QPushButton("停止")
+        self.stop_btn = QPushButton(i18n.t("btn_stop"))
         self.stop_btn.clicked.connect(self.stop_translation)
         self.stop_btn.setEnabled(False)
         
@@ -279,12 +280,12 @@ class MainWindow(QMainWindow):
         action_layout.addWidget(self.trans_sel_btn)
         action_layout.addWidget(self.stop_btn)
         # Add clear buttons: Clear All translations and Clear Selected translations
-        self.clear_all_btn = QPushButton("清空翻译")
+        self.clear_all_btn = QPushButton(i18n.t("btn_clear_all"))
         self.clear_all_btn.clicked.connect(self.clear_all_translations)
         self.clear_all_btn.setEnabled(False)
         action_layout.addWidget(self.clear_all_btn)
 
-        self.clear_sel_btn = QPushButton("清空已选择的翻译")
+        self.clear_sel_btn = QPushButton(i18n.t("btn_clear_selected"))
         self.clear_sel_btn.clicked.connect(self.clear_selected_translations)
         self.clear_sel_btn.setEnabled(False)
         action_layout.addWidget(self.clear_sel_btn)
@@ -293,7 +294,7 @@ class MainWindow(QMainWindow):
         # Table
         self.trans_table = QTableWidget()
         self.trans_table.setColumnCount(3)
-        self.trans_table.setHorizontalHeaderLabels(["ID", "原文 (Source)", "译文 (Dest)"])
+        self.trans_table.setHorizontalHeaderLabels([i18n.t("header_id"), i18n.t("header_source"), i18n.t("header_dest")])
         header: Optional[QHeaderView] = self.trans_table.horizontalHeader()
         # horizontalHeader() can return None according to type stubs; guard for None to satisfy Pylance
         if header is not None:
@@ -316,15 +317,15 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout()
 
         # Add Term
-        add_group = QGroupBox("添加新术语")
+        add_group = QGroupBox(i18n.t("group_add_term"))
         add_layout = QFormLayout()
         self.term_source = QLineEdit()
         self.term_dest = QLineEdit()
-        add_btn = QPushButton("添加并保存")
+        add_btn = QPushButton(i18n.t("btn_add_save"))
         add_btn.clicked.connect(self.add_term)
         
-        add_layout.addRow("原文 (Source):", self.term_source)
-        add_layout.addRow("译文 (Dest):", self.term_dest)
+        add_layout.addRow(i18n.t("label_source"), self.term_source)
+        add_layout.addRow(i18n.t("label_dest"), self.term_dest)
         add_layout.addRow(add_btn)
         add_group.setLayout(add_layout)
         layout.addWidget(add_group)
@@ -332,9 +333,9 @@ class MainWindow(QMainWindow):
         # Search Term
         search_layout = QHBoxLayout()
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("搜索术语...")
+        self.search_input.setPlaceholderText(i18n.t("placeholder_search_term"))
         self.search_input.textChanged.connect(self.refresh_term_list)
-        search_layout.addWidget(QLabel("搜索:"))
+        search_layout.addWidget(QLabel(i18n.t("label_search")))
         search_layout.addWidget(self.search_input)
         layout.addLayout(search_layout)
 
@@ -342,14 +343,14 @@ class MainWindow(QMainWindow):
         self.term_list = QListWidget()
         self.term_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         
-        layout.addWidget(QLabel("当前术语表 (支持多选删除):"))
+        layout.addWidget(QLabel(i18n.t("label_current_glossary")))
         layout.addWidget(self.term_list)
 
         # Pagination Controls
         page_layout = QHBoxLayout()
-        self.prev_btn = QPushButton("上一页")
+        self.prev_btn = QPushButton(i18n.t("btn_prev_page"))
         self.prev_btn.clicked.connect(self.prev_page)
-        self.next_btn = QPushButton("下一页")
+        self.next_btn = QPushButton(i18n.t("btn_next_page"))
         self.next_btn.clicked.connect(self.next_page)
         self.page_label = QLabel("Page 1 / 1")
         self.page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -363,25 +364,25 @@ class MainWindow(QMainWindow):
 
         # Delete Term
         action_layout = QHBoxLayout()
-        delete_btn = QPushButton("删除选中术语")
+        delete_btn = QPushButton(i18n.t("btn_delete_selected"))
         delete_btn.clicked.connect(self.delete_selected_terms)
         action_layout.addWidget(delete_btn)
         
-        import_btn = QPushButton("导入 CSV")
+        import_btn = QPushButton(i18n.t("btn_import_csv"))
         import_btn.clicked.connect(self.import_csv)
         action_layout.addWidget(import_btn)
         layout.addLayout(action_layout)
 
         # Rebuild Index
         rebuild_layout = QHBoxLayout()
-        rebuild_btn = QPushButton("重建/更新向量索引")
+        rebuild_btn = QPushButton(i18n.t("btn_rebuild_index"))
         rebuild_btn.clicked.connect(self.rebuild_index)
         
-        self.pause_btn = QPushButton("暂停")
+        self.pause_btn = QPushButton(i18n.t("btn_pause"))
         self.pause_btn.clicked.connect(self.pause_glossary_task)
         self.pause_btn.setEnabled(False)
         
-        self.resume_btn = QPushButton("继续")
+        self.resume_btn = QPushButton(i18n.t("btn_resume"))
         self.resume_btn.clicked.connect(self.resume_glossary_task)
         self.resume_btn.setEnabled(False)
 
@@ -402,17 +403,17 @@ class MainWindow(QMainWindow):
         widget = QWidget()
         layout = QFormLayout()
 
-        layout.addRow(QLabel("<b>LLM 设置</b>"))
+        layout.addRow(QLabel(f"<b>{i18n.t('group_llm_settings')}</b>"))
         self.llm_base = QLineEdit(self.config_manager.get("llm", "base_url"))
         self.llm_key = QLineEdit(self.config_manager.get("llm", "api_key"))
         self.llm_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.llm_model = QLineEdit(self.config_manager.get("llm", "model"))
         
-        layout.addRow("Base URL:", self.llm_base)
-        layout.addRow("API Key:", self.llm_key)
-        layout.addRow("Model Name:", self.llm_model)
+        layout.addRow(i18n.t("label_base_url"), self.llm_base)
+        layout.addRow(i18n.t("label_api_key"), self.llm_key)
+        layout.addRow(i18n.t("label_model_name"), self.llm_model)
 
-        layout.addRow(QLabel("<b>LLM 参数 (可选)</b>"))
+        layout.addRow(QLabel(f"<b>{i18n.t('group_llm_params')}</b>"))
         params = self.config_manager.get("llm", "parameters", {}) or {}
 
         def add_param_control(name, label_text, widget):
@@ -439,48 +440,48 @@ class MainWindow(QMainWindow):
         temp_spin.setRange(0.0, 2.0)
         temp_spin.setSingleStep(0.05)
         temp_spin.setValue(0.3)
-        add_param_control("temperature", "启用温度 (temperature)", temp_spin)
+        add_param_control("temperature", i18n.t("param_temperature"), temp_spin)
 
         top_p_spin = QDoubleSpinBox()
         top_p_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         top_p_spin.setRange(0.0, 1.0)
         top_p_spin.setSingleStep(0.05)
         top_p_spin.setValue(1.0)
-        add_param_control("top_p", "启用 Top-p (top_p)", top_p_spin)
+        add_param_control("top_p", i18n.t("param_top_p"), top_p_spin)
 
         freq_spin = QDoubleSpinBox()
         freq_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         freq_spin.setRange(-2.0, 2.0)
         freq_spin.setSingleStep(0.1)
         freq_spin.setValue(0.0)
-        add_param_control("frequency_penalty", "启用频率惩罚 (frequency_penalty)", freq_spin)
+        add_param_control("frequency_penalty", i18n.t("param_freq_penalty"), freq_spin)
 
         pres_spin = QDoubleSpinBox()
         pres_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         pres_spin.setRange(-2.0, 2.0)
         pres_spin.setSingleStep(0.1)
         pres_spin.setValue(0.0)
-        add_param_control("presence_penalty", "启用出现惩罚 (presence_penalty)", pres_spin)
+        add_param_control("presence_penalty", i18n.t("param_pres_penalty"), pres_spin)
 
         token_spin = QSpinBox()
         token_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         token_spin.setRange(16, 8192)
         token_spin.setSingleStep(16)
         token_spin.setValue(512)
-        add_param_control("max_tokens", "启用最大 Tokens (max_tokens)", token_spin)
+        add_param_control("max_tokens", i18n.t("param_max_tokens"), token_spin)
 
         # --- Search LLM Settings ---
-        layout.addRow(QLabel("<b>搜索模型设置 (可选 - 用于提取关键词)</b>"))
+        layout.addRow(QLabel(f"<b>{i18n.t('group_search_llm_settings')}</b>"))
         self.search_base = QLineEdit(self.config_manager.get("llm_search", "base_url"))
         self.search_key = QLineEdit(self.config_manager.get("llm_search", "api_key"))
         self.search_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.search_model = QLineEdit(self.config_manager.get("llm_search", "model"))
         
-        layout.addRow("Search Base URL:", self.search_base)
-        layout.addRow("Search API Key:", self.search_key)
-        layout.addRow("Search Model:", self.search_model)
+        layout.addRow(i18n.t("label_search_base_url"), self.search_base)
+        layout.addRow(i18n.t("label_search_api_key"), self.search_key)
+        layout.addRow(i18n.t("label_search_model"), self.search_model)
 
-        layout.addRow(QLabel("<b>搜索模型参数 (可选)</b>"))
+        layout.addRow(QLabel(f"<b>{i18n.t('group_search_llm_params')}</b>"))
         search_params = self.config_manager.get("llm_search", "parameters", {}) or {}
 
         def add_search_param_control(name, label_text, widget):
@@ -507,38 +508,38 @@ class MainWindow(QMainWindow):
         s_temp_spin.setRange(0.0, 2.0)
         s_temp_spin.setSingleStep(0.05)
         s_temp_spin.setValue(0.1) # Default low temp for extraction
-        add_search_param_control("temperature", "启用温度 (temperature)", s_temp_spin)
+        add_search_param_control("temperature", i18n.t("param_temperature"), s_temp_spin)
 
         s_top_p_spin = QDoubleSpinBox()
         s_top_p_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         s_top_p_spin.setRange(0.0, 1.0)
         s_top_p_spin.setSingleStep(0.05)
         s_top_p_spin.setValue(1.0)
-        add_search_param_control("top_p", "启用 Top-p (top_p)", s_top_p_spin)
+        add_search_param_control("top_p", i18n.t("param_top_p"), s_top_p_spin)
 
         s_freq_spin = QDoubleSpinBox()
         s_freq_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         s_freq_spin.setRange(-2.0, 2.0)
         s_freq_spin.setSingleStep(0.1)
         s_freq_spin.setValue(0.0)
-        add_search_param_control("frequency_penalty", "启用频率惩罚 (frequency_penalty)", s_freq_spin)
+        add_search_param_control("frequency_penalty", i18n.t("param_freq_penalty"), s_freq_spin)
 
         s_pres_spin = QDoubleSpinBox()
         s_pres_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         s_pres_spin.setRange(-2.0, 2.0)
         s_pres_spin.setSingleStep(0.1)
         s_pres_spin.setValue(0.0)
-        add_search_param_control("presence_penalty", "启用出现惩罚 (presence_penalty)", s_pres_spin)
+        add_search_param_control("presence_penalty", i18n.t("param_pres_penalty"), s_pres_spin)
 
         s_token_spin = QSpinBox()
         s_token_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         s_token_spin.setRange(16, 8192)
         s_token_spin.setSingleStep(16)
         s_token_spin.setValue(512)
-        add_search_param_control("max_tokens", "启用最大 Tokens (max_tokens)", s_token_spin)
+        add_search_param_control("max_tokens", i18n.t("param_max_tokens"), s_token_spin)
         # ---------------------------
 
-        layout.addRow(QLabel("<b>Embedding 设置</b>"))
+        layout.addRow(QLabel(f"<b>{i18n.t('group_embedding_settings')}</b>"))
         self.embed_base = QLineEdit(self.config_manager.get("embedding", "base_url"))
         self.embed_key = QLineEdit(self.config_manager.get("embedding", "api_key"))
         self.embed_key.setEchoMode(QLineEdit.EchoMode.Password)
@@ -548,14 +549,14 @@ class MainWindow(QMainWindow):
         self.embed_dim.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.embed_dim.setRange(1, 8192)
         self.embed_dim.setValue(self.config_manager.get("embedding", "dimensions", 1536))
-        self.embed_dim.setToolTip("设置 Embedding 模型的向量维度 (例如 OpenAI 为 1536)")
+        self.embed_dim.setToolTip(i18n.t("tooltip_embed_dim"))
 
-        layout.addRow("Base URL:", self.embed_base)
-        layout.addRow("API Key:", self.embed_key)
-        layout.addRow("Model Name:", self.embed_model)
-        layout.addRow("Dimensions:", self.embed_dim)
+        layout.addRow(i18n.t("label_base_url"), self.embed_base)
+        layout.addRow(i18n.t("label_api_key"), self.embed_key)
+        layout.addRow(i18n.t("label_model_name"), self.embed_model)
+        layout.addRow(i18n.t("label_dimensions"), self.embed_dim)
 
-        layout.addRow(QLabel("<b>多线程设置</b>"))
+        layout.addRow(QLabel(f"<b>{i18n.t('group_threads')}</b>"))
         self.trans_threads = QSpinBox()
         self.trans_threads.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.trans_threads.setRange(1, 99)
@@ -566,10 +567,10 @@ class MainWindow(QMainWindow):
         self.vec_threads.setRange(1, 99)
         self.vec_threads.setValue(self.config_manager.get("threads", "vectorization", 5))
 
-        layout.addRow("翻译线程数:", self.trans_threads)
-        layout.addRow("向量化线程数:", self.vec_threads)
+        layout.addRow(i18n.t("label_trans_threads"), self.trans_threads)
+        layout.addRow(i18n.t("label_vec_threads"), self.vec_threads)
 
-        layout.addRow(QLabel("<b>RAG 设置</b>"))
+        layout.addRow(QLabel(f"<b>{i18n.t('group_rag_settings')}</b>"))
         self.rag_max_terms = QSpinBox()
         self.rag_max_terms.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.rag_max_terms.setRange(0, 200)
@@ -581,23 +582,23 @@ class MainWindow(QMainWindow):
         self.rag_threshold.setSingleStep(0.05)
         self.rag_threshold.setValue(self.config_manager.get("rag", "similarity_threshold", 0.75))
 
-        layout.addRow("Prompt最大术语数:", self.rag_max_terms)
-        layout.addRow("相似度阈值 (0-1):", self.rag_threshold)
+        layout.addRow(i18n.t("label_rag_max_terms"), self.rag_max_terms)
+        layout.addRow(i18n.t("label_rag_threshold"), self.rag_threshold)
 
-        layout.addRow(QLabel("<b>系统设置</b>"))
+        layout.addRow(QLabel(f"<b>{i18n.t('group_system_settings')}</b>"))
         self.log_level_combo = QComboBox()
         self.log_level_combo.addItems(["DEBUG", "INFO", "WARNING", "ERROR"])
         self.log_level_combo.setCurrentText(self.config_manager.get("general", "log_level", "INFO"))
-        layout.addRow("日志等级:", self.log_level_combo)
+        layout.addRow(i18n.t("label_log_level"), self.log_level_combo)
         
         # Prompt style selection (default: standard localization prompts, nsfw: explicit prompts)
         self.prompt_style_combo = QComboBox()
         self.prompt_style_combo.addItems(["default", "nsfw"])
         self.prompt_style_combo.setCurrentText(self.config_manager.get("general", "prompt_style", "default"))
-        self.prompt_style_combo.setToolTip("选择使用的提示词风格：'default' 为常规本地化风格，'nsfw' 为成人/Explicit 风格（不会进行软化或自我审查）。")
-        layout.addRow("提示词风格 (prompt_style):", self.prompt_style_combo)
+        self.prompt_style_combo.setToolTip(i18n.t("tooltip_prompt_style"))
+        layout.addRow(i18n.t("label_prompt_style"), self.prompt_style_combo)
 
-        save_btn = QPushButton("保存配置")
+        save_btn = QPushButton(i18n.t("btn_save_config"))
         save_btn.clicked.connect(self.save_config)
         layout.addRow(save_btn)
 
@@ -605,7 +606,7 @@ class MainWindow(QMainWindow):
         return widget
 
     def browse_file(self):
-        fname, _ = QFileDialog.getOpenFileName(self, 'Open XML file', 'e:\\Github\\trx2', "XML files (*.xml)")
+        fname, _ = QFileDialog.getOpenFileName(self, i18n.t("title_open_xml"), 'e:\\Github\\trx2', "XML files (*.xml)")
         if fname:
             self.file_path_input.setText(fname)
             self.load_xml_to_table()
@@ -628,7 +629,7 @@ class MainWindow(QMainWindow):
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.progress_bar.setValue(0)
-        log_emit(self.log, self.config_manager, 'INFO', "Starting translation task...", module='gui_main', func='start_translation')
+        log_emit(self.log, self.config_manager, 'INFO', i18n.t("msg_starting_translation_task"), module='gui_main', func='start_translation')
 
         # Collect items to translate from table
         items_to_process = []
@@ -649,7 +650,7 @@ class MainWindow(QMainWindow):
             items_to_process.append((row, source_text))
 
         if not items_to_process:
-            log_emit(self.log, self.config_manager, 'WARNING', "Nothing to translate.", module='gui_main', func='start_translation')
+            log_emit(self.log, self.config_manager, 'WARNING', i18n.t("msg_nothing_to_translate"), module='gui_main', func='start_translation')
             self.on_translation_finished()
             return
 
@@ -664,12 +665,12 @@ class MainWindow(QMainWindow):
     def load_xml_to_table(self):
         file_path = self.file_path_input.text()
         if not os.path.exists(file_path):
-            QMessageBox.warning(self, "Error", "File not found!")
+            QMessageBox.warning(self, i18n.t("title_error"), i18n.t("msg_file_not_found"))
             return False
 
-        self.log(f"Loading file: {file_path}")
+        self.log(i18n.t("msg_loading_file").format(path=file_path))
         if not self.xml_processor.load_file(file_path):
-            self.log("Failed to load XML file.")
+            self.log(i18n.t("msg_failed_load_xml"))
             return False
 
         self.trans_table.setRowCount(0)
@@ -696,32 +697,32 @@ class MainWindow(QMainWindow):
             self.trans_table.setItem(i, 2, dest_item)
 
         self.trans_table.blockSignals(False)
-        log_emit(self.log, self.config_manager, 'INFO', f"Loaded {len(strings)} strings.", module='gui_main', func='load_xml_to_table')
+        log_emit(self.log, self.config_manager, 'INFO', i18n.t("msg_loaded_strings").format(count=len(strings)), module='gui_main', func='load_xml_to_table')
         # Update UI button enabled state
         self.update_translate_buttons_enabled()
         return True
 
     def save_xml_file(self):
-        self.log("Saving file...")
+        self.log(i18n.t("msg_saving_file"))
         try:
             self.xml_processor.save_file()
-            self.log("File saved successfully.")
-            QMessageBox.information(self, "Success", "File saved.")
+            self.log(i18n.t("msg_file_saved"))
+            QMessageBox.information(self, i18n.t("title_success"), i18n.t("msg_file_saved_short"))
         except Exception as e:
-            self.log(f"Error saving file: {e}")
-            QMessageBox.critical(self, "Error", f"Failed to save: {e}")
+            self.log(i18n.t("msg_error_saving").format(error=e))
+            QMessageBox.critical(self, i18n.t("title_error"), i18n.t("msg_failed_save").format(error=e))
 
     def save_as_xml_file(self):
-        fname, _ = QFileDialog.getSaveFileName(self, 'Save XML file', '', "XML files (*.xml)")
+        fname, _ = QFileDialog.getSaveFileName(self, i18n.t("title_save_xml"), '', "XML files (*.xml)")
         if fname:
-            self.log(f"Saving as: {fname}")
+            self.log(i18n.t("msg_saving_as").format(path=fname))
             try:
                 self.xml_processor.save_file(fname)
-                self.log("File saved successfully.")
-                QMessageBox.information(self, "Success", "File saved.")
+                self.log(i18n.t("msg_file_saved"))
+                QMessageBox.information(self, i18n.t("title_success"), i18n.t("msg_file_saved_short"))
             except Exception as e:
-                self.log(f"Error saving file: {e}")
-                QMessageBox.critical(self, "Error", f"Failed to save: {e}")
+                self.log(i18n.t("msg_error_saving").format(error=e))
+                QMessageBox.critical(self, i18n.t("title_error"), i18n.t("msg_failed_save").format(error=e))
 
     def update_table_row(self, row, translation):
         dest_item = self.trans_table.item(row, 2)
@@ -768,13 +769,13 @@ class MainWindow(QMainWindow):
     def stop_translation(self):
         if self.worker:
             self.worker.stop()
-            self.log("Stopping...")
+            self.log(i18n.t("msg_stopping"))
 
     def on_translation_finished(self):
         self.start_btn.setEnabled(True)
         self.trans_sel_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
-        self.log("Task finished.")
+        self.log(i18n.t("msg_task_finished"))
 
     def add_term(self):
         source = self.term_source.text().strip()
@@ -784,17 +785,17 @@ class MainWindow(QMainWindow):
             self.term_source.clear()
             self.term_dest.clear()
             self.refresh_term_list()
-            self.log(f"Added term: {source} -> {dest}")
+            self.log(i18n.t("msg_added_term").format(source=source, dest=dest))
         else:
-            QMessageBox.warning(self, "Error", "Source and Dest cannot be empty.")
+            QMessageBox.warning(self, i18n.t("title_error"), i18n.t("msg_empty_source_dest"))
 
     def delete_selected_terms(self):
         selected_items = self.term_list.selectedItems()
         if not selected_items:
             return
         
-        confirm = QMessageBox.question(self, "Confirm Delete", 
-                                     f"Are you sure you want to delete {len(selected_items)} terms?",
+        confirm = QMessageBox.question(self, i18n.t("title_confirm_delete"), 
+                                     i18n.t("msg_confirm_delete_terms").format(count=len(selected_items)),
                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         
         if confirm == QMessageBox.StandardButton.Yes:
