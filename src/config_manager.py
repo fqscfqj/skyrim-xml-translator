@@ -24,6 +24,7 @@ class ConfigManager:
             "general": {
                 "log_level": "INFO",
                 "prompt_style": "default",  # Options: "default", "nsfw"
+                "language": "auto",
                 "log_file": "logs/app.log"
             },
             "llm": {

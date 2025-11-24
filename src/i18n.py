@@ -19,27 +19,32 @@ class I18n:
         self.load_language()
 
     def load_language(self, lang_code=None):
-        if lang_code is None:
-            # Detect system language
+        # Treat None or explicit "auto" as system language detection
+        if not lang_code or lang_code == 'auto':
             sys_lang = locale.getdefaultlocale()[0]
             if sys_lang and sys_lang.startswith('zh'):
                 lang_code = 'zh'
             else:
                 lang_code = 'en'
         
-        self.current_lang = lang_code
         file_path = os.path.join(self.locale_dir, f'{lang_code}.json')
         
         if os.path.exists(file_path):
             try:
                 with open(file_path, 'r', encoding='utf-8') as f:
                     self.translations = json.load(f)
+                self.current_lang = lang_code
             except Exception as e:
                 print(f"Error loading language file {file_path}: {e}")
                 self.translations = {}
+                self.current_lang = lang_code
         else:
-            # Fallback to empty if file not found, effectively using keys as default (or English if keys are English)
-            self.translations = {}
+            # Fallback to English if requested language file is missing
+            if lang_code != 'en':
+                self.load_language('en')
+            else:
+                self.translations = {}
+                self.current_lang = 'en'
 
     def t(self, key, default=None):
         return self.translations.get(key, default if default is not None else key)

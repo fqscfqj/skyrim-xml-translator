@@ -156,11 +156,14 @@ class Worker(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.config_manager = ConfigManager()
+        preferred_lang = self.config_manager.get("general", "language", "auto")
+        i18n.load_language(preferred_lang)
+
         self.setWindowTitle(i18n.t("window_title"))
         self.resize(900, 700)
         self.setAcceptDrops(True)
 
-        self.config_manager = ConfigManager()
         self.llm_client = LLMClient(self.config_manager, log_callback=self.log)
         self.rag_engine = RAGEngine(self.config_manager, self.llm_client)
         self.xml_processor = XMLProcessor()
@@ -352,7 +355,7 @@ class MainWindow(QMainWindow):
         self.prev_btn.clicked.connect(self.prev_page)
         self.next_btn = QPushButton(i18n.t("btn_next_page"))
         self.next_btn.clicked.connect(self.next_page)
-        self.page_label = QLabel("Page 1 / 1")
+        self.page_label = QLabel(i18n.t("pagination_status").format(current=1, total=1, count=0))
         self.page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
         page_layout.addWidget(self.prev_btn)
@@ -608,6 +611,17 @@ class MainWindow(QMainWindow):
         self.prompt_style_combo.setToolTip(i18n.t("tooltip_prompt_style"))
         form_layout.addRow(i18n.t("label_prompt_style"), self.prompt_style_combo)
 
+        self.language_combo = QComboBox()
+        self.language_combo.addItem(i18n.t("language_option_auto"), "auto")
+        self.language_combo.addItem(i18n.t("language_option_en"), "en")
+        self.language_combo.addItem(i18n.t("language_option_zh"), "zh")
+        current_language = self.config_manager.get("general", "language", "auto") or "auto"
+        current_index = self.language_combo.findData(current_language)
+        if current_index == -1:
+            current_index = 0
+        self.language_combo.setCurrentIndex(current_index)
+        form_layout.addRow(i18n.t("label_language"), self.language_combo)
+
         save_btn = QPushButton(i18n.t("btn_save_config"))
         save_btn.clicked.connect(self.save_config)
         form_layout.addRow(save_btn)
@@ -822,7 +836,7 @@ class MainWindow(QMainWindow):
             if terms_to_delete:
                 self.rag_engine.delete_terms_batch(terms_to_delete)
                 self.refresh_term_list()
-                self.log(f"Deleted {len(terms_to_delete)} terms.")
+                self.log(i18n.t("msg_deleted_terms").format(count=len(terms_to_delete)))
 
     def refresh_term_list(self):
         filter_text = ""
@@ -857,7 +871,7 @@ class MainWindow(QMainWindow):
         for item in page_items:
             self.term_list.addItem(item)
             
-        self.page_label.setText(f"Page {self.current_page} / {total_pages} (Total: {total_items})")
+        self.page_label.setText(i18n.t("pagination_status").format(current=self.current_page, total=total_pages, count=total_items))
         self.prev_btn.setEnabled(self.current_page > 1)
         self.next_btn.setEnabled(self.current_page < total_pages)
 
@@ -874,7 +888,7 @@ class MainWindow(QMainWindow):
         self.refresh_term_list()
 
     def rebuild_index(self):
-        self.log("Rebuilding/Updating vector index...")
+        self.log(i18n.t("msg_rebuild_started"))
         self.glossary_progress.setVisible(True)
         self.glossary_progress.setValue(0)
         
@@ -889,11 +903,11 @@ class MainWindow(QMainWindow):
         self.glossary_worker.start()
 
     def import_csv(self):
-        fname, _ = QFileDialog.getOpenFileName(self, 'Import CSV', '', "CSV files (*.csv)")
+        fname, _ = QFileDialog.getOpenFileName(self, i18n.t("title_import_csv"), '', i18n.t("filter_csv_files"))
         if not fname:
             return
             
-        self.log(f"Importing CSV: {fname}")
+        self.log(i18n.t("msg_importing").format(path=fname))
         self.glossary_progress.setVisible(True)
         self.glossary_progress.setValue(0)
         
@@ -912,9 +926,11 @@ class MainWindow(QMainWindow):
         self.pause_btn.setEnabled(False)
         self.resume_btn.setEnabled(False)
         self.refresh_term_list()
-        QMessageBox.information(self, "Success", "Operation completed.")
+        QMessageBox.information(self, i18n.t("title_success"), i18n.t("msg_operation_completed"))
 
     def save_config(self):
+        previous_language = self.config_manager.get("general", "language", "auto")
+
         self.config_manager.set("llm", "base_url", self.llm_base.text())
         self.config_manager.set("llm", "api_key", self.llm_key.text())
         self.config_manager.set("llm", "model", self.llm_model.text())
@@ -938,6 +954,9 @@ class MainWindow(QMainWindow):
         # Prompt style determines which system prompt is used (default vs nsfw)
         self.config_manager.set("general", "prompt_style", self.prompt_style_combo.currentText())
 
+        selected_language = self.language_combo.currentData()
+        self.config_manager.set("general", "language", selected_language)
+
         params = self.config_manager.config.setdefault("llm", {}).setdefault("parameters", {})
         for name, (checkbox, widget) in self.model_param_controls.items():
             params[name] = widget.value() if checkbox.isChecked() else None
@@ -948,7 +967,15 @@ class MainWindow(QMainWindow):
         
         self.config_manager.save_config()
         self.llm_client.reload_config()
-        QMessageBox.information(self, "Success", "Configuration saved and reloaded.")
+
+        # Reload language for future UI text (most controls update on restart)
+        i18n.load_language(selected_language)
+        self.setWindowTitle(i18n.t("window_title"))
+
+        message = i18n.t("msg_config_saved_reloaded")
+        if selected_language != previous_language:
+            message += "\n" + i18n.t("msg_restart_for_language")
+        QMessageBox.information(self, i18n.t("title_success"), message)
 
     def pause_glossary_task(self):
         if hasattr(self, 'glossary_worker') and self.glossary_worker.isRunning():
@@ -968,14 +995,14 @@ class MainWindow(QMainWindow):
             selected_rows.add(item.row())
         
         if not selected_rows:
-            QMessageBox.warning(self, "Warning", "No items selected.")
+            QMessageBox.warning(self, i18n.t("title_warning"), i18n.t("msg_no_items_selected"))
             return
 
         self.start_btn.setEnabled(False)
         self.trans_sel_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.progress_bar.setValue(0)
-        self.log(f"Starting translation for {len(selected_rows)} selected items...")
+        self.log(i18n.t("msg_starting_selected_translation").format(count=len(selected_rows)))
 
         items_to_process = []
         for row in selected_rows:
@@ -994,10 +1021,10 @@ class MainWindow(QMainWindow):
     def clear_all_translations(self):
         # Confirm with user
         if self.trans_table.rowCount() == 0:
-            QMessageBox.information(self, "Info", "没有可清空的翻译。")
+            QMessageBox.information(self, i18n.t("title_info"), i18n.t("msg_no_translations_to_clear"))
             return
 
-        confirm = QMessageBox.question(self, "Confirm Clear All", "确定要清空所有译文吗？此操作不可撤销。",
+        confirm = QMessageBox.question(self, i18n.t("title_confirm_clear_all"), i18n.t("msg_confirm_clear_all"),
                            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if confirm != QMessageBox.StandardButton.Yes:
             return
@@ -1018,7 +1045,7 @@ class MainWindow(QMainWindow):
                 except Exception as e:
                     self.log(f"Error clearing translation for row {row}: {e}")
         self.trans_table.blockSignals(False)
-        self.log("Cleared all translations.")
+        self.log(i18n.t("msg_cleared_all_translations"))
 
     def clear_selected_translations(self):
         selected_rows = set()
@@ -1026,10 +1053,11 @@ class MainWindow(QMainWindow):
             selected_rows.add(item.row())
 
         if not selected_rows:
-            QMessageBox.information(self, "Info", "没有选择任何条目。")
+            QMessageBox.information(self, i18n.t("title_info"), i18n.t("msg_no_items_selected"))
             return
 
-        confirm = QMessageBox.question(self, "Confirm Clear Selected", f"确定要清空 {len(selected_rows)} 个已选择的译文吗？",
+        confirm = QMessageBox.question(self, i18n.t("title_confirm_clear_selected"),
+                                       i18n.t("msg_confirm_clear_selected").format(count=len(selected_rows)),
                                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if confirm != QMessageBox.StandardButton.Yes:
             return
@@ -1049,4 +1077,4 @@ class MainWindow(QMainWindow):
                 except Exception as e:
                     self.log(f"Error clearing translation for row {row}: {e}")
         self.trans_table.blockSignals(False)
-        self.log(f"Cleared translations for {len(selected_rows)} selected rows.")
+        self.log(i18n.t("msg_cleared_selected_translations").format(count=len(selected_rows)))

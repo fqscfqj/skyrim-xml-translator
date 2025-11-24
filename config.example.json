@@ -43,6 +43,7 @@
     ,
     "general": {
         "log_level": "INFO",
-        "prompt_style": "default"
+        "prompt_style": "default",
+        "language": "auto"
     }
 }
