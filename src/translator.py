@@ -21,10 +21,11 @@ class Translator:
             max_terms_per_keyword = self.rag_engine.config.get("rag", "max_terms", 30)
 
             # 1. Extract keywords (RAG)
+            log_emit(log_callback, self.rag_engine.config, 'DEBUG', f"[RAG] Starting keyword extraction for text (length={len(text)}): {text[:200]}{'...' if len(text) > 200 else ''}", module='translator', func='translate_text')
             keywords = self.rag_engine.extract_keywords(text, log_callback=log_callback)
             # Log extraction result
             try:
-                log_emit(log_callback, self.rag_engine.config, 'DEBUG', f"Keywords extracted: {keywords}", module='translator', func='translate_text', extra={'keywords': keywords})
+                log_emit(log_callback, self.rag_engine.config, 'DEBUG', f"[RAG] Translator received {len(keywords)} keywords: {keywords}", module='translator', func='translate_text', extra={'keywords': keywords})
             except Exception:
                 pass
             
@@ -36,7 +37,7 @@ class Translator:
                 max_terms_per_keyword=max_terms_per_keyword,
             )
             try:
-                log_emit(log_callback, self.rag_engine.config, 'DEBUG', f"RAG matched terms: {list(matched_terms.keys())}", module='translator', func='translate_text', extra={'rag_matches': list(matched_terms.keys())})
+                log_emit(log_callback, self.rag_engine.config, 'DEBUG', f"[RAG] Translator received {len(matched_terms)} matched glossary terms: {list(matched_terms.keys())}", module='translator', func='translate_text', extra={'rag_matches': list(matched_terms.keys())})
             except Exception:
                 pass
 

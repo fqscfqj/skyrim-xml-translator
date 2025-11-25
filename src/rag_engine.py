@@ -306,28 +306,34 @@ class RAGEngine:
 
     def extract_keywords(self, text, log_callback=None):
         """使用 LLM 提取文本中的专有名词/实体"""
-        prompt = f"""
-        Identify all proper nouns, specific terminology, names, places, and unique items in the following text.
-        Return ONLY a JSON list of strings. Do not include common words.
+        # Log input text for RAG process
+        try:
+            log_emit(log_callback, self.config, 'DEBUG', f"[RAG] Input text for keyword extraction: {text}", module='rag_engine', func='extract_keywords')
+        except Exception:
+            pass
         
-        Text: "{text}"
-        
-        Output format: ["Term1", "Term2"]
-        """
+        prompt = f"""Extract Elder Scrolls proper nouns from this text for glossary lookup.
+
+Include: character/place/race/faction/creature/item/deity/spell names, lore terms.
+Exclude: common words, generic game terms (health, damage, level), simple adjectives.
+
+Text: "{text}"
+
+Return JSON array only: ["Term1", "Term2"] or []"""
         messages = [{"role": "user", "content": prompt}]
         try:
             response = self.llm_client.chat_completion_search(messages, temperature=0.1, log_callback=log_callback)
             # 清理 markdown 代码块标记
             response = response.replace("```json", "").replace("```", "").strip()
             keywords = json.loads(response)
-            # Log extracted keywords (debug only)
+            # Log extracted keywords with detail (debug only)
             try:
-                log_emit(log_callback, self.config, 'DEBUG', f"Extracted keywords: {keywords}", module='rag_engine', func='extract_keywords', extra={'keywords': keywords})
+                log_emit(log_callback, self.config, 'DEBUG', f"[RAG] Extracted {len(keywords) if isinstance(keywords, list) else 0} keywords: {keywords}", module='rag_engine', func='extract_keywords', extra={'keywords': keywords, 'input_text': text[:100]})
             except Exception:
                 pass
             return keywords if isinstance(keywords, list) else []
         except Exception as e:
-            log_emit(log_callback, self.config, 'ERROR', f"Keyword extraction failed: {e}", exc=e, module='rag_engine', func='extract_keywords')
+            log_emit(log_callback, self.config, 'ERROR', f"[RAG] Keyword extraction failed: {e}", exc=e, module='rag_engine', func='extract_keywords')
             return []
 
     def search_terms(self, query_list, threshold=0.8, log_callback=None, top_k=3, max_terms_per_keyword=None, return_debug=False):
@@ -337,11 +343,12 @@ class RAGEngine:
         """
         vector_ready = self.vectors is not None and len(self.terms) > 0
         if not vector_ready and not self._glossary_lookup:
+            log_emit(log_callback, self.config, 'DEBUG', f"[RAG] Vector index not ready, skipping search", module='rag_engine', func='search_terms')
             return {}
 
         # Log that we're starting a vector search for these keywords
         try:
-            log_emit(log_callback, self.config, 'DEBUG', f"Searching keywords: {query_list}", module='rag_engine', func='search_terms', extra={'query_list_len': len(query_list)})
+            log_emit(log_callback, self.config, 'DEBUG', f"[RAG] Starting vector search for {len(query_list)} keywords: {query_list}", module='rag_engine', func='search_terms', extra={'query_list_len': len(query_list)})
         except Exception:
             pass
 
@@ -443,7 +450,7 @@ class RAGEngine:
                 
                 # Log per-query ranking details
                 try:
-                    log_emit(log_callback, self.config, 'DEBUG', f"Query '{query}' top matches: {vector_matches} | Containment: {containment_matches}", module='rag_engine', func='search_terms', extra={'query': query, 'top_matches': vector_matches, 'containment': containment_matches})
+                    log_emit(log_callback, self.config, 'DEBUG', f"[RAG] Keyword '{query}' -> Vector matches: {vector_matches[:3] if vector_matches else []} | Containment: {containment_matches[:3] if containment_matches else []}", module='rag_engine', func='search_terms', extra={'query': query, 'top_matches': vector_matches, 'containment': containment_matches})
                 except Exception:
                     pass
 
@@ -475,11 +482,14 @@ class RAGEngine:
             except Exception as e:
                 log_emit(None, self.config, 'ERROR', f"Search error for '{query}': {e}", exc=e, module='rag_engine', func='search_terms')
         
-        if results and log_callback:
-            try:
-                log_emit(log_callback, self.config, 'DEBUG', f"Found terms: {list(results.keys())}", module='rag_engine', func='search_terms', extra={'found_count': len(results)})
-            except Exception:
-                pass
+        # Always log RAG search results for debugging
+        try:
+            if results:
+                log_emit(log_callback, self.config, 'DEBUG', f"[RAG] Search complete. Found {len(results)} glossary terms: {list(results.keys())}", module='rag_engine', func='search_terms', extra={'found_count': len(results)})
+            else:
+                log_emit(log_callback, self.config, 'DEBUG', f"[RAG] Search complete. No matching glossary terms found.", module='rag_engine', func='search_terms')
+        except Exception:
+            pass
         
         if return_debug:
             return results, debug_info
