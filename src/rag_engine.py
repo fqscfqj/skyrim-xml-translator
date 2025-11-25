@@ -346,7 +346,7 @@ class RAGEngine:
             pass
 
         results = {}
-        debug_info = [] if return_debug else None
+        debug_info: list | None = [] if return_debug else None
         per_keyword_limit = max_terms_per_keyword if max_terms_per_keyword is not None else None
         for query in query_list:
             if per_keyword_limit is not None and per_keyword_limit <= 0:
@@ -354,7 +354,7 @@ class RAGEngine:
 
             query_selected_terms = []
             query_details = {"query": query, "direct_match": None, "vector_matches": [], "containment_matches": [], "selected_terms": query_selected_terms}
-            if return_debug:
+            if debug_info is not None:
                 debug_info.append(query_details)
 
             def can_add_more():
@@ -372,7 +372,9 @@ class RAGEngine:
                 query_lower = query.lower()
                 containment_matches = []
                 vector_matches = []
-                if vector_ready:
+                # Use local variable to let static type checkers know we're operating on a non-None array
+                vectors = self.vectors
+                if vectors is not None and len(self.terms) > 0:
                     query_vec = self.llm_client.get_embedding(query, log_callback=log_callback)
                     query_vec = np.array(query_vec, dtype=np.float32).flatten()
                     
@@ -384,13 +386,13 @@ class RAGEngine:
                     # 计算相似度 - 使用分批处理避免内存爆炸
                     # 对mmap数组分批读取，每批处理10000个向量
                     batch_size = 10000
-                    num_vectors = self.vectors.shape[0]
+                    num_vectors = vectors.shape[0]
                     similarities = np.zeros(num_vectors, dtype=np.float32)
                     
                     for start_idx in range(0, num_vectors, batch_size):
                         end_idx = min(start_idx + batch_size, num_vectors)
                         # 仅加载这批向量到内存
-                        batch_vectors = np.array(self.vectors[start_idx:end_idx], dtype=np.float32)
+                        batch_vectors = np.array(vectors[start_idx:end_idx], dtype=np.float32)
                         # 归一化批次向量
                         batch_norms = np.linalg.norm(batch_vectors, axis=1, keepdims=True)
                         batch_norms[batch_norms == 0] = 1  # 避免除零
