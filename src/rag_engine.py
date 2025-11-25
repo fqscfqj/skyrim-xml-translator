@@ -314,7 +314,7 @@ class RAGEngine:
         """
         messages = [{"role": "user", "content": prompt}]
         try:
-            response = self.llm_client.chat_completion_search(messages, temperature=0.1)
+            response = self.llm_client.chat_completion_search(messages, temperature=0.1, log_callback=log_callback)
             # 清理 markdown 代码块标记
             response = response.replace("```json", "").replace("```", "").strip()
             keywords = json.loads(response)
@@ -325,7 +325,7 @@ class RAGEngine:
                 pass
             return keywords if isinstance(keywords, list) else []
         except Exception as e:
-            log_emit(None, self.config, 'ERROR', f"Keyword extraction failed: {e}", exc=e, module='rag_engine', func='extract_keywords')
+            log_emit(log_callback, self.config, 'ERROR', f"Keyword extraction failed: {e}", exc=e, module='rag_engine', func='extract_keywords')
             return []
 
     def search_terms(self, query_list, threshold=0.8, log_callback=None, top_k=3, max_terms_per_keyword=None, return_debug=False):
@@ -371,7 +371,7 @@ class RAGEngine:
                 containment_matches = []
                 vector_matches = []
                 if vector_ready:
-                    query_vec = self.llm_client.get_embedding(query)
+                    query_vec = self.llm_client.get_embedding(query, log_callback=log_callback)
                     query_vec = np.array(query_vec).reshape(1, -1)
                     
                     # 计算相似度

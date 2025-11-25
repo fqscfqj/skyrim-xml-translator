@@ -44,28 +44,28 @@ class GlossaryWorker(QThread):
         
             elif self.mode == 'import':
                 log_emit(self.log.emit, self.rag_engine.config, 'INFO', i18n.t("msg_importing").format(path=self.data), module='gui_main', func='GlossaryWorker.run')
-            try:
-                # self.data may be None if the caller didn't provide a path; guard against it
-                if not self.data:
-                    log_emit(self.log.emit, self.rag_engine.config, 'WARNING', i18n.t("msg_no_import_file"), module='gui_main', func='GlossaryWorker.run')
-                    self.finished.emit()
-                    return
+                try:
+                    # self.data may be None if the caller didn't provide a path; guard against it
+                    if not self.data:
+                        log_emit(self.log.emit, self.rag_engine.config, 'WARNING', i18n.t("msg_no_import_file"), module='gui_main', func='GlossaryWorker.run')
+                        self.finished.emit()
+                        return
 
-                terms = {}
-                with open(self.data, 'r', encoding='utf-8') as f:
-                    reader = csv.reader(f)
-                    for row in reader:
-                        if len(row) >= 2:
-                            terms[row[0].strip()] = row[1].strip()
-                
-                if terms:
-                    log_emit(self.log.emit, self.rag_engine.config, 'INFO', i18n.t("msg_found_terms").format(count=len(terms), threads=self.num_threads), module='gui_main', func='GlossaryWorker.run')
-                    self.rag_engine.add_terms_batch(terms, num_threads=self.num_threads, progress_callback=self.progress.emit, log_callback=self.log.emit)
-                    log_emit(self.log.emit, self.rag_engine.config, 'INFO', i18n.t("msg_import_completed"), module='gui_main', func='GlossaryWorker.run')
-                else:
-                    log_emit(self.log.emit, self.rag_engine.config, 'WARNING', i18n.t("msg_no_valid_terms"), module='gui_main', func='GlossaryWorker.run')
-            except Exception as e:
-                log_emit(self.log.emit, self.rag_engine.config, 'ERROR', i18n.t("msg_error_importing").format(error=e), exc=e, module='gui_main', func='GlossaryWorker.run')
+                    terms = {}
+                    with open(self.data, 'r', encoding='utf-8') as f:
+                        reader = csv.reader(f)
+                        for row in reader:
+                            if len(row) >= 2:
+                                terms[row[0].strip()] = row[1].strip()
+                    
+                    if terms:
+                        log_emit(self.log.emit, self.rag_engine.config, 'INFO', i18n.t("msg_found_terms").format(count=len(terms), threads=self.num_threads), module='gui_main', func='GlossaryWorker.run')
+                        self.rag_engine.add_terms_batch(terms, num_threads=self.num_threads, progress_callback=self.progress.emit, log_callback=self.log.emit)
+                        log_emit(self.log.emit, self.rag_engine.config, 'INFO', i18n.t("msg_import_completed"), module='gui_main', func='GlossaryWorker.run')
+                    else:
+                        log_emit(self.log.emit, self.rag_engine.config, 'WARNING', i18n.t("msg_no_valid_terms"), module='gui_main', func='GlossaryWorker.run')
+                except Exception as e:
+                    log_emit(self.log.emit, self.rag_engine.config, 'ERROR', i18n.t("msg_error_importing").format(error=e), exc=e, module='gui_main', func='GlossaryWorker.run')
         
             self.finished.emit()
         except Exception as e:
@@ -143,7 +143,7 @@ class Worker(QThread):
 
                 log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', i18n.t("msg_translation_finished"), module='gui_main', func='Worker.run')
                 self.finished.emit()
-        except Exception as e:
+        except BaseException as e:
             log_emit(self.log.emit, self.translator.rag_engine.config, 'ERROR', i18n.t("msg_worker_error").format(error=e), exc=e, module='gui_main', func='Worker.run')
             try:
                 self.finished.emit()

@@ -40,11 +40,14 @@ class LLMClient:
     def reload_config(self):
         self._init_clients()
 
-    def get_embedding(self, text):
+    def get_embedding(self, text, log_callback=None):
         """获取文本向量"""
         if not self.embed_client:
             raise ValueError("Embedding client not initialized. Please check API Key.")
         
+        # Use provided callback or fallback to instance callback
+        callback = log_callback if log_callback else self.log_callback
+
         model = self.config.get("embedding", "model", "text-embedding-ada-002")
         try:
             response = self.embed_client.embeddings.create(
@@ -53,13 +56,16 @@ class LLMClient:
             )
             return response.data[0].embedding
         except Exception as e:
-            log_emit(self.log_callback, self.config, 'ERROR', f"Embedding error: {e}", exc=e, module='llm_client', func='get_embedding')
+            log_emit(callback, self.config, 'ERROR', f"Embedding error: {e}", exc=e, module='llm_client', func='get_embedding')
             raise
 
-    def chat_completion(self, messages, temperature=None, top_p=None, frequency_penalty=None, presence_penalty=None, max_tokens=None):
+    def chat_completion(self, messages, temperature=None, top_p=None, frequency_penalty=None, presence_penalty=None, max_tokens=None, log_callback=None):
         """LLM 对话补全"""
         if not self.llm_client:
             raise ValueError("LLM client not initialized. Please check API Key.")
+
+        # Use provided callback or fallback to instance callback
+        callback = log_callback if log_callback else self.log_callback
 
         model = self.config.get("llm", "model", "gpt-3.5-turbo")
         # Retry / backoff configuration
@@ -90,15 +96,15 @@ class LLMClient:
                 request_args.update(final_params)
 
                 # Debug: log model and truncated prompt if debug enabled
-                log_emit(self.log_callback, self.config, 'DEBUG', f"LLM call: model={model} messages_len={len(messages)}", module='llm_client', func='chat_completion')
+                log_emit(callback, self.config, 'DEBUG', f"LLM call: model={model} messages_len={len(messages)}", module='llm_client', func='chat_completion')
                 response = self.llm_client.chat.completions.create(**request_args)
                 return response.choices[0].message.content
-            except (openai.error.RateLimitError, openai.error.APIError, openai.error.ServiceUnavailableError) as rae:
+            except (openai.RateLimitError, openai.APIError, openai.APIConnectionError, openai.InternalServerError) as rae:
                 # Retry on rate limit or transient errors
                 attempt += 1
-                log_emit(self.log_callback, self.config, 'WARNING', f"LLM transient error (attempt {attempt}/{max_retries}): {rae}", exc=rae, module='llm_client', func='chat_completion')
+                log_emit(callback, self.config, 'WARNING', f"LLM transient error (attempt {attempt}/{max_retries}): {rae}", exc=rae, module='llm_client', func='chat_completion')
                 if attempt > max_retries:
-                    log_emit(self.log_callback, self.config, 'ERROR', f"LLM error: retries exhausted: {rae}", exc=rae, module='llm_client', func='chat_completion')
+                    log_emit(callback, self.config, 'ERROR', f"LLM error: retries exhausted: {rae}", exc=rae, module='llm_client', func='chat_completion')
                     raise
                 # exponential backoff + jitter
                 delay = backoff_base * (2 ** (attempt - 1))
@@ -106,14 +112,17 @@ class LLMClient:
                 time.sleep(delay)
                 continue
             except Exception as e:
-                log_emit(self.log_callback, self.config, 'ERROR', f"LLM error: {e}", exc=e, module='llm_client', func='chat_completion')
+                log_emit(callback, self.config, 'ERROR', f"LLM error: {e}", exc=e, module='llm_client', func='chat_completion')
                 raise
 
-    def chat_completion_search(self, messages, temperature=None, top_p=None, frequency_penalty=None, presence_penalty=None, max_tokens=None):
+    def chat_completion_search(self, messages, temperature=None, top_p=None, frequency_penalty=None, presence_penalty=None, max_tokens=None, log_callback=None):
         """LLM 对话补全 (用于搜索/关键词提取)"""
         # Use search client if available, otherwise fallback to main client
         client = self.search_llm_client if self.search_llm_client else self.llm_client
         config_section = "llm_search" if self.search_llm_client else "llm"
+
+        # Use provided callback or fallback to instance callback
+        callback = log_callback if log_callback else self.log_callback
 
         if not client:
             raise ValueError("LLM client not initialized. Please check API Key.")
@@ -146,19 +155,19 @@ class LLMClient:
                 request_args = {"model": model, "messages": messages}
                 request_args.update(final_params)
 
-                log_emit(self.log_callback, self.config, 'DEBUG', f"Search LLM call: model={model} messages_len={len(messages)}", module='llm_client', func='chat_completion_search')
+                log_emit(callback, self.config, 'DEBUG', f"Search LLM call: model={model} messages_len={len(messages)}", module='llm_client', func='chat_completion_search')
                 response = client.chat.completions.create(**request_args)
                 return response.choices[0].message.content
-            except (openai.error.RateLimitError, openai.error.APIError, openai.error.ServiceUnavailableError) as rae:
+            except (openai.RateLimitError, openai.APIError, openai.APIConnectionError, openai.InternalServerError) as rae:
                 attempt += 1
-                log_emit(self.log_callback, self.config, 'WARNING', f"Search LLM transient error (attempt {attempt}/{max_retries}): {rae}", exc=rae, module='llm_client', func='chat_completion_search')
+                log_emit(callback, self.config, 'WARNING', f"Search LLM transient error (attempt {attempt}/{max_retries}): {rae}", exc=rae, module='llm_client', func='chat_completion_search')
                 if attempt > max_retries:
-                    log_emit(self.log_callback, self.config, 'ERROR', f"Search LLM error: retries exhausted: {rae}", exc=rae, module='llm_client', func='chat_completion_search')
+                    log_emit(callback, self.config, 'ERROR', f"Search LLM error: retries exhausted: {rae}", exc=rae, module='llm_client', func='chat_completion_search')
                     raise
                 delay = backoff_base * (2 ** (attempt - 1))
                 delay = delay + random.random() * 0.1 * delay
                 time.sleep(delay)
                 continue
             except Exception as e:
-                log_emit(self.log_callback, self.config, 'ERROR', f"Search LLM error: {e}", exc=e, module='llm_client', func='chat_completion_search')
+                log_emit(callback, self.config, 'ERROR', f"Search LLM error: {e}", exc=e, module='llm_client', func='chat_completion_search')
                 raise
