@@ -117,29 +117,66 @@ class Worker(QThread):
                 except Exception as e:
                     return (row_idx, source, None, str(e))
 
-            with ThreadPoolExecutor(max_workers=self.num_threads) as executor:
-                futures = {executor.submit(translate_task, item): item for item in self.items_to_process}
-
-                for future in as_completed(futures):
+            # Limit concurrent tasks to reduce memory pressure
+            # Each task holds embedding vectors and LLM context in memory
+            max_concurrent = min(self.num_threads, 4)  # Cap at 4 to limit memory
+            
+            with ThreadPoolExecutor(max_workers=max_concurrent) as executor:
+                # Use a set to keep track of active futures
+                active_futures = set()
+                # Iterator for items
+                items_iter = iter(self.items_to_process)
+                
+                # Fill the pool initially - only max_concurrent tasks at a time
+                for _ in range(max_concurrent):
+                    try:
+                        item = next(items_iter)
+                        future = executor.submit(translate_task, item)
+                        active_futures.add(future)
+                    except StopIteration:
+                        break
+                
+                while active_futures:
                     if not self.is_running:
                         executor.shutdown(wait=False)
                         break
 
-                    result = future.result()
-                    if result:
-                        if len(result) == 3:
-                            row_idx, source, translation = result
-                            # Ensure we don't assume translation is str (defensive)
-                            safe_translation = str(translation) if translation is not None else ""
-                            safe_source = str(source) if source is not None else ""
-                            self.result_ready.emit(row_idx, safe_translation)
-                            log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', f"[{processed_count+1}/{total}] {safe_source[:20]}... -> {safe_translation[:20]}...", module='gui_main', func='Worker.run')
-                        else:
-                            row_idx, source, _, error = result
-                            log_emit(self.log.emit, self.translator.rag_engine.config, 'ERROR', f"Error translating {str(source)[:20]}...: {error}", module='gui_main', func='Worker.run')
+                    # Wait for at least one future to complete
+                    done, _ = as_completed(active_futures, timeout=None).__next__(), None
+                    # as_completed returns an iterator, we just need one result. 
+                    # Actually, wait, as_completed yields futures as they complete.
+                    # But we want to add new ones as old ones finish.
+                    
+                    # Better approach: use wait(return_when=FIRST_COMPLETED)
+                    from concurrent.futures import wait, FIRST_COMPLETED
+                    done, not_done = wait(active_futures, return_when=FIRST_COMPLETED)
+                    
+                    for future in done:
+                        active_futures.remove(future)
+                        result = future.result()
+                        
+                        if result:
+                            if len(result) == 3:
+                                row_idx, source, translation = result
+                                safe_translation = str(translation) if translation is not None else ""
+                                safe_source = str(source) if source is not None else ""
+                                self.result_ready.emit(row_idx, safe_translation)
+                                log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', f"[{processed_count+1}/{total}] {safe_source[:20]}... -> {safe_translation[:20]}...", module='gui_main', func='Worker.run')
+                            else:
+                                row_idx, source, _, error = result
+                                log_emit(self.log.emit, self.translator.rag_engine.config, 'ERROR', f"Error translating {str(source)[:20]}...: {error}", module='gui_main', func='Worker.run')
 
-                    processed_count += 1
-                    self.progress.emit(int(processed_count / total * 100))
+                        processed_count += 1
+                        self.progress.emit(int(processed_count / total * 100))
+
+                        # Submit next task
+                        try:
+                            if self.is_running:
+                                next_item = next(items_iter)
+                                new_future = executor.submit(translate_task, next_item)
+                                active_futures.add(new_future)
+                        except StopIteration:
+                            pass
 
                 log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', i18n.t("msg_translation_finished"), module='gui_main', func='Worker.run')
                 self.finished.emit()
@@ -645,6 +682,17 @@ class MainWindow(QMainWindow):
         else:
             formatted = f"[{__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [INFO] {message}"
             self.log_output.append(formatted)
+        
+        # Limit log size to prevent memory issues - reduced to 200 lines
+        max_lines = 200
+        doc = self.log_output.document()
+        if doc.blockCount() > max_lines:
+            cursor = self.log_output.textCursor()
+            cursor.movePosition(cursor.MoveOperation.Start)
+            cursor.movePosition(cursor.MoveOperation.Down, cursor.MoveMode.KeepAnchor, doc.blockCount() - max_lines)
+            cursor.removeSelectedText()
+            cursor.movePosition(cursor.MoveOperation.End)
+            self.log_output.setTextCursor(cursor)
 
     def start_translation(self):
         # Ensure file is loaded

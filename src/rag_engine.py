@@ -4,8 +4,8 @@ import re
 import numpy as np
 from src.logging_helper import emit as log_emit
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from sklearn.metrics.pairwise import cosine_similarity
 from src.llm_client import LLMClient
+import gc
 
 class RAGEngine:
     def __init__(self, config_manager, llm_client: LLMClient):
@@ -51,7 +51,9 @@ class RAGEngine:
         
         if os.path.exists(self.vector_path):
             try:
-                self.vectors = np.load(self.vector_path)
+                # Use mmap_mode='r' to avoid loading the entire file into memory
+                # It will be loaded into memory only if modified (copy-on-write behavior for vstack/delete)
+                self.vectors = np.load(self.vector_path, mmap_mode='r')
                 # Check dimensions
                 if self.vectors is not None and self.vectors.shape[1] != self.embed_dim:
                     log_emit(None, self.config, 'WARNING', f"Warning: Loaded vectors dimension {self.vectors.shape[1]} does not match config {self.embed_dim}.", module='rag_engine', func='load_data')
@@ -372,10 +374,30 @@ class RAGEngine:
                 vector_matches = []
                 if vector_ready:
                     query_vec = self.llm_client.get_embedding(query, log_callback=log_callback)
-                    query_vec = np.array(query_vec).reshape(1, -1)
+                    query_vec = np.array(query_vec, dtype=np.float32).flatten()
                     
-                    # 计算相似度
-                    similarities = cosine_similarity(query_vec, self.vectors)[0]
+                    # Normalize query vector once
+                    query_norm = np.linalg.norm(query_vec)
+                    if query_norm > 0:
+                        query_vec = query_vec / query_norm
+                    
+                    # 计算相似度 - 使用分批处理避免内存爆炸
+                    # 对mmap数组分批读取，每批处理10000个向量
+                    batch_size = 10000
+                    num_vectors = self.vectors.shape[0]
+                    similarities = np.zeros(num_vectors, dtype=np.float32)
+                    
+                    for start_idx in range(0, num_vectors, batch_size):
+                        end_idx = min(start_idx + batch_size, num_vectors)
+                        # 仅加载这批向量到内存
+                        batch_vectors = np.array(self.vectors[start_idx:end_idx], dtype=np.float32)
+                        # 归一化批次向量
+                        batch_norms = np.linalg.norm(batch_vectors, axis=1, keepdims=True)
+                        batch_norms[batch_norms == 0] = 1  # 避免除零
+                        batch_vectors = batch_vectors / batch_norms
+                        # 计算余弦相似度 (点积，因为已归一化)
+                        similarities[start_idx:end_idx] = batch_vectors @ query_vec
+                        del batch_vectors  # 立即释放批次内存
                     
                     # 1. Pure Vector Matches (Semantic)
                     ranked_idx = np.argsort(similarities)[::-1]
@@ -400,6 +422,11 @@ class RAGEngine:
                     for idx in ranked_idx[:top_k]:
                         if idx < len(self.terms):
                             vector_matches.append((self.terms[idx], float(similarities[idx])))
+                    
+                    # 释放similarities数组
+                    del similarities
+                    del ranked_idx
+                    gc.collect()
 
                 if return_debug:
                     query_details["vector_matches"] = vector_matches
