@@ -190,6 +190,33 @@ class Worker(QThread):
     def stop(self):
         self.is_running = False
 
+
+# Custom widgets to prevent accidental change via mouse wheel.
+# We still allow keyboard editing and explicit dropdown selection by the user.
+class NoWheelSpinBox(QSpinBox):
+    def wheelEvent(self, event):
+        # Ignore all wheel events to prevent accidental value changes
+        event.ignore()
+
+
+class NoWheelDoubleSpinBox(QDoubleSpinBox):
+    def wheelEvent(self, event):
+        # Ignore all wheel events to prevent accidental value changes
+        event.ignore()
+
+
+class NoWheelComboBox(QComboBox):
+    def wheelEvent(self, event):
+        # Allow wheel only when the popup is visible (i.e., when user explicitly opened it)
+        try:
+            # view() returns the list view; isVisible indicates whether popup is open
+            if self.view().isVisible():
+                return super().wheelEvent(event)
+        except Exception:
+            # If we cannot determine state, ignore wheel to be safe
+            pass
+        event.ignore()
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -485,35 +512,35 @@ class MainWindow(QMainWindow):
                 checkbox.setChecked(True)
                 widget.setValue(stored_value)
 
-        temp_spin = QDoubleSpinBox()
+        temp_spin = NoWheelDoubleSpinBox()
         temp_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         temp_spin.setRange(0.0, 2.0)
         temp_spin.setSingleStep(0.05)
         temp_spin.setValue(0.3)
         add_param_control("temperature", i18n.t("param_temperature"), temp_spin)
 
-        top_p_spin = QDoubleSpinBox()
+        top_p_spin = NoWheelDoubleSpinBox()
         top_p_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         top_p_spin.setRange(0.0, 1.0)
         top_p_spin.setSingleStep(0.05)
         top_p_spin.setValue(1.0)
         add_param_control("top_p", i18n.t("param_top_p"), top_p_spin)
 
-        freq_spin = QDoubleSpinBox()
+        freq_spin = NoWheelDoubleSpinBox()
         freq_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         freq_spin.setRange(-2.0, 2.0)
         freq_spin.setSingleStep(0.1)
         freq_spin.setValue(0.0)
         add_param_control("frequency_penalty", i18n.t("param_freq_penalty"), freq_spin)
 
-        pres_spin = QDoubleSpinBox()
+        pres_spin = NoWheelDoubleSpinBox()
         pres_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         pres_spin.setRange(-2.0, 2.0)
         pres_spin.setSingleStep(0.1)
         pres_spin.setValue(0.0)
         add_param_control("presence_penalty", i18n.t("param_pres_penalty"), pres_spin)
 
-        token_spin = QSpinBox()
+        token_spin = NoWheelSpinBox()
         token_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         token_spin.setRange(16, 8192)
         token_spin.setSingleStep(16)
@@ -553,35 +580,35 @@ class MainWindow(QMainWindow):
                 checkbox.setChecked(True)
                 widget.setValue(stored_value)
 
-        s_temp_spin = QDoubleSpinBox()
+        s_temp_spin = NoWheelDoubleSpinBox()
         s_temp_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         s_temp_spin.setRange(0.0, 2.0)
         s_temp_spin.setSingleStep(0.05)
         s_temp_spin.setValue(0.1) # Default low temp for extraction
         add_search_param_control("temperature", i18n.t("param_temperature"), s_temp_spin)
 
-        s_top_p_spin = QDoubleSpinBox()
+        s_top_p_spin = NoWheelDoubleSpinBox()
         s_top_p_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         s_top_p_spin.setRange(0.0, 1.0)
         s_top_p_spin.setSingleStep(0.05)
         s_top_p_spin.setValue(1.0)
         add_search_param_control("top_p", i18n.t("param_top_p"), s_top_p_spin)
 
-        s_freq_spin = QDoubleSpinBox()
+        s_freq_spin = NoWheelDoubleSpinBox()
         s_freq_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         s_freq_spin.setRange(-2.0, 2.0)
         s_freq_spin.setSingleStep(0.1)
         s_freq_spin.setValue(0.0)
         add_search_param_control("frequency_penalty", i18n.t("param_freq_penalty"), s_freq_spin)
 
-        s_pres_spin = QDoubleSpinBox()
+        s_pres_spin = NoWheelDoubleSpinBox()
         s_pres_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         s_pres_spin.setRange(-2.0, 2.0)
         s_pres_spin.setSingleStep(0.1)
         s_pres_spin.setValue(0.0)
         add_search_param_control("presence_penalty", i18n.t("param_pres_penalty"), s_pres_spin)
 
-        s_token_spin = QSpinBox()
+        s_token_spin = NoWheelSpinBox()
         s_token_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         s_token_spin.setRange(16, 8192)
         s_token_spin.setSingleStep(16)
@@ -595,7 +622,7 @@ class MainWindow(QMainWindow):
         self.embed_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.embed_model = QLineEdit(self.config_manager.get("embedding", "model"))
         
-        self.embed_dim = QSpinBox()
+        self.embed_dim = NoWheelSpinBox()
         self.embed_dim.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.embed_dim.setRange(1, 8192)
         self.embed_dim.setValue(self.config_manager.get("embedding", "dimensions", 1536))
@@ -607,12 +634,12 @@ class MainWindow(QMainWindow):
         form_layout.addRow(i18n.t("label_dimensions"), self.embed_dim)
 
         form_layout.addRow(QLabel(f"<b>{i18n.t('group_threads')}</b>"))
-        self.trans_threads = QSpinBox()
+        self.trans_threads = NoWheelSpinBox()
         self.trans_threads.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.trans_threads.setRange(1, 99)
         self.trans_threads.setValue(self.config_manager.get("threads", "translation", 5))
         
-        self.vec_threads = QSpinBox()
+        self.vec_threads = NoWheelSpinBox()
         self.vec_threads.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.vec_threads.setRange(1, 99)
         self.vec_threads.setValue(self.config_manager.get("threads", "vectorization", 5))
@@ -621,12 +648,12 @@ class MainWindow(QMainWindow):
         form_layout.addRow(i18n.t("label_vec_threads"), self.vec_threads)
 
         form_layout.addRow(QLabel(f"<b>{i18n.t('group_rag_settings')}</b>"))
-        self.rag_max_terms = QSpinBox()
+        self.rag_max_terms = NoWheelSpinBox()
         self.rag_max_terms.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.rag_max_terms.setRange(0, 200)
         self.rag_max_terms.setValue(self.config_manager.get("rag", "max_terms", 30))
         
-        self.rag_threshold = QDoubleSpinBox()
+        self.rag_threshold = NoWheelDoubleSpinBox()
         self.rag_threshold.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.rag_threshold.setRange(0.0, 1.0)
         self.rag_threshold.setSingleStep(0.05)
@@ -636,19 +663,19 @@ class MainWindow(QMainWindow):
         form_layout.addRow(i18n.t("label_rag_threshold"), self.rag_threshold)
 
         form_layout.addRow(QLabel(f"<b>{i18n.t('group_system_settings')}</b>"))
-        self.log_level_combo = QComboBox()
+        self.log_level_combo = NoWheelComboBox()
         self.log_level_combo.addItems(["DEBUG", "INFO", "WARNING", "ERROR"])
         self.log_level_combo.setCurrentText(self.config_manager.get("general", "log_level", "INFO"))
         form_layout.addRow(i18n.t("label_log_level"), self.log_level_combo)
         
         # Prompt style selection (default: standard localization prompts, nsfw: explicit prompts)
-        self.prompt_style_combo = QComboBox()
+        self.prompt_style_combo = NoWheelComboBox()
         self.prompt_style_combo.addItems(["default", "nsfw"])
         self.prompt_style_combo.setCurrentText(self.config_manager.get("general", "prompt_style", "default"))
         self.prompt_style_combo.setToolTip(i18n.t("tooltip_prompt_style"))
         form_layout.addRow(i18n.t("label_prompt_style"), self.prompt_style_combo)
 
-        self.language_combo = QComboBox()
+        self.language_combo = NoWheelComboBox()
         self.language_combo.addItem(i18n.t("language_option_auto"), "auto")
         self.language_combo.addItem(i18n.t("language_option_en"), "en")
         self.language_combo.addItem(i18n.t("language_option_zh"), "zh")
