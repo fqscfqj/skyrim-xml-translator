@@ -312,23 +312,26 @@ class RAGEngine:
         except Exception:
             pass
         
-        prompt = f"""Extract proper nouns and specialized terms from this Elder Scrolls game text for glossary lookup.
+        prompt = f"""Extract proper nouns and specialized terms that ACTUALLY APPEAR in the following text for glossary lookup.
+
+CRITICAL RULES:
+1. ONLY extract terms that are EXPLICITLY WRITTEN in the given text
+2. DO NOT add any terms from your knowledge that are not in the text
+3. DO NOT hallucinate or guess related terms from Elder Scrolls lore
+4. If a word is not literally present in the text, DO NOT include it
 
 EXTRACT:
-- Names (characters, places, races, factions, creatures, items, deities)
-- Game-specific terminology and lore terms
-- Any capitalized word that is NOT at the start of a sentence
+- Character names, place names, race names, faction names that appear in the text
+- Game-specific terminology that appears in the text
+- Capitalized proper nouns that appear in the text
 
 DO NOT EXTRACT:
 - Common English words, pronouns, articles, prepositions
-- Basic verbs and adjectives
-- Uncapitalized common nouns
-
-When in doubt, extract it - better to include extra terms than miss important ones.
+- Any terms NOT literally present in the input text
 
 Text: "{text}"
 
-Return JSON array only: ["Term1", "Term2"] or []"""
+Return JSON array only with terms from the text: ["Term1", "Term2"] or []"""
         messages = [{"role": "user", "content": prompt}]
         try:
             response = self.llm_client.chat_completion_search(messages, temperature=0.1, log_callback=log_callback)
@@ -364,11 +367,14 @@ Return JSON array only: ["Term1", "Term2"] or []"""
                     keywords = []
             
             # Log extracted keywords with detail (debug only)
+            if not isinstance(keywords, list):
+                keywords = []
+            
             try:
-                log_emit(log_callback, self.config, 'DEBUG', f"[RAG] Extracted {len(keywords) if isinstance(keywords, list) else 0} keywords: {keywords}", module='rag_engine', func='extract_keywords', extra={'keywords': keywords, 'input_text': text[:100]})
+                log_emit(log_callback, self.config, 'DEBUG', f"[RAG] Extracted {len(keywords)} keywords: {keywords}", module='rag_engine', func='extract_keywords', extra={'keywords': keywords, 'input_text': text[:100]})
             except Exception:
                 pass
-            return keywords if isinstance(keywords, list) else []
+            return keywords
         except Exception as e:
             log_emit(log_callback, self.config, 'ERROR', f"[RAG] Keyword extraction failed: {e}", exc=e, module='rag_engine', func='extract_keywords')
             return []
