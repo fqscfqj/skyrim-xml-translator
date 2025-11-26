@@ -312,10 +312,19 @@ class RAGEngine:
         except Exception:
             pass
         
-        prompt = f"""Extract Elder Scrolls proper nouns from this text for glossary lookup.
+        prompt = f"""Extract proper nouns and specialized terms from this Elder Scrolls game text for glossary lookup.
 
-Include: character/place/race/faction/creature/item/deity/spell names, lore terms.
-Exclude: common words, generic game terms (health, damage, level), simple adjectives.
+EXTRACT:
+- Names (characters, places, races, factions, creatures, items, deities)
+- Game-specific terminology and lore terms
+- Any capitalized word that is NOT at the start of a sentence
+
+DO NOT EXTRACT:
+- Common English words, pronouns, articles, prepositions
+- Basic verbs and adjectives
+- Uncapitalized common nouns
+
+When in doubt, extract it - better to include extra terms than miss important ones.
 
 Text: "{text}"
 
