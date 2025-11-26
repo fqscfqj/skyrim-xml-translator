@@ -334,7 +334,35 @@ Return JSON array only: ["Term1", "Term2"] or []"""
             response = self.llm_client.chat_completion_search(messages, temperature=0.1, log_callback=log_callback)
             # 清理 markdown 代码块标记
             response = response.replace("```json", "").replace("```", "").strip()
-            keywords = json.loads(response)
+            
+            # 尝试解析 JSON，处理可能被截断的情况
+            keywords = None
+            try:
+                keywords = json.loads(response)
+            except json.JSONDecodeError as json_err:
+                # 尝试修复被截断的 JSON 数组
+                # 查找最后一个完整的元素位置
+                if response.startswith("["):
+                    # 找到最后一个有效的逗号或引号位置
+                    last_valid_pos = -1
+                    # 尝试找到最后一个完整的字符串元素 (以 " 结尾，后面是 , 或 ])
+                    import re
+                    # 匹配所有完整的字符串元素
+                    matches = list(re.finditer(r'"[^"]*"(?=\s*[,\]])', response))
+                    if matches:
+                        last_match = matches[-1]
+                        truncated_response = response[:last_match.end()] + "]"
+                        try:
+                            keywords = json.loads(truncated_response)
+                            log_emit(log_callback, self.config, 'WARNING', f"[RAG] JSON was truncated, recovered {len(keywords)} keywords", module='rag_engine', func='extract_keywords')
+                        except json.JSONDecodeError:
+                            pass
+                
+                # 如果仍然无法解析，记录警告并返回空列表
+                if keywords is None:
+                    log_emit(log_callback, self.config, 'WARNING', f"[RAG] Could not parse keyword extraction response (truncated or malformed JSON)", module='rag_engine', func='extract_keywords')
+                    keywords = []
+            
             # Log extracted keywords with detail (debug only)
             try:
                 log_emit(log_callback, self.config, 'DEBUG', f"[RAG] Extracted {len(keywords) if isinstance(keywords, list) else 0} keywords: {keywords}", module='rag_engine', func='extract_keywords', extra={'keywords': keywords, 'input_text': text[:100]})
