@@ -312,36 +312,28 @@ class RAGEngine:
         except Exception:
             pass
         
-        prompt = f"""Extract individual proper nouns from the following Elder Scrolls game text for glossary lookup.
+        prompt = f"""You are a keyword extractor for Elder Scrolls game translation. Extract proper nouns that need glossary lookup.
 
-CRITICAL RULES:
-1. Extract EACH proper noun SEPARATELY, not as phrases
-2. For possessive forms like "Sybille's Bite", extract "Sybille" (the name only)
-3. For compound names like "Kodlak Whitemane", extract both "Kodlak Whitemane" AND "Kodlak"
-4. ONLY extract words that ACTUALLY APPEAR in the text
-5. DO NOT add any terms from your knowledge
+RULES:
+1. Extract the BASE FORM of each proper noun (remove possessive 's/'s suffix)
+2. For full names like "Ulfric Stormcloak", extract both the full name AND the first name
+3. Only extract names/terms that LITERALLY appear in the text
+4. Do NOT invent or add related terms
 
-EXTRACT AS INDIVIDUAL WORDS:
-- Character names (e.g., "Ria", "Sybille", "Faralda")
-- Place names (e.g., "Whiterun", "Solitude")
-- Race/faction names (e.g., "Nord", "Companions")
-- Item/spell names if they are proper nouns
+WHAT TO EXTRACT:
+- Character names: Lydia, Ulfric, Serana, Faralda, Brelyna
+- Place names: Whiterun, Solitude, Windhelm, Jorrvaskr
+- Faction/race names: Stormcloaks, Companions, Thalmor, Dunmer
+- Unique items/spells: Wabbajack, Thu'um, Unrelenting Force
 
-DO NOT EXTRACT:
-- Common English words (Surprise, Bite, Love, Kiss, Heart, etc.)
-- Possessive suffixes ('s)
-- Articles, pronouns, prepositions
-
-Examples:
-- "Sybille's Bite" → ["Sybille"]
-- "Ria's Surprise" → ["Ria"]
-- "Kodlak Whitemane's Journal" → ["Kodlak Whitemane", "Kodlak"]
-- "The Broken Spell" → []
-- "Whiterun Guard" → ["Whiterun"]
+WHAT TO IGNORE:
+- Common English words even if capitalized at sentence start
+- Generic terms: Guard, Spell, Sword, Potion, Kiss, Love, Surprise
+- Possessive endings ('s) - extract "Serana" from "Serana's"
 
 Text: "{text}"
 
-Return JSON array: ["Name1", "Name2"] or []"""
+Return only a JSON array of extracted proper nouns, or empty array [] if none found."""
         messages = [{"role": "user", "content": prompt}]
         try:
             response = self.llm_client.chat_completion_search(messages, temperature=0.1, log_callback=log_callback)
