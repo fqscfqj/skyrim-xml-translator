@@ -2,7 +2,7 @@ import sys
 import os
 from typing import Optional, cast
 import csv
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QLabel, QLineEdit, QPushButton, QTextEdit, 
                              QTabWidget, QFileDialog, QCheckBox, QProgressBar, 
@@ -121,6 +121,8 @@ class Worker(QThread):
             # Each task holds embedding vectors and LLM context in memory
             max_concurrent = min(self.num_threads, 4)  # Cap at 4 to limit memory
             
+            from concurrent.futures import wait, FIRST_COMPLETED
+            
             with ThreadPoolExecutor(max_workers=max_concurrent) as executor:
                 # Use a set to keep track of active futures
                 active_futures = set()
@@ -141,14 +143,7 @@ class Worker(QThread):
                         executor.shutdown(wait=False)
                         break
 
-                    # Wait for at least one future to complete
-                    done, _ = as_completed(active_futures, timeout=None).__next__(), None
-                    # as_completed returns an iterator, we just need one result. 
-                    # Actually, wait, as_completed yields futures as they complete.
-                    # But we want to add new ones as old ones finish.
-                    
-                    # Better approach: use wait(return_when=FIRST_COMPLETED)
-                    from concurrent.futures import wait, FIRST_COMPLETED
+                    # Wait for at least one future to complete using FIRST_COMPLETED
                     done, not_done = wait(active_futures, return_when=FIRST_COMPLETED)
                     
                     for future in done:
@@ -696,7 +691,7 @@ class MainWindow(QMainWindow):
         return container
 
     def browse_file(self):
-        fname, _ = QFileDialog.getOpenFileName(self, i18n.t("title_open_xml"), 'e:\\Github\\trx2', "XML files (*.xml)")
+        fname, _ = QFileDialog.getOpenFileName(self, i18n.t("title_open_xml"), '', "XML files (*.xml)")
         if fname:
             self.file_path_input.setText(fname)
             self.load_xml_to_table()

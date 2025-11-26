@@ -2,9 +2,7 @@ from openai import OpenAI
 import openai
 import time
 import random
-import os
 from src.logging_helper import emit as log_emit
-import traceback
 
 class LLMClient:
     def __init__(self, config_manager, log_callback=None):

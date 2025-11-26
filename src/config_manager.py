@@ -37,8 +37,7 @@ class ConfigManager:
                     "frequency_penalty": None,
                     "presence_penalty": None,
                     "max_tokens": None
-                }
-                ,
+                },
                 "max_retries": 3,
                 "backoff_base": 0.5
             },
@@ -52,8 +51,7 @@ class ConfigManager:
                     "frequency_penalty": None,
                     "presence_penalty": None,
                     "max_tokens": None
-                }
-                ,
+                },
                 "max_retries": 3,
                 "backoff_base": 0.5
             },

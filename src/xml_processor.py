@@ -83,35 +83,30 @@ class XMLProcessor:
         if output_path is None:
             output_path = self.file_path
         
-        if self.tree:
+        if not self.tree:
+            return False
+        
+        try:
+            cfg = ConfigManager()
+        except Exception:
             cfg = None
+        
+        try:
+            if LXML_AVAILABLE:
+                # lxml supports pretty_print
+                self.tree.write(output_path, encoding="utf-8", xml_declaration=True, pretty_print=True)
+            else:
+                # stdlib ElementTree doesn't support pretty_print argument
+                self.tree.write(output_path, encoding="utf-8", xml_declaration=True)
+            return True
+        except TypeError:
+            # Fallback for lxml versions that don't support pretty_print
             try:
-                try:
-                    cfg = ConfigManager()
-                except Exception:
-                    cfg = None
-                if LXML_AVAILABLE:
-                    # lxml supports pretty_print
-                    self.tree.write(output_path, encoding="utf-8", xml_declaration=True, pretty_print=True)
-                else:
-                    # stdlib ElementTree doesn't support pretty_print argument
-                    self.tree.write(output_path, encoding="utf-8", xml_declaration=True)
+                self.tree.write(output_path, encoding="utf-8", xml_declaration=True)
                 return True
-            except TypeError:
-                # Fallback for unexpected implementations
-                try:
-                    self.tree.write(output_path, encoding="utf-8", xml_declaration=True)
-                    return True
-                except Exception as e:
-                    try:
-                        log_emit(None, cfg, 'ERROR', f"Error saving XML: {e}", exc=e, module='xml_processor', func='save_file')
-                    except Exception:
-                        pass
-                    return False
             except Exception as e:
-                try:
-                    log_emit(None, cfg, 'ERROR', f"Error saving XML: {e}", exc=e, module='xml_processor', func='save_file')
-                except Exception:
-                    pass
+                log_emit(None, cfg, 'ERROR', f"Error saving XML: {e}", exc=e, module='xml_processor', func='save_file')
                 return False
-        return False
+        except Exception as e:
+            log_emit(None, cfg, 'ERROR', f"Error saving XML: {e}", exc=e, module='xml_processor', func='save_file')
+            return False

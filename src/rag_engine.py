@@ -1,11 +1,13 @@
 import json
 import os
 import re
+import time
+import gc
 import numpy as np
+from typing import List, Optional, Dict, Any
 from src.logging_helper import emit as log_emit
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from src.llm_client import LLMClient
-import gc
 
 class RAGEngine:
     def __init__(self, config_manager, llm_client: LLMClient):
@@ -157,7 +159,6 @@ class RAGEngine:
                     break
                 
                 while self.pause_flag:
-                    import time
                     time.sleep(0.1)
                     if self.stop_flag: break
 
@@ -257,7 +258,6 @@ class RAGEngine:
                     break
                 
                 while self.pause_flag:
-                    import time
                     time.sleep(0.1)
                     if self.stop_flag: break
 
@@ -396,7 +396,7 @@ Return JSON array only with terms from the text: ["Term1", "Term2"] or []"""
             pass
 
         results = {}
-        debug_info: list | None = [] if return_debug else None
+        debug_info: Optional[List[Dict[str, Any]]] = [] if return_debug else None
         per_keyword_limit = max_terms_per_keyword if max_terms_per_keyword is not None else None
         for query in query_list:
             if per_keyword_limit is not None and per_keyword_limit <= 0:
