@@ -312,26 +312,36 @@ class RAGEngine:
         except Exception:
             pass
         
-        prompt = f"""Extract proper nouns and specialized terms that ACTUALLY APPEAR in the following text for glossary lookup.
+        prompt = f"""Extract individual proper nouns from the following Elder Scrolls game text for glossary lookup.
 
 CRITICAL RULES:
-1. ONLY extract terms that are EXPLICITLY WRITTEN in the given text
-2. DO NOT add any terms from your knowledge that are not in the text
-3. DO NOT hallucinate or guess related terms from Elder Scrolls lore
-4. If a word is not literally present in the text, DO NOT include it
+1. Extract EACH proper noun SEPARATELY, not as phrases
+2. For possessive forms like "Sybille's Bite", extract "Sybille" (the name only)
+3. For compound names like "Kodlak Whitemane", extract both "Kodlak Whitemane" AND "Kodlak"
+4. ONLY extract words that ACTUALLY APPEAR in the text
+5. DO NOT add any terms from your knowledge
 
-EXTRACT:
-- Character names, place names, race names, faction names that appear in the text
-- Game-specific terminology that appears in the text
-- Capitalized proper nouns that appear in the text
+EXTRACT AS INDIVIDUAL WORDS:
+- Character names (e.g., "Ria", "Sybille", "Faralda")
+- Place names (e.g., "Whiterun", "Solitude")
+- Race/faction names (e.g., "Nord", "Companions")
+- Item/spell names if they are proper nouns
 
 DO NOT EXTRACT:
-- Common English words, pronouns, articles, prepositions
-- Any terms NOT literally present in the input text
+- Common English words (Surprise, Bite, Love, Kiss, Heart, etc.)
+- Possessive suffixes ('s)
+- Articles, pronouns, prepositions
+
+Examples:
+- "Sybille's Bite" → ["Sybille"]
+- "Ria's Surprise" → ["Ria"]
+- "Kodlak Whitemane's Journal" → ["Kodlak Whitemane", "Kodlak"]
+- "The Broken Spell" → []
+- "Whiterun Guard" → ["Whiterun"]
 
 Text: "{text}"
 
-Return JSON array only with terms from the text: ["Term1", "Term2"] or []"""
+Return JSON array: ["Name1", "Name2"] or []"""
         messages = [{"role": "user", "content": prompt}]
         try:
             response = self.llm_client.chat_completion_search(messages, temperature=0.1, log_callback=log_callback)
@@ -347,9 +357,7 @@ Return JSON array only with terms from the text: ["Term1", "Term2"] or []"""
                 # 查找最后一个完整的元素位置
                 if response.startswith("["):
                     # 找到最后一个有效的逗号或引号位置
-                    last_valid_pos = -1
                     # 尝试找到最后一个完整的字符串元素 (以 " 结尾，后面是 , 或 ])
-                    import re
                     # 匹配所有完整的字符串元素
                     matches = list(re.finditer(r'"[^"]*"(?=\s*[,\]])', response))
                     if matches:
@@ -370,11 +378,41 @@ Return JSON array only with terms from the text: ["Term1", "Term2"] or []"""
             if not isinstance(keywords, list):
                 keywords = []
             
+            # 后处理：拆分包含所有格的短语，提取真正的专有名词
+            # 例如 "Sybille's Bite" → "Sybille"
+            processed_keywords = []
+            for kw in keywords:
+                if not isinstance(kw, str):
+                    continue
+                kw = kw.strip()
+                if not kw:
+                    continue
+                
+                # 如果包含 's 所有格，提取所有格前的名词
+                if "'s " in kw or "'s " in kw:
+                    # "Sybille's Bite" → "Sybille"
+                    parts = re.split(r"['']\s*s\s+", kw, maxsplit=1)
+                    if parts[0].strip():
+                        processed_keywords.append(parts[0].strip())
+                elif kw.endswith("'s") or kw.endswith("'s"):
+                    # "Sybille's" → "Sybille"
+                    processed_keywords.append(kw[:-2].strip())
+                else:
+                    processed_keywords.append(kw)
+            
+            # 去重但保持顺序
+            seen = set()
+            unique_keywords = []
+            for kw in processed_keywords:
+                if kw.lower() not in seen:
+                    seen.add(kw.lower())
+                    unique_keywords.append(kw)
+            
             try:
-                log_emit(log_callback, self.config, 'DEBUG', f"[RAG] Extracted {len(keywords)} keywords: {keywords}", module='rag_engine', func='extract_keywords', extra={'keywords': keywords, 'input_text': text[:100]})
+                log_emit(log_callback, self.config, 'DEBUG', f"[RAG] Extracted {len(unique_keywords)} keywords: {unique_keywords}", module='rag_engine', func='extract_keywords', extra={'keywords': unique_keywords, 'input_text': text[:100]})
             except Exception:
                 pass
-            return keywords
+            return unique_keywords
         except Exception as e:
             log_emit(log_callback, self.config, 'ERROR', f"[RAG] Keyword extraction failed: {e}", exc=e, module='rag_engine', func='extract_keywords')
             return []
