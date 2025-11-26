@@ -9,7 +9,40 @@ class Translator:
         self.llm_client = llm_client
         self.rag_engine = rag_engine
 
-    def translate_text(self, text, use_rag=True, log_callback=None):
+    def _is_likely_untranslated(self, source: str, translation: str) -> bool:
+        """
+        检测翻译结果是否可能未翻译（返回了原文或大部分原文）
+        """
+        if not source or not translation:
+            return False
+        
+        source_clean = source.strip().lower()
+        translation_clean = translation.strip().lower()
+        
+        # 完全相同
+        if source_clean == translation_clean:
+            return True
+        
+        # 翻译结果包含在原文中，或者原文包含在翻译结果中（可能是部分复制）
+        if len(source_clean) > 10 and len(translation_clean) > 10:
+            if source_clean in translation_clean or translation_clean in source_clean:
+                return True
+        
+        # 检测翻译结果中是否主要是英文字符（应该主要是中文）
+        # 排除 XML 标签、占位符等
+        text_only = re.sub(r'<[^>]+>|%\w+|\{\d+\}|\[[^\]]+\]', '', translation)
+        if len(text_only) > 5:
+            # 计算中文字符比例
+            chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', text_only))
+            alpha_chars = len(re.findall(r'[a-zA-Z]', text_only))
+            total_chars = chinese_chars + alpha_chars
+            if total_chars > 5 and alpha_chars > chinese_chars * 2:
+                # 英文字符数量是中文的2倍以上，可能未翻译
+                return True
+        
+        return False
+
+    def translate_text(self, text, use_rag=True, log_callback=None, max_retries=2):
         if not text or not str(text).strip():
             # Normalize empty inputs to empty string
             return ""
@@ -125,46 +158,78 @@ Output strictly in JSON format: {"translation": "YOUR_TRANSLATION_HERE"}
             {"role": "user", "content": user_content}
         ]
 
-        # 5. Call LLM
-        try:
-            log_emit(log_callback, self.rag_engine.config, 'DEBUG', f"Translate call: message_len={len(text)} use_rag={use_rag}", module='translator', func='translate_text')
-            response = self.llm_client.chat_completion(messages, log_callback=log_callback)
-            # Parse JSON
+        # 5. Call LLM with retry logic for untranslated results
+        retry_count = 0
+        last_translation = None
+        
+        while retry_count <= max_retries:
             try:
-                # Clean potential markdown code blocks
-                clean_response = response.replace("```json", "").replace("```", "").strip()
-                data = json.loads(clean_response)
-                # Ensure returned translation is a string
-                return str(data.get("translation", text))
-            except json.JSONDecodeError:
-                # Fallback if not valid JSON, though prompt asks for it
-                log_emit(log_callback, self.rag_engine.config, 'WARNING', f"JSON Parse Error. Response: {response}", module='translator', func='translate_text')
-                # Try to find a JSON substring in the response
-                json_match = None
+                if retry_count > 0:
+                    log_emit(log_callback, self.rag_engine.config, 'WARNING', f"Retry {retry_count}/{max_retries}: Previous result appears untranslated, retrying...", module='translator', func='translate_text')
+                    # 添加更强调翻译的提示
+                    retry_messages = messages.copy()
+                    retry_messages.append({"role": "user", "content": "IMPORTANT: You MUST translate the text to Simplified Chinese. Do NOT return the original English text. Translate now:"})
+                    current_messages = retry_messages
+                else:
+                    current_messages = messages
+                
+                log_emit(log_callback, self.rag_engine.config, 'DEBUG', f"Translate call: message_len={len(text)} use_rag={use_rag} retry={retry_count}", module='translator', func='translate_text')
+                response = self.llm_client.chat_completion(current_messages, log_callback=log_callback)
+                
+                # Parse JSON
+                translation = None
                 try:
-                    # Find a first-to-last brace substring
-                    m = re.search(r"\{.*\}", response, flags=re.DOTALL)
-                    if m:
-                        json_match = m.group(0)
-                        data = json.loads(json_match)
-                        return str(data.get("translation", response.strip()))
-                except Exception:
-                    json_match = None
-
-                # If we couldn't extract JSON, try asking the LLM once to reformat as JSON
-                try:
-                    followup_msg = messages + [{"role": "user", "content": "Please reformat your previous reply into strict JSON: {\"translation\": \"...\"}. Respond only with JSON."}]
-                    followup_response = self.llm_client.chat_completion(followup_msg, log_callback=log_callback)
-                    clean_followup = followup_response.replace("```json", "").replace("```", "").strip()
+                    # Clean potential markdown code blocks
+                    clean_response = response.replace("```json", "").replace("```", "").strip()
+                    data = json.loads(clean_response)
+                    translation = str(data.get("translation", text))
+                except json.JSONDecodeError:
+                    # Fallback if not valid JSON, though prompt asks for it
+                    log_emit(log_callback, self.rag_engine.config, 'WARNING', f"JSON Parse Error. Response: {response}", module='translator', func='translate_text')
+                    # Try to find a JSON substring in the response
                     try:
-                        data = json.loads(clean_followup)
-                        return str(data.get("translation", response.strip()))
-                    except json.JSONDecodeError:
-                        log_emit(log_callback, self.rag_engine.config, 'WARNING', f"Followup JSON Parse Error. Response: {followup_response}", module='translator', func='translate_text')
-                except Exception:
-                    # If the followup fails, fall back to raw response
-                    pass
-                return str(response.strip())
-        except Exception as e:
-            log_emit(log_callback, self.rag_engine.config, 'ERROR', f"Translation failed: {e}", exc=e, module='translator', func='translate_text')
-            return str(text)
+                        m = re.search(r"\{.*\}", response, flags=re.DOTALL)
+                        if m:
+                            data = json.loads(m.group(0))
+                            translation = str(data.get("translation", response.strip()))
+                    except Exception:
+                        pass
+
+                    # If we couldn't extract JSON, try asking the LLM once to reformat as JSON
+                    if translation is None:
+                        try:
+                            followup_msg = messages + [{"role": "user", "content": "Please reformat your previous reply into strict JSON: {\"translation\": \"...\"}. Respond only with JSON."}]
+                            followup_response = self.llm_client.chat_completion(followup_msg, log_callback=log_callback)
+                            clean_followup = followup_response.replace("```json", "").replace("```", "").strip()
+                            try:
+                                data = json.loads(clean_followup)
+                                translation = str(data.get("translation", response.strip()))
+                            except json.JSONDecodeError:
+                                log_emit(log_callback, self.rag_engine.config, 'WARNING', f"Followup JSON Parse Error. Response: {followup_response}", module='translator', func='translate_text')
+                        except Exception:
+                            pass
+                    
+                    if translation is None:
+                        translation = str(response.strip())
+                
+                last_translation = translation
+                
+                # 检查是否未翻译
+                if self._is_likely_untranslated(text, translation):
+                    retry_count += 1
+                    if retry_count <= max_retries:
+                        continue
+                    else:
+                        log_emit(log_callback, self.rag_engine.config, 'WARNING', f"Translation still appears untranslated after {max_retries} retries", module='translator', func='translate_text')
+                        return translation
+                else:
+                    return translation
+                    
+            except Exception as e:
+                log_emit(log_callback, self.rag_engine.config, 'ERROR', f"Translation failed: {e}", exc=e, module='translator', func='translate_text')
+                retry_count += 1
+                if retry_count > max_retries:
+                    return str(text)
+        
+        # 如果所有重试都失败，返回最后一次的翻译结果
+        return last_translation if last_translation else str(text)
