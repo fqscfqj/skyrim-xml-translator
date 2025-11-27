@@ -312,29 +312,14 @@ class RAGEngine:
         except Exception:
             pass
         
-        prompt = f"""You are a keyword extractor for Elder Scrolls/Skyrim game translation. Extract all game-specific terms that may need glossary lookup.
+        prompt = f"""Extract Elder Scrolls/Skyrim proper nouns for glossary lookup.
 
-RULES:
-1. Extract the BASE FORM of each term (remove possessive 's/'s suffix)
-2. For full names like "Ulfric Stormcloak", extract both the full name AND the first name
-3. Only extract terms that LITERALLY appear in the text
-4. Be INCLUSIVE - when in doubt, extract the term
+Extract: names (Lydia, Ulfric), places (Whiterun, Solitude), factions (Stormcloaks, Thalmor), races (Dunmer, Nord), titles (Thane, Jarl, Housecarl, Dragonborn), items, spells, lore terms.
 
-WHAT TO EXTRACT:
-- Character names: Lydia, Ulfric, Serana, Faralda, Brelyna, Nazeem
-- Place names: Whiterun, Solitude, Windhelm, Jorrvaskr, Skyrim
-- Faction/race names: Stormcloaks, Companions, Thalmor, Dunmer, Nord
-- Game-specific titles: Thane, Jarl, Housecarl, Dragonborn, Dovahkiin, Greybeard
-- Unique items/spells: Wabbajack, Thu'um, Unrelenting Force, Daedric
-- Lore terms: Aedra, Daedra, Dwemer, Falmer, Alduin, Talos
-
-WHAT TO IGNORE:
-- Common English words: the, and, but, with, from
-- Generic terms that are NOT Elder Scrolls specific: Guard, Spell, Sword, Potion
+Rules: Only extract terms in text. Remove possessive 's. Return JSON array, e.g. ["Thane", "Whiterun"] or [].
 
 Text: "{text}"
-
-Return only a JSON array of extracted terms, or empty array [] if none found."""
+"""
         messages = [{"role": "user", "content": prompt}]
         try:
             response = self.llm_client.chat_completion_search(messages, temperature=0.1, log_callback=log_callback)
