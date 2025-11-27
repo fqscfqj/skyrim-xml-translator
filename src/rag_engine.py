@@ -312,28 +312,29 @@ class RAGEngine:
         except Exception:
             pass
         
-        prompt = f"""You are a keyword extractor for Elder Scrolls game translation. Extract proper nouns that need glossary lookup.
+        prompt = f"""You are a keyword extractor for Elder Scrolls/Skyrim game translation. Extract all game-specific terms that may need glossary lookup.
 
 RULES:
-1. Extract the BASE FORM of each proper noun (remove possessive 's/'s suffix)
+1. Extract the BASE FORM of each term (remove possessive 's/'s suffix)
 2. For full names like "Ulfric Stormcloak", extract both the full name AND the first name
-3. Only extract names/terms that LITERALLY appear in the text
-4. Do NOT invent or add related terms
+3. Only extract terms that LITERALLY appear in the text
+4. Be INCLUSIVE - when in doubt, extract the term
 
 WHAT TO EXTRACT:
-- Character names: Lydia, Ulfric, Serana, Faralda, Brelyna
-- Place names: Whiterun, Solitude, Windhelm, Jorrvaskr
-- Faction/race names: Stormcloaks, Companions, Thalmor, Dunmer
-- Unique items/spells: Wabbajack, Thu'um, Unrelenting Force
+- Character names: Lydia, Ulfric, Serana, Faralda, Brelyna, Nazeem
+- Place names: Whiterun, Solitude, Windhelm, Jorrvaskr, Skyrim
+- Faction/race names: Stormcloaks, Companions, Thalmor, Dunmer, Nord
+- Game-specific titles: Thane, Jarl, Housecarl, Dragonborn, Dovahkiin, Greybeard
+- Unique items/spells: Wabbajack, Thu'um, Unrelenting Force, Daedric
+- Lore terms: Aedra, Daedra, Dwemer, Falmer, Alduin, Talos
 
 WHAT TO IGNORE:
-- Common English words even if capitalized at sentence start
-- Generic terms: Guard, Spell, Sword, Potion, Kiss, Love, Surprise
-- Possessive endings ('s) - extract "Serana" from "Serana's"
+- Common English words: the, and, but, with, from
+- Generic terms that are NOT Elder Scrolls specific: Guard, Spell, Sword, Potion
 
 Text: "{text}"
 
-Return only a JSON array of extracted proper nouns, or empty array [] if none found."""
+Return only a JSON array of extracted terms, or empty array [] if none found."""
         messages = [{"role": "user", "content": prompt}]
         try:
             response = self.llm_client.chat_completion_search(messages, temperature=0.1, log_callback=log_callback)
