@@ -5,7 +5,7 @@
 一个面向 Skyrim 模组 XML 文本的翻译与术语管理工具，结合 GUI 与 RAG（检索增强生成）流程，旨在通过向量检索和术语库确保专有名词和术语的一致性与可控性，加快本地化工作流。
 
 这是一个基于 PyQt6 和 LLM (大语言模型) 的 Skyrim XML 文件翻译工具。它利用 RAG (检索增强生成) 技术来确保术语的一致性，特别适合用于翻译 Skyrim 模组的 XML 文本文件。
-
+这是一个基于 PyQt6 和 LLM (大语言模型) 的 Skyrim XML 文件翻译工具。它利用 RAG (检索增强生成) 技术来确保术语的一致性，特别适合用于翻译 Skyrim 模组的 XML 文本文件。
 ## 功能特点
 
 * **图形用户界面 (GUI)**: 直观的 PyQt6 界面，方便操作。
@@ -24,6 +24,8 @@
   * 可调整并发线程数。
 
 ## 安装
+## Recent Fixes
+- Fixed: LLM optional parameters could be enabled but became unchangeable in the UI on some platforms; the checkbox now uses the boolean `toggled` signal to enable and disable the related parameter controls reliably (see `src/gui_main.py`).
 
 1.  确保已安装 Python 3.8 或更高版本。
 2.  克隆或下载本项目。

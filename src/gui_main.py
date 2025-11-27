@@ -491,8 +491,9 @@ class MainWindow(QMainWindow):
         def add_param_control(name, label_text, widget):
             checkbox = QCheckBox(label_text)
             widget.setEnabled(False)
-            checkbox.stateChanged.connect(
-                lambda state, w=widget: w.setEnabled(state == Qt.CheckState.Checked)
+            # Use toggled (bool) rather than stateChanged (enum int) to avoid enum/value mismatches
+            checkbox.toggled.connect(
+                lambda checked, w=widget: w.setEnabled(bool(checked))
             )
             row_widget = QWidget()
             row_layout = QHBoxLayout(row_widget)
@@ -559,8 +560,9 @@ class MainWindow(QMainWindow):
         def add_search_param_control(name, label_text, widget):
             checkbox = QCheckBox(label_text)
             widget.setEnabled(False)
-            checkbox.stateChanged.connect(
-                lambda state, w=widget: w.setEnabled(state == Qt.CheckState.Checked)
+            # Use toggled (bool) rather than stateChanged to ensure consistent boolean values
+            checkbox.toggled.connect(
+                lambda checked, w=widget: w.setEnabled(bool(checked))
             )
             row_widget = QWidget()
             row_layout = QHBoxLayout(row_widget)
