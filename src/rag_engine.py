@@ -312,15 +312,26 @@ class RAGEngine:
         except Exception:
             pass
         
-        prompt = f"""Extract Elder Scrolls/Skyrim proper nouns for glossary lookup.
+        prompt = f"""Extract ALL proper nouns from the text for glossary lookup in Elder Scrolls/Skyrim context.
 
-Extract: names (Lydia, Ulfric), places (Whiterun, Solitude), factions (Stormcloaks, Thalmor), races (Dunmer, Nord), titles (Thane, Jarl, Housecarl, Dragonborn), items, spells, lore terms.
+MUST extract: 
+- Character names (e.g., Lydia, Ulfric, Mjoll, Serana, Aerin)
+- Place names (e.g., Whiterun, Solitude, Riften)
+- Faction names (e.g., Stormcloaks, Thalmor, Thieves Guild)
+- Race names (e.g., Dunmer, Nord, Khajiit)
+- Titles (e.g., Thane, Jarl, Housecarl, Dragonborn)
+- Items, spells, lore terms
 
-Rules: Only extract terms in text. Remove possessive 's. Return JSON array, e.g. ["Thane", "Whiterun"] or [].
+Rules:
+1. Extract ANY capitalized words that could be proper nouns
+2. Include ALL names even if they seem common (like "Mjoll", "Aerin", etc.)
+3. Remove possessive 's from names
+4. Return JSON array, e.g. ["Mjoll", "Thane", "Whiterun"] or [] if none found
 
 Text: "{text}"
 """
         messages = [{"role": "user", "content": prompt}]
+        llm_keywords = []
         try:
             response = self.llm_client.chat_completion_search(messages, temperature=0.1, log_callback=log_callback)
             # 清理 markdown 代码块标记
@@ -380,20 +391,105 @@ Text: "{text}"
             
             # 去重但保持顺序
             seen = set()
-            unique_keywords = []
             for kw in processed_keywords:
                 if kw.lower() not in seen:
                     seen.add(kw.lower())
-                    unique_keywords.append(kw)
+                    llm_keywords.append(kw)
             
-            try:
-                log_emit(log_callback, self.config, 'DEBUG', f"[RAG] Extracted {len(unique_keywords)} keywords: {unique_keywords}", module='rag_engine', func='extract_keywords', extra={'keywords': unique_keywords, 'input_text': text[:100]})
-            except Exception:
-                pass
-            return unique_keywords
         except Exception as e:
             log_emit(log_callback, self.config, 'ERROR', f"[RAG] Keyword extraction failed: {e}", exc=e, module='rag_engine', func='extract_keywords')
-            return []
+        
+        # 后备机制：使用正则表达式提取大写开头的单词作为潜在专有名词
+        # 这可以捕获 LLM 遗漏的名词
+        regex_keywords = self._extract_proper_nouns_regex(text)
+        
+        # 合并 LLM 提取和正则提取的结果
+        seen_lower = set(kw.lower() for kw in llm_keywords)
+        for kw in regex_keywords:
+            if kw.lower() not in seen_lower:
+                seen_lower.add(kw.lower())
+                llm_keywords.append(kw)
+        
+        try:
+            log_emit(log_callback, self.config, 'DEBUG', f"[RAG] Extracted {len(llm_keywords)} keywords: {llm_keywords}", module='rag_engine', func='extract_keywords', extra={'keywords': llm_keywords, 'input_text': text[:100]})
+        except Exception:
+            pass
+        return llm_keywords
+    
+    def _extract_proper_nouns_regex(self, text: str) -> list:
+        """
+        使用正则表达式提取潜在的专有名词（大写开头的单词）
+        作为 LLM 提取的后备机制
+        """
+        # 常见的英文词汇（不应作为专有名词）
+        common_words = {
+            'i', 'a', 'an', 'the', 'and', 'or', 'but', 'if', 'then', 'else', 'when',
+            'at', 'by', 'for', 'with', 'about', 'against', 'between', 'into', 'through',
+            'during', 'before', 'after', 'above', 'below', 'to', 'from', 'up', 'down',
+            'in', 'out', 'on', 'off', 'over', 'under', 'again', 'further', 'once',
+            'here', 'there', 'where', 'why', 'how', 'all', 'each', 'few', 'more',
+            'most', 'other', 'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same',
+            'so', 'than', 'too', 'very', 'just', 'can', 'will', 'don', 'should', 'now',
+            'he', 'she', 'it', 'we', 'they', 'you', 'him', 'her', 'his', 'my', 'your',
+            'our', 'their', 'this', 'that', 'these', 'those', 'am', 'is', 'are', 'was',
+            'were', 'be', 'been', 'being', 'have', 'has', 'had', 'having', 'do', 'does',
+            'did', 'doing', 'would', 'could', 'might', 'must', 'shall', 'may', 'need',
+            'dare', 'ought', 'used', 'what', 'which', 'who', 'whom', 'whose', 'because',
+            'as', 'until', 'while', 'of', 'although', 'though', 'after', 'before',
+            'unless', 'since', 'even', 'also', 'still', 'already', 'yet', 'ever', 'never',
+            'always', 'sometimes', 'often', 'usually', 'really', 'quite', 'rather',
+            'almost', 'enough', 'much', 'well', 'far', 'little', 'long', 'high', 'low',
+            'old', 'young', 'new', 'first', 'last', 'next', 'good', 'bad', 'great',
+            'right', 'left', 'ok', 'okay', 'yes', 'yeah', 'hmph', 'huh', 'oh', 'ah',
+            'hey', 'hi', 'hello', 'bye', 'goodbye', 'thanks', 'thank', 'please', 'sorry',
+            'alright', 'fine', 'come', 'go', 'get', 'got', 'let', 'make', 'made', 'take',
+            'took', 'give', 'gave', 'see', 'saw', 'know', 'knew', 'think', 'thought',
+            'tell', 'told', 'say', 'said', 'want', 'wanted', 'look', 'looked', 'like',
+            'liked', 'love', 'loved', 'hate', 'hated', 'feel', 'felt', 'find', 'found',
+            'keep', 'kept', 'leave', 'left', 'put', 'set', 'seem', 'seemed', 'help',
+            'helped', 'show', 'showed', 'hear', 'heard', 'play', 'played', 'run', 'ran',
+            'move', 'moved', 'live', 'lived', 'believe', 'believed', 'hold', 'held',
+            'bring', 'brought', 'happen', 'happened', 'write', 'wrote', 'provide',
+            'sit', 'sat', 'stand', 'stood', 'lose', 'lost', 'pay', 'paid', 'meet', 'met',
+            'include', 'included', 'continue', 'continued', 'learn', 'learned', 'change',
+            'changed', 'lead', 'led', 'understand', 'understood', 'watch', 'watched',
+            'follow', 'followed', 'stop', 'stopped', 'create', 'created', 'speak', 'spoke',
+            'read', 'allow', 'allowed', 'add', 'added', 'spend', 'spent', 'grow', 'grew',
+            'open', 'opened', 'walk', 'walked', 'win', 'won', 'offer', 'offered',
+            'remember', 'remembered', 'consider', 'considered', 'appear', 'appeared',
+            'buy', 'bought', 'wait', 'waited', 'serve', 'served', 'die', 'died', 'send',
+            'sent', 'expect', 'expected', 'build', 'built', 'stay', 'stayed', 'fall',
+            'fell', 'cut', 'reach', 'reached', 'kill', 'killed', 'remain', 'remained',
+            # 句首常见词
+            'well', 'so', 'but', 'and', 'because', 'however', 'therefore', 'thus',
+            'meanwhile', 'furthermore', 'moreover', 'although', 'nevertheless',
+            'anyway', 'besides', 'instead', 'otherwise', 'perhaps', 'maybe', 'probably',
+            'certainly', 'definitely', 'obviously', 'clearly', 'apparently', 'actually',
+            'basically', 'essentially', 'generally', 'normally', 'typically', 'usually',
+            'suddenly', 'finally', 'eventually', 'immediately', 'recently', 'currently',
+            'today', 'tomorrow', 'yesterday', 'now', 'then', 'soon', 'later', 'earlier',
+        }
+        
+        # 提取大写开头的单词（可能是专有名词）
+        # 匹配：句首或句中的大写开头单词
+        pattern = r"\b([A-Z][a-z]{2,})\b"
+        matches = re.findall(pattern, text)
+        
+        # 过滤掉常见词
+        proper_nouns = []
+        for word in matches:
+            if word.lower() not in common_words:
+                proper_nouns.append(word)
+        
+        # 去重但保持顺序
+        seen = set()
+        unique_nouns = []
+        for noun in proper_nouns:
+            if noun.lower() not in seen:
+                seen.add(noun.lower())
+                unique_nouns.append(noun)
+        
+        return unique_nouns
 
     def search_terms(self, query_list, threshold=0.8, log_callback=None, top_k=3, max_terms_per_keyword=None, return_debug=False):
         """
