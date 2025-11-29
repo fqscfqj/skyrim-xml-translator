@@ -44,6 +44,8 @@
     "msg_task_paused": "任务已暂停。",
     "msg_task_resumed": "任务已恢复。",
     "msg_starting_translation": "开始翻译 {total} 个项目，使用 {threads} 个线程。",
+    "msg_duplicate_optimization": "检测到重复内容优化：共 {total} 个条目，{unique} 个唯一内容，节省 {saved} 次翻译调用。",
+    "msg_duplicate_applied": "条重复已应用",
     "msg_translation_finished": "翻译任务完成。",
     "msg_worker_error": "工作线程错误: {error}",
     "group_llm_settings": "LLM 设置",

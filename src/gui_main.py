@@ -103,9 +103,30 @@ class Worker(QThread):
     def run(self):
         try:
             total = len(self.items_to_process)
-            log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', i18n.t("msg_starting_translation").format(total=total, threads=self.num_threads), module='gui_main', func='Worker.run')
+            
+            # 优化：检测重复内容，相同内容只翻译一次
+            # 构建源文本到行索引列表的映射
+            source_to_rows = {}  # source_text -> [row_idx1, row_idx2, ...]
+            for row_idx, source in self.items_to_process:
+                if source not in source_to_rows:
+                    source_to_rows[source] = []
+                source_to_rows[source].append(row_idx)
+            
+            # 只需要翻译的唯一文本列表
+            unique_items = [(rows[0], source) for source, rows in source_to_rows.items()]
+            unique_count = len(unique_items)
+            duplicates_saved = total - unique_count
+            
+            if duplicates_saved > 0:
+                log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', 
+                        i18n.t("msg_duplicate_optimization").format(total=total, unique=unique_count, saved=duplicates_saved), 
+                        module='gui_main', func='Worker.run')
+            
+            log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', i18n.t("msg_starting_translation").format(total=unique_count, threads=self.num_threads), module='gui_main', func='Worker.run')
 
             processed_count = 0
+            # 用于存储已翻译结果的缓存
+            translation_cache = {}  # source_text -> translation
 
             def translate_task(item):
                 row_idx, source = item
@@ -126,8 +147,8 @@ class Worker(QThread):
             with ThreadPoolExecutor(max_workers=max_concurrent) as executor:
                 # Use a set to keep track of active futures
                 active_futures = set()
-                # Iterator for items
-                items_iter = iter(self.items_to_process)
+                # Iterator for unique items only
+                items_iter = iter(unique_items)
                 
                 # Fill the pool initially - only max_concurrent tasks at a time
                 for _ in range(max_concurrent):
@@ -155,14 +176,33 @@ class Worker(QThread):
                                 row_idx, source, translation = result
                                 safe_translation = str(translation) if translation is not None else ""
                                 safe_source = str(source) if source is not None else ""
-                                self.result_ready.emit(row_idx, safe_translation)
-                                log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', f"[{processed_count+1}/{total}] {safe_source[:20]}... -> {safe_translation[:20]}...", module='gui_main', func='Worker.run')
+                                
+                                # 获取所有具有相同源文本的行
+                                all_rows = source_to_rows.get(source, [row_idx])
+                                
+                                # 为所有相同内容的行发送翻译结果
+                                for target_row in all_rows:
+                                    self.result_ready.emit(target_row, safe_translation)
+                                
+                                # 缓存翻译结果
+                                translation_cache[source] = safe_translation
+                                
+                                if len(all_rows) > 1:
+                                    log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', 
+                                            f"[{processed_count+1}/{unique_count}] {safe_source[:20]}... -> {safe_translation[:20]}... (x{len(all_rows)} {i18n.t('msg_duplicate_applied')})", 
+                                            module='gui_main', func='Worker.run')
+                                else:
+                                    log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', 
+                                            f"[{processed_count+1}/{unique_count}] {safe_source[:20]}... -> {safe_translation[:20]}...", 
+                                            module='gui_main', func='Worker.run')
                             else:
                                 row_idx, source, _, error = result
                                 log_emit(self.log.emit, self.translator.rag_engine.config, 'ERROR', f"Error translating {str(source)[:20]}...: {error}", module='gui_main', func='Worker.run')
 
                         processed_count += 1
-                        self.progress.emit(int(processed_count / total * 100))
+                        # 进度基于总项目数而非唯一项目数，以反映实际完成进度
+                        completed_total = sum(len(source_to_rows.get(s, [])) for s in translation_cache.keys())
+                        self.progress.emit(int(completed_total / total * 100))
 
                         # Submit next task
                         try:

@@ -44,6 +44,8 @@
     "msg_task_paused": "Task paused.",
     "msg_task_resumed": "Task resumed.",
     "msg_starting_translation": "Starting translation for {total} items with {threads} threads.",
+    "msg_duplicate_optimization": "Duplicate content optimization: {total} total items, {unique} unique, saved {saved} API calls.",
+    "msg_duplicate_applied": "duplicates applied",
     "msg_translation_finished": "Translation task finished.",
     "msg_worker_error": "Worker thread error: {error}",
     "group_llm_settings": "LLM Settings",
