@@ -5,6 +5,8 @@ config.json
 terms_index.json
 *.xml
 logs/
+build/
+dist/
 
 # Python artifact ignores
 __pycache__/
