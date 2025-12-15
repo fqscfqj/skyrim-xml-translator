@@ -2,6 +2,7 @@ import datetime
 import traceback
 import inspect
 import os
+import sys
 from typing import Optional, Callable
 
 
@@ -39,6 +40,9 @@ def _resolve_log_file_path(config_manager):
 
 
 def _write_log_to_disk(path: Optional[str], message: str) -> None:
+    # Avoid writing logs to disk when running as a bundled executable
+    if getattr(sys, 'frozen', False) or hasattr(sys, '_MEIPASS'):
+        return
     if not path:
         return
     try:
@@ -127,12 +131,22 @@ def emit(log_callback: Optional[Callable[[str], None]], config_manager, level: s
             pass
 
     formatted = format_log_message(level, message, module=module, func=func, lineno=lineno, exc=exc, extra=extra)
-    _write_log_to_disk(_resolve_log_file_path(config_manager), formatted)
+
+    # Only write to disk when not running as a PyInstaller bundled executable
+    try:
+        if not (getattr(sys, 'frozen', False) or hasattr(sys, '_MEIPASS')):
+            _write_log_to_disk(_resolve_log_file_path(config_manager), formatted)
+    except Exception:
+        pass
+
+    # Emit to GUI if callback provided. If running as exe and no callback, do not print to console.
     if log_callback:
         try:
             log_callback(formatted)
         except Exception:
-            # If callback fails, fallback to console
-            print(formatted)
+            # If callback fails and not frozen, fallback to console
+            if not (getattr(sys, 'frozen', False) or hasattr(sys, '_MEIPASS')):
+                print(formatted)
     else:
-        print(formatted)
+        if not (getattr(sys, 'frozen', False) or hasattr(sys, '_MEIPASS')):
+            print(formatted)

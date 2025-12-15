@@ -83,6 +83,37 @@ pip install -r requirements.txt
 * `glossary.json`: 术语库存储文件。
 * `vector_index.npy` & `terms_index.json`: 向量索引文件。
 
+## 打包为 Windows 可执行文件
+
+本项目使用 `PyInstaller` 打包为 Windows 可执行文件。仓库已包含用于打包的脚本:
+
+- `build_exe.py`: PyInstaller 构建脚本，会自动包含 `locales`、`config.json` 或 `config.example.json`、`glossary.json`、`terms_index.json`、`vector_index.npy` 和 `logs`（若存在）。
+- `build_windows.ps1`: Windows 下的构建辅助脚本（创建虚拟环境并安装依赖后运行 `build_exe.py`）。
+
+快速打包步骤（PowerShell）:
+
+```powershell
+# 1. 在项目根目录运行（可选将 OneFile=:$false 改为目录模式）：
+./build_windows.ps1 -OneFile:$true -Windowed:$true
+
+# 2. 打包完成后，在 dist 目录下找到 `SkyrimXMLTranslator.exe`（或同名文件夹，取决于 onefile/onedir 选项）。
+```
+
+常见问题:
+
+- 如果 UI 无法正常加载，尝试使用 `--console` 打开控制台以查看错误信息：
+
+```powershell
+python build_exe.py --onefile --console
+```
+
+- 如果需要自定义应用图标，可准备 `.ico` 文件并通过 `--icon=path\to\app.ico` 参数传递给 `build_exe.py` 或 `build_windows.ps1` 的 `-IconPath` 参数。
+
+- 注意：在通过 PyInstaller 打包后的 exe 版本中，程序不会将日志写入本地文件（不再生成 `logs/app.log`），日志仅在 GUI 中显示；若需要查看运行期日志，请使用 `--console` 参数以打开控制台输出或在开发模式下运行脚本以保留文件日志。
+
+提示：使用 `--onefile` 时可执行文件体积可能较大（包含所有依赖与资源），这是 PyInstaller 单文件打包的正常现象。
+
+
 ## 注意事项
 
 * 首次使用前请务必配置正确的 API Key 和 Base URL。
