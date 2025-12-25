@@ -51,6 +51,9 @@ pip install -r requirements.txt
    ```bash
    python main.py
    ```
+## 注意事项
+
+* 默认安装包不包含向量索引文件；需要时用户可放到可执行文件同目录或在软件内重建索引。
 
 2. **配置设置**:
    * 进入 "设置" 标签页。

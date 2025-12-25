@@ -15,9 +15,6 @@ def collect_data_files():
         ('config.json', '.'),
         ('config.example.json', '.'),
         ('glossary.json', '.'),
-        ('terms_index.json', '.'),
-        ('vector_index.npy', '.'),
-        ('logs', 'logs'),
     ]
     add_data = []
     for src, dst in candidates:
