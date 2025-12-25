@@ -696,8 +696,16 @@ class MainWindow(QMainWindow):
         self.rag_threshold.setSingleStep(0.05)
         self.rag_threshold.setValue(self.config_manager.get("rag", "similarity_threshold", 0.75))
 
+        self.rag_reference_max_tokens = NoWheelSpinBox()
+        self.rag_reference_max_tokens.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_reference_max_tokens.setRange(0, 32768)
+        self.rag_reference_max_tokens.setSingleStep(64)
+        self.rag_reference_max_tokens.setValue(self.config_manager.get("rag", "reference_max_tokens", 0))
+        self.rag_reference_max_tokens.setToolTip(i18n.t("tooltip_rag_reference_max_tokens"))
+
         form_layout.addRow(i18n.t("label_rag_max_terms"), self.rag_max_terms)
         form_layout.addRow(i18n.t("label_rag_threshold"), self.rag_threshold)
+        form_layout.addRow(i18n.t("label_rag_reference_max_tokens"), self.rag_reference_max_tokens)
 
         form_layout.addRow(QLabel(f"<b>{i18n.t('group_system_settings')}</b>"))
         self.log_level_combo = NoWheelComboBox()
@@ -1062,6 +1070,7 @@ class MainWindow(QMainWindow):
         
         self.config_manager.set("rag", "max_terms", self.rag_max_terms.value())
         self.config_manager.set("rag", "similarity_threshold", self.rag_threshold.value())
+        self.config_manager.set("rag", "reference_max_tokens", self.rag_reference_max_tokens.value())
         self.config_manager.set("general", "log_level", self.log_level_combo.currentText())
         # Prompt style determines which system prompt is used (default vs nsfw)
         self.config_manager.set("general", "prompt_style", self.prompt_style_combo.currentText())

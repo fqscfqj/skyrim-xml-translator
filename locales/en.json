@@ -72,6 +72,8 @@
     "group_rag_settings": "RAG Settings",
     "label_rag_max_terms": "Max Terms per Keyword:",
     "label_rag_threshold": "Similarity Threshold (0-1):",
+    "label_rag_reference_max_tokens": "Max tokens per RAG reference (0=unlimited):",
+    "tooltip_rag_reference_max_tokens": "Limits how many tokens from each matched RAG reference are injected into the prompt. 0 disables the limit.",
     "group_system_settings": "System Settings",
     "label_log_level": "Log Level:",
     "label_prompt_style": "Prompt Style:",

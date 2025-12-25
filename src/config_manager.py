@@ -66,7 +66,8 @@ class ConfigManager:
             },
             "rag": {
                 "max_terms": 30,
-                "similarity_threshold": 0.75
+                "similarity_threshold": 0.75,
+                "reference_max_tokens": 0
             },
             "paths": {
                 "glossary_file": "glossary.json",

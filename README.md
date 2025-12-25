@@ -22,6 +22,7 @@
   * 自定义 Embedding 模型参数。
   * 支持 "Default" 和 "NSFW" 等不同的提示词风格。
   * 可调整并发线程数。
+   * 可限制每条 RAG 参考注入上下文的最大 token 数（`rag.reference_max_tokens`，0 表示不限制）。
 
 ## 安装
 ## Recent Fixes
@@ -82,12 +83,16 @@ pip install -r requirements.txt
 * `config.json`: 配置文件 (自动生成)。
 * `glossary.json`: 术语库存储文件。
 * `vector_index.npy` & `terms_index.json`: 向量索引文件。
+* `prompts/`: 翻译提示词模板（可手动编辑）。
+   * `prompts/zh.json`: 中文界面/中文提示词模板。
+   * `prompts/en.json`: 英文界面/英文提示词模板。
 
 ## 打包为 Windows 可执行文件
 
 本项目使用 `PyInstaller` 打包为 Windows 可执行文件。仓库已包含用于打包的脚本:
 
 - `build_exe.py`: PyInstaller 构建脚本，会自动包含 `locales`、`config.json` 或 `config.example.json`、`glossary.json`、`terms_index.json`、`vector_index.npy` 和 `logs`（若存在）。
+- `prompts` 目录也会被一并打包，用于自定义翻译提示词模板。
 - `build_windows.ps1`: Windows 下的构建辅助脚本（创建虚拟环境并安装依赖后运行 `build_exe.py`）。
 
 快速打包步骤（PowerShell）:

@@ -72,6 +72,8 @@
     "group_rag_settings": "RAG 设置",
     "label_rag_max_terms": "每个词汇最大术语数:",
     "label_rag_threshold": "相似度阈值 (0-1):",
+    "label_rag_reference_max_tokens": "每条 RAG 参考最大 Tokens（0=不限制）:",
+    "tooltip_rag_reference_max_tokens": "限制每条命中参考内容注入到提示词中的最大 token 数量；设置为 0 表示不启用限制。",
     "group_system_settings": "系统设置",
     "label_log_level": "日志等级:",
     "label_prompt_style": "提示词风格 (prompt_style):",

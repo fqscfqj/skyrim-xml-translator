@@ -11,6 +11,7 @@ def collect_data_files():
     """
     candidates = [
         ('locales', 'locales'),
+        ('prompts', 'prompts'),
         ('config.json', '.'),
         ('config.example.json', '.'),
         ('glossary.json', '.'),

@@ -5,7 +5,7 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('locales', 'locales'), ('config.json', '.'), ('config.example.json', '.'), ('glossary.json', '.'), ('terms_index.json', '.'), ('vector_index.npy', '.'), ('logs', 'logs')],
+    datas=[('locales', 'locales'), ('prompts', 'prompts'), ('config.json', '.'), ('config.example.json', '.'), ('glossary.json', '.'), ('terms_index.json', '.'), ('vector_index.npy', '.'), ('logs', 'logs')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
