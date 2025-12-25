@@ -23,6 +23,25 @@ def collect_data_files():
     return add_data
 
 
+def copy_runtime_folders_to_dist(dist_root: str):
+    """Copy runtime folders (locales/prompts) next to the executable.
+
+    PyInstaller may place bundled datas under the internal extraction directory.
+    This ensures the end-user can edit/override JSON files directly in dist.
+    """
+    folders = ['locales', 'prompts']
+    for folder in folders:
+        src = os.path.abspath(folder)
+        if not os.path.isdir(src):
+            continue
+
+        dst = os.path.join(dist_root, folder)
+        if os.path.exists(dst):
+            shutil.rmtree(dst)
+
+        shutil.copytree(src, dst)
+
+
 def build(onefile=True, windowed=True, name='SkyrimXMLTranslator', icon=None):
     print('Starting build process...')
 
@@ -57,6 +76,11 @@ def build(onefile=True, windowed=True, name='SkyrimXMLTranslator', icon=None):
 
     print(f'Running PyInstaller with args: {args}')
     PyInstaller.__main__.run(args)
+
+    # Ensure key folders are available next to the executable in dist output.
+    dist_root = os.path.join('dist', name) if not onefile else 'dist'
+    if os.path.isdir(dist_root):
+        copy_runtime_folders_to_dist(dist_root)
     print("Build finished. Executable is in 'dist' folder.")
 
 
