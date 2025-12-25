@@ -1,0 +1,5 @@
+{
+  "glossary_header": "## Mandatory Dictionary\nThe following terms MUST be translated exactly as shown (no paraphrasing / no transliteration / no improvisation):",
+  "glossary_instruction_append": "\n\nInstruction: If any term matches, you MUST use the provided translation exactly.",
+  "user_template": "Input: {text}"
+}

@@ -83,9 +83,10 @@ pip install -r requirements.txt
 * `config.json`: 配置文件 (自动生成)。
 * `glossary.json`: 术语库存储文件。
 * `vector_index.npy` & `terms_index.json`: 向量索引文件。
-* `prompts/`: 翻译提示词模板（可手动编辑）。
-   * `prompts/zh.json`: 中文界面/中文提示词模板。
-   * `prompts/en.json`: 英文界面/英文提示词模板。
+* `prompts/`: 翻译提示词模板（可手动编辑；不区分语言，默认提供英文提示词）。
+   * `prompts/translator.system_prompts.json`: System prompt（可自行增加/删除风格条目）。
+   * `prompts/translator.templates.json`: 术语注入与 user 模板。
+   * `prompts/translator.retry.json`: 重试提示词。
 
 ## 打包为 Windows 可执行文件
 

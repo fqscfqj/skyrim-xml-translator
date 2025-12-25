@@ -25,6 +25,58 @@ class Translator:
         words = set(re.findall(r'\b[a-zA-Z]{2,}\b', text.lower()))
         return words
 
+    def _detect_source_language_code(self, text: str) -> str:
+        """Very lightweight language detection for the source text.
+
+        This is heuristic and intentionally dependency-free.
+        """
+        if not text:
+            return "en"
+
+        for ch in text:
+            # CJK Unified Ideographs
+            if "\u4e00" <= ch <= "\u9fff":
+                return "zh"
+            # Hiragana/Katakana
+            if "\u3040" <= ch <= "\u30ff":
+                return "ja"
+            # Hangul
+            if "\uac00" <= ch <= "\ud7af":
+                return "ko"
+            # Cyrillic
+            if "\u0400" <= ch <= "\u04ff":
+                return "ru"
+
+        return "en"
+
+    def _language_display_name(self, code: str) -> str:
+        mapping = {
+            "auto": "auto-detect (LLM decides)",
+            "en": "English",
+            "zh": "Simplified Chinese",
+            "zh-Hant": "Traditional Chinese",
+            "ja": "Japanese",
+            "ko": "Korean",
+            "fr": "French",
+            "de": "German",
+            "es": "Spanish",
+            "ru": "Russian",
+        }
+        return mapping.get(code, code)
+
+    def _apply_prompt_vars(self, template: str, variables: dict) -> str:
+        """Safely replace known {var} tokens without interpreting other braces.
+
+        We intentionally do NOT use str.format here because prompts contain JSON examples
+        like {"translation": "..."}, which would be treated as format fields.
+        """
+        if not isinstance(template, str):
+            return template
+        out = template
+        for key, value in variables.items():
+            out = out.replace("{" + str(key) + "}", str(value))
+        return out
+
     def _rag_token_spans(self, text: str) -> List[tuple[int, int]]:
         """Very lightweight token span estimator.
 
@@ -300,30 +352,54 @@ class Translator:
         # 4. Construct Prompt
         prompt_style = self.rag_engine.config.get("general", "prompt_style", "default")
 
+        source_lang_setting = self.rag_engine.config.get("general", "source_language", "auto")
+        target_lang_setting = self.rag_engine.config.get("general", "target_language", "zh")
+
+        # Do not auto-detect source; leave it to LLM when set to auto.
+        source_lang_code = str(source_lang_setting) if source_lang_setting else "auto"
+        target_lang_code = str(target_lang_setting) if target_lang_setting else "zh"
+
+        prompt_vars = {
+            "source_language_code": source_lang_code,
+            "target_language_code": target_lang_code,
+            "source_language": self._language_display_name(source_lang_code),
+            "target_language": self._language_display_name(target_lang_code),
+        }
+
         system_prompt = self.prompt_manager.get(
             f"translator.system_prompts.{prompt_style}",
             None,
         )
         if not system_prompt:
+            # If the configured style was removed, fallback to the first available prompt.
+            try:
+                system_prompts = self.prompt_manager.get("translator.system_prompts", {})
+                if isinstance(system_prompts, dict) and system_prompts:
+                    first_key = next(iter(system_prompts.keys()))
+                    system_prompt = system_prompts.get(first_key)
+            except Exception:
+                pass
+
+        if not system_prompt:
             system_prompt = (
-                "Translate the input text to Simplified Chinese. "
+                "Translate the input text to {target_language}. "
                 "Output strictly as JSON only: {\"translation\": \"...\"}. "
                 "Preserve all XML/HTML tags, placeholders, and whitespace."
             )
+
+        system_prompt = self._apply_prompt_vars(system_prompt, prompt_vars)
 
         
         if glossary_context:
             glossary_append = self.prompt_manager.get(
                 "translator.glossary_instruction_append",
-                "\n\nInstruction: Translate the text to Simplified Chinese, strictly adhering to the Mandatory Dictionary above for any matching terms.",
+                "\n\nInstruction: Translate the text to {target_language}, strictly adhering to the Mandatory Dictionary above for any matching terms.",
             )
+            glossary_append = self._apply_prompt_vars(glossary_append, prompt_vars)
             system_prompt += f"\n\n{glossary_context}{glossary_append}"
 
         user_template = self.prompt_manager.get("translator.user_template", "Input: {text}")
-        try:
-            user_content = user_template.format(text=text)
-        except Exception:
-            user_content = f"Input: {text}"
+        user_content = self._apply_prompt_vars(user_template, {**prompt_vars, "text": text})
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -343,20 +419,18 @@ class Translator:
                         fragments_str = ", ".join(untranslated_fragments[:5])  # 最多列出5个
                         retry_template = self.prompt_manager.get(
                             "translator.retry.untranslated_fragments",
-                            "CRITICAL: Your previous translation contains untranslated English words embedded in Chinese text: [{fragments}]. These words MUST be translated to Chinese. Translate the entire text to Simplified Chinese now:",
+                            "CRITICAL: Your previous translation contains untranslated English words embedded in the target text: [{fragments}]. Translate the entire text to {target_language} now:",
                         )
-                        try:
-                            retry_prompt = retry_template.format(fragments=fragments_str)
-                        except Exception:
-                            retry_prompt = (
-                                f"CRITICAL: Untranslated English words detected: [{fragments_str}]. "
-                                "Translate the entire text to Simplified Chinese now:"
-                            )
+                        retry_prompt = self._apply_prompt_vars(
+                            retry_template,
+                            {**prompt_vars, "fragments": fragments_str},
+                        )
                     else:
                         retry_prompt = self.prompt_manager.get(
                             "translator.retry.generic",
-                            "IMPORTANT: You MUST translate the text to Simplified Chinese. Do NOT return the original English text. Translate now:",
+                            "IMPORTANT: You MUST translate the text to {target_language}. Do NOT return the original text. Translate now:",
                         )
+                        retry_prompt = self._apply_prompt_vars(retry_prompt, prompt_vars)
                     
                     log_emit(log_callback, self.rag_engine.config, 'WARNING', 
                             f"Retry {retry_count}/{max_retries}: Previous result has issues (untranslated fragments: {untranslated_fragments}), retrying...", 

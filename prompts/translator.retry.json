@@ -1,0 +1,6 @@
+{
+  "retry": {
+    "untranslated_fragments": "CRITICAL: Your previous translation contains untranslated source-language words embedded in the target text: [{fragments}]. Those words MUST be translated (unless they are required proper nouns/tags/placeholders). Re-translate the entire text into {target_language}:",
+    "generic": "IMPORTANT: You MUST translate the text into {target_language}. Do NOT return the original text. Translate now:"
+  }
+}

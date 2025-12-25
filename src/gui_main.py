@@ -713,12 +713,48 @@ class MainWindow(QMainWindow):
         self.log_level_combo.setCurrentText(self.config_manager.get("general", "log_level", "INFO"))
         form_layout.addRow(i18n.t("label_log_level"), self.log_level_combo)
         
-        # Prompt style selection (default: standard localization prompts, nsfw: explicit prompts)
+        # Prompt style selection (dynamic from prompts: translator.system_prompts.*)
         self.prompt_style_combo = NoWheelComboBox()
-        self.prompt_style_combo.addItems(["default", "nsfw"])
-        self.prompt_style_combo.setCurrentText(self.config_manager.get("general", "prompt_style", "default"))
+        self._reload_prompt_style_options()
         self.prompt_style_combo.setToolTip(i18n.t("tooltip_prompt_style"))
         form_layout.addRow(i18n.t("label_prompt_style"), self.prompt_style_combo)
+
+        # Translation language selection (prompts are language-agnostic; user chooses here)
+        def add_lang_option(combo: NoWheelComboBox, label_key: str, code: str):
+            combo.addItem(i18n.t(label_key), code)
+
+        language_items = [
+            ("language_option_en", "en"),
+            ("language_option_zh", "zh"),
+            ("language_option_zh_hant", "zh-Hant"),
+            ("language_option_ja", "ja"),
+            ("language_option_ko", "ko"),
+            ("language_option_fr", "fr"),
+            ("language_option_de", "de"),
+            ("language_option_es", "es"),
+            ("language_option_ru", "ru"),
+        ]
+
+        self.source_language_combo = NoWheelComboBox()
+        add_lang_option(self.source_language_combo, "language_option_auto_detect", "auto")
+        for k, code in language_items:
+            add_lang_option(self.source_language_combo, k, code)
+        current_source = self.config_manager.get("general", "source_language", "auto") or "auto"
+        idx = self.source_language_combo.findData(current_source)
+        if idx == -1:
+            idx = 0
+        self.source_language_combo.setCurrentIndex(idx)
+        form_layout.addRow(i18n.t("label_source_language"), self.source_language_combo)
+
+        self.target_language_combo = NoWheelComboBox()
+        for k, code in language_items:
+            add_lang_option(self.target_language_combo, k, code)
+        current_target = self.config_manager.get("general", "target_language", "zh") or "zh"
+        idx = self.target_language_combo.findData(current_target)
+        if idx == -1:
+            idx = 0
+        self.target_language_combo.setCurrentIndex(idx)
+        form_layout.addRow(i18n.t("label_target_language"), self.target_language_combo)
 
         self.language_combo = NoWheelComboBox()
         self.language_combo.addItem(i18n.t("language_option_auto"), "auto")
@@ -739,6 +775,44 @@ class MainWindow(QMainWindow):
         container_layout.addWidget(scroll_area)
 
         return container
+
+    def _reload_prompt_style_options(self) -> None:
+        """Reload prompt_style combo options from current PromptManager state."""
+        desired = self.config_manager.get("general", "prompt_style", "default")
+
+        styles = []
+        try:
+            system_prompts = self.translator.prompt_manager.get("translator.system_prompts", {})
+            if isinstance(system_prompts, dict):
+                styles = [str(k) for k in system_prompts.keys()]
+        except Exception:
+            styles = []
+
+        if not styles:
+            styles = ["default", "nsfw"]
+
+        # Deterministic order: keep default/nsfw first if present; then the rest sorted.
+        preferred_order = ["default", "nsfw"]
+        ordered: list[str] = []
+        for p in preferred_order:
+            if p in styles and p not in ordered:
+                ordered.append(p)
+        for s in sorted([x for x in styles if x not in ordered]):
+            ordered.append(s)
+
+        self.prompt_style_combo.blockSignals(True)
+        try:
+            self.prompt_style_combo.clear()
+            self.prompt_style_combo.addItems(ordered)
+            if desired in ordered:
+                self.prompt_style_combo.setCurrentText(desired)
+            else:
+                # If config points to a deleted style, fallback to first.
+                self.prompt_style_combo.setCurrentIndex(0)
+        finally:
+            self.prompt_style_combo.blockSignals(False)
+
+    # Note: prompts are intentionally not localized; language changes only affect UI (i18n).
 
     def browse_file(self):
         fname, _ = QFileDialog.getOpenFileName(self, i18n.t("title_open_xml"), '', "XML files (*.xml)")
@@ -1077,6 +1151,13 @@ class MainWindow(QMainWindow):
 
         selected_language = self.language_combo.currentData()
         self.config_manager.set("general", "language", selected_language)
+
+        source_lang = self.source_language_combo.currentData() if hasattr(self, "source_language_combo") else "auto"
+        target_lang = self.target_language_combo.currentData() if hasattr(self, "target_language_combo") else "zh"
+        if target_lang == "auto":
+            target_lang = "zh"
+        self.config_manager.set("general", "source_language", source_lang)
+        self.config_manager.set("general", "target_language", target_lang)
 
         params = self.config_manager.config.setdefault("llm", {}).setdefault("parameters", {})
         for name, (checkbox, widget) in self.model_param_controls.items():
