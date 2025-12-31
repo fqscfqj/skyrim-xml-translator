@@ -10,6 +10,60 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from src.llm_client import LLMClient
 
 class RAGEngine:
+    # Compile regex patterns once for better performance
+    _JSON_STRING_RE = re.compile(r'"[^"]*"(?=\s*[,\]])')
+    _POSSESSIVE_S_RE = re.compile(r"['']\s*s\s+")
+    _PROPER_NOUN_RE = re.compile(r"\b([A-Z][a-z]{2,})\b")
+    _MARKDOWN_CODE_RE = re.compile(r'```(?:json)?')
+    
+    # Use frozenset for O(1) lookup performance instead of recreating dict each time
+    _COMMON_WORDS = frozenset({
+        'i', 'a', 'an', 'the', 'and', 'or', 'but', 'if', 'then', 'else', 'when',
+        'at', 'by', 'for', 'with', 'about', 'against', 'between', 'into', 'through',
+        'during', 'before', 'after', 'above', 'below', 'to', 'from', 'up', 'down',
+        'in', 'out', 'on', 'off', 'over', 'under', 'again', 'further', 'once',
+        'here', 'there', 'where', 'why', 'how', 'all', 'each', 'few', 'more',
+        'most', 'other', 'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same',
+        'so', 'than', 'too', 'very', 'just', 'can', 'will', 'don', 'should', 'now',
+        'he', 'she', 'it', 'we', 'they', 'you', 'him', 'her', 'his', 'my', 'your',
+        'our', 'their', 'this', 'that', 'these', 'those', 'am', 'is', 'are', 'was',
+        'were', 'be', 'been', 'being', 'have', 'has', 'had', 'having', 'do', 'does',
+        'did', 'doing', 'would', 'could', 'might', 'must', 'shall', 'may', 'need',
+        'dare', 'ought', 'used', 'what', 'which', 'who', 'whom', 'whose', 'because',
+        'as', 'until', 'while', 'of', 'although', 'though', 'after', 'before',
+        'unless', 'since', 'even', 'also', 'still', 'already', 'yet', 'ever', 'never',
+        'always', 'sometimes', 'often', 'usually', 'really', 'quite', 'rather',
+        'almost', 'enough', 'much', 'well', 'far', 'little', 'long', 'high', 'low',
+        'old', 'young', 'new', 'first', 'last', 'next', 'good', 'bad', 'great',
+        'right', 'left', 'ok', 'okay', 'yes', 'yeah', 'hmph', 'huh', 'oh', 'ah',
+        'hey', 'hi', 'hello', 'bye', 'goodbye', 'thanks', 'thank', 'please', 'sorry',
+        'alright', 'fine', 'come', 'go', 'get', 'got', 'let', 'make', 'made', 'take',
+        'took', 'give', 'gave', 'see', 'saw', 'know', 'knew', 'think', 'thought',
+        'tell', 'told', 'say', 'said', 'want', 'wanted', 'look', 'looked', 'like',
+        'liked', 'love', 'loved', 'hate', 'hated', 'feel', 'felt', 'find', 'found',
+        'keep', 'kept', 'leave', 'left', 'put', 'set', 'seem', 'seemed', 'help',
+        'helped', 'show', 'showed', 'hear', 'heard', 'play', 'played', 'run', 'ran',
+        'move', 'moved', 'live', 'lived', 'believe', 'believed', 'hold', 'held',
+        'bring', 'brought', 'happen', 'happened', 'write', 'wrote', 'provide',
+        'sit', 'sat', 'stand', 'stood', 'lose', 'lost', 'pay', 'paid', 'meet', 'met',
+        'include', 'included', 'continue', 'continued', 'learn', 'learned', 'change',
+        'changed', 'lead', 'led', 'understand', 'understood', 'watch', 'watched',
+        'follow', 'followed', 'stop', 'stopped', 'create', 'created', 'speak', 'spoke',
+        'read', 'allow', 'allowed', 'add', 'added', 'spend', 'spent', 'grow', 'grew',
+        'open', 'opened', 'walk', 'walked', 'win', 'won', 'offer', 'offered',
+        'remember', 'remembered', 'consider', 'considered', 'appear', 'appeared',
+        'buy', 'bought', 'wait', 'waited', 'serve', 'served', 'die', 'died', 'send',
+        'sent', 'expect', 'expected', 'build', 'built', 'stay', 'stayed', 'fall',
+        'fell', 'cut', 'reach', 'reached', 'kill', 'killed', 'remain', 'remained',
+        'well', 'so', 'but', 'and', 'because', 'however', 'therefore', 'thus',
+        'meanwhile', 'furthermore', 'moreover', 'although', 'nevertheless',
+        'anyway', 'besides', 'instead', 'otherwise', 'perhaps', 'maybe', 'probably',
+        'certainly', 'definitely', 'obviously', 'clearly', 'apparently', 'actually',
+        'basically', 'essentially', 'generally', 'normally', 'typically', 'usually',
+        'suddenly', 'finally', 'eventually', 'immediately', 'recently', 'currently',
+        'today', 'tomorrow', 'yesterday', 'now', 'then', 'soon', 'later', 'earlier',
+    })
+    
     def __init__(self, config_manager, llm_client: LLMClient):
         self.config = config_manager
         self.llm_client = llm_client
@@ -335,7 +389,7 @@ Text: "{text}"
         try:
             response = self.llm_client.chat_completion_search(messages, temperature=0.1, log_callback=log_callback)
             # 清理 markdown 代码块标记
-            response = response.replace("```json", "").replace("```", "").strip()
+            response = self._MARKDOWN_CODE_RE.sub('', response).strip()
             
             # 尝试解析 JSON，处理可能被截断的情况
             keywords = None
@@ -348,7 +402,7 @@ Text: "{text}"
                     # 找到最后一个有效的逗号或引号位置
                     # 尝试找到最后一个完整的字符串元素 (以 " 结尾，后面是 , 或 ])
                     # 匹配所有完整的字符串元素
-                    matches = list(re.finditer(r'"[^"]*"(?=\s*[,\]])', response))
+                    matches = list(self._JSON_STRING_RE.finditer(response))
                     if matches:
                         last_match = matches[-1]
                         truncated_response = response[:last_match.end()] + "]"
@@ -380,7 +434,7 @@ Text: "{text}"
                 # 如果包含 's 所有格，提取所有格前的名词
                 if "'s " in kw or "'s " in kw:
                     # "Sybille's Bite" → "Sybille"
-                    parts = re.split(r"['']\s*s\s+", kw, maxsplit=1)
+                    parts = self._POSSESSIVE_S_RE.split(kw, maxsplit=1)
                     if parts[0].strip():
                         processed_keywords.append(parts[0].strip())
                 elif kw.endswith("'s") or kw.endswith("'s"):
@@ -421,64 +475,14 @@ Text: "{text}"
         使用正则表达式提取潜在的专有名词（大写开头的单词）
         作为 LLM 提取的后备机制
         """
-        # 常见的英文词汇（不应作为专有名词）
-        common_words = {
-            'i', 'a', 'an', 'the', 'and', 'or', 'but', 'if', 'then', 'else', 'when',
-            'at', 'by', 'for', 'with', 'about', 'against', 'between', 'into', 'through',
-            'during', 'before', 'after', 'above', 'below', 'to', 'from', 'up', 'down',
-            'in', 'out', 'on', 'off', 'over', 'under', 'again', 'further', 'once',
-            'here', 'there', 'where', 'why', 'how', 'all', 'each', 'few', 'more',
-            'most', 'other', 'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same',
-            'so', 'than', 'too', 'very', 'just', 'can', 'will', 'don', 'should', 'now',
-            'he', 'she', 'it', 'we', 'they', 'you', 'him', 'her', 'his', 'my', 'your',
-            'our', 'their', 'this', 'that', 'these', 'those', 'am', 'is', 'are', 'was',
-            'were', 'be', 'been', 'being', 'have', 'has', 'had', 'having', 'do', 'does',
-            'did', 'doing', 'would', 'could', 'might', 'must', 'shall', 'may', 'need',
-            'dare', 'ought', 'used', 'what', 'which', 'who', 'whom', 'whose', 'because',
-            'as', 'until', 'while', 'of', 'although', 'though', 'after', 'before',
-            'unless', 'since', 'even', 'also', 'still', 'already', 'yet', 'ever', 'never',
-            'always', 'sometimes', 'often', 'usually', 'really', 'quite', 'rather',
-            'almost', 'enough', 'much', 'well', 'far', 'little', 'long', 'high', 'low',
-            'old', 'young', 'new', 'first', 'last', 'next', 'good', 'bad', 'great',
-            'right', 'left', 'ok', 'okay', 'yes', 'yeah', 'hmph', 'huh', 'oh', 'ah',
-            'hey', 'hi', 'hello', 'bye', 'goodbye', 'thanks', 'thank', 'please', 'sorry',
-            'alright', 'fine', 'come', 'go', 'get', 'got', 'let', 'make', 'made', 'take',
-            'took', 'give', 'gave', 'see', 'saw', 'know', 'knew', 'think', 'thought',
-            'tell', 'told', 'say', 'said', 'want', 'wanted', 'look', 'looked', 'like',
-            'liked', 'love', 'loved', 'hate', 'hated', 'feel', 'felt', 'find', 'found',
-            'keep', 'kept', 'leave', 'left', 'put', 'set', 'seem', 'seemed', 'help',
-            'helped', 'show', 'showed', 'hear', 'heard', 'play', 'played', 'run', 'ran',
-            'move', 'moved', 'live', 'lived', 'believe', 'believed', 'hold', 'held',
-            'bring', 'brought', 'happen', 'happened', 'write', 'wrote', 'provide',
-            'sit', 'sat', 'stand', 'stood', 'lose', 'lost', 'pay', 'paid', 'meet', 'met',
-            'include', 'included', 'continue', 'continued', 'learn', 'learned', 'change',
-            'changed', 'lead', 'led', 'understand', 'understood', 'watch', 'watched',
-            'follow', 'followed', 'stop', 'stopped', 'create', 'created', 'speak', 'spoke',
-            'read', 'allow', 'allowed', 'add', 'added', 'spend', 'spent', 'grow', 'grew',
-            'open', 'opened', 'walk', 'walked', 'win', 'won', 'offer', 'offered',
-            'remember', 'remembered', 'consider', 'considered', 'appear', 'appeared',
-            'buy', 'bought', 'wait', 'waited', 'serve', 'served', 'die', 'died', 'send',
-            'sent', 'expect', 'expected', 'build', 'built', 'stay', 'stayed', 'fall',
-            'fell', 'cut', 'reach', 'reached', 'kill', 'killed', 'remain', 'remained',
-            # 句首常见词
-            'well', 'so', 'but', 'and', 'because', 'however', 'therefore', 'thus',
-            'meanwhile', 'furthermore', 'moreover', 'although', 'nevertheless',
-            'anyway', 'besides', 'instead', 'otherwise', 'perhaps', 'maybe', 'probably',
-            'certainly', 'definitely', 'obviously', 'clearly', 'apparently', 'actually',
-            'basically', 'essentially', 'generally', 'normally', 'typically', 'usually',
-            'suddenly', 'finally', 'eventually', 'immediately', 'recently', 'currently',
-            'today', 'tomorrow', 'yesterday', 'now', 'then', 'soon', 'later', 'earlier',
-        }
-        
         # 提取大写开头的单词（可能是专有名词）
         # 匹配：句首或句中的大写开头单词
-        pattern = r"\b([A-Z][a-z]{2,})\b"
-        matches = re.findall(pattern, text)
+        matches = self._PROPER_NOUN_RE.findall(text)
         
-        # 过滤掉常见词
+        # 过滤掉常见词 (using class-level frozenset for O(1) lookup)
         proper_nouns = []
         for word in matches:
-            if word.lower() not in common_words:
+            if word.lower() not in self._COMMON_WORDS:
                 proper_nouns.append(word)
         
         # 去重但保持顺序
