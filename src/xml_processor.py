@@ -45,12 +45,14 @@ class XMLProcessor:
     def get_strings(self):
         """
         Generator that yields (node, id_text, source_text, dest_text)
+        Memory efficient: uses iterparse-like approach with generator
         """
         if self.root is None:
             return
 
-        # We search for all 'String' elements
-        for string_node in self.root.findall(".//String"):
+        # Use iter() for memory-efficient traversal instead of findall() which builds a list
+        # This is especially important for large XML files
+        for string_node in self.root.iter("String"):
             source_node = string_node.find("Source")
             dest_node = string_node.find("Dest")
             

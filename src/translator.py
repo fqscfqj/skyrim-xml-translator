@@ -8,6 +8,16 @@ from src.logging_helper import emit as log_emit
 from src.prompt_manager import PromptManager
 
 class Translator:
+    # Compile regex patterns once for better performance
+    _XML_TAG_RE = re.compile(r'<[^>]+>')
+    _PLACEHOLDER_RE = re.compile(r'%\w+|\{\d+\}|\[[^\]]*\]')
+    _ENGLISH_WORD_RE = re.compile(r'\b[a-zA-Z]{2,}\b')
+    _CJK_CHAR_RE = re.compile(r'[\u4e00-\u9fff]')
+    _ALPHA_CHAR_RE = re.compile(r'[a-zA-Z]')
+    _POSSESSIVE_RE = re.compile(r"['']\s*s\s+")
+    _JSON_EXTRACT_RE = re.compile(r"\{.*\}", flags=re.DOTALL)
+    _MARKDOWN_CODE_RE = re.compile(r'```(?:json)?')
+    
     def __init__(self, llm_client: LLMClient, rag_engine: RAGEngine):
         self.llm_client = llm_client
         self.rag_engine = rag_engine
@@ -18,11 +28,11 @@ class Translator:
         从文本中提取英文单词（排除占位符、标签等）
         """
         # 移除 XML 标签
-        text = re.sub(r'<[^>]+>', '', text)
+        text = self._XML_TAG_RE.sub('', text)
         # 移除占位符如 %s, %d, {0}, [TAG] 等
-        text = re.sub(r'%\w+|\{\d+\}|\[[^\]]*\]', '', text)
+        text = self._PLACEHOLDER_RE.sub('', text)
         # 提取英文单词（至少2个字母）
-        words = set(re.findall(r'\b[a-zA-Z]{2,}\b', text.lower()))
+        words = set(self._ENGLISH_WORD_RE.findall(text.lower()))
         return words
 
     def _detect_source_language_code(self, text: str) -> str:
@@ -198,11 +208,12 @@ class Translator:
         
         # 检测翻译结果中是否主要是英文字符（应该主要是中文）
         # 排除 XML 标签、占位符等
-        text_only = re.sub(r'<[^>]+>|%\w+|\{\d+\}|\[[^\]]+\]', '', translation)
+        text_only = self._XML_TAG_RE.sub('', translation)
+        text_only = self._PLACEHOLDER_RE.sub('', text_only)
         if len(text_only) > 5:
             # 计算中文字符比例
-            chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', text_only))
-            alpha_chars = len(re.findall(r'[a-zA-Z]', text_only))
+            chinese_chars = len(self._CJK_CHAR_RE.findall(text_only))
+            alpha_chars = len(self._ALPHA_CHAR_RE.findall(text_only))
             total_chars = chinese_chars + alpha_chars
             if total_chars > 5 and alpha_chars > chinese_chars * 2:
                 # 英文字符数量是中文的2倍以上，可能未翻译
@@ -256,16 +267,16 @@ class Translator:
         suspicious_fragments = []
         for word in untranslated_fragments:
             # 检查这个词在译文中的上下文
-            pattern = rf'(?<![a-zA-Z]){re.escape(word)}(?![a-zA-Z])'
-            matches = list(re.finditer(pattern, translation, re.IGNORECASE))
+            pattern = re.compile(rf'(?<![a-zA-Z]){re.escape(word)}(?![a-zA-Z])', re.IGNORECASE)
+            matches = list(pattern.finditer(translation))
             for match in matches:
                 start, end = match.start(), match.end()
                 # 检查前后字符
                 before = translation[max(0, start-1):start] if start > 0 else ''
                 after = translation[end:end+1] if end < len(translation) else ''
                 # 如果前后都不是中文字符，很可能是漏翻
-                is_before_chinese = bool(re.match(r'[\u4e00-\u9fff]', before))
-                is_after_chinese = bool(re.match(r'[\u4e00-\u9fff]', after))
+                is_before_chinese = bool(self._CJK_CHAR_RE.match(before))
+                is_after_chinese = bool(self._CJK_CHAR_RE.match(after))
                 # 如果被中文包围，说明是嵌入在中文句子中的英文，很可能是漏翻
                 if is_before_chinese or is_after_chinese:
                     suspicious_fragments.append(word)
@@ -493,7 +504,7 @@ class Translator:
     def _parse_translation_response(self, response: str, original_text: str, messages: list, log_callback=None) -> str:
         """解析 LLM 的翻译响应，提取 JSON 中的 translation 字段"""
         # Clean potential markdown code blocks
-        clean_response = response.replace("```json", "").replace("```", "").strip()
+        clean_response = self._MARKDOWN_CODE_RE.sub('', response).strip()
         
         try:
             data = json.loads(clean_response)
@@ -505,7 +516,7 @@ class Translator:
         log_emit(log_callback, self.rag_engine.config, 'WARNING', f"JSON Parse Error. Response: {response}", module='translator', func='_parse_translation_response')
         
         try:
-            m = re.search(r"\{.*\}", response, flags=re.DOTALL)
+            m = self._JSON_EXTRACT_RE.search(response)
             if m:
                 data = json.loads(m.group(0))
                 return str(data.get("translation", response.strip()))
@@ -527,7 +538,7 @@ class Translator:
                 {"role": "user", "content": f"The translation task was: {original_input}\n\nThe response was: {response}\n\nExtract the Chinese translation and return it as JSON: {{\"translation\": \"...\"}}\nRespond only with valid JSON, no other text."}
             ]
             followup_response = self.llm_client.chat_completion(followup_msg, log_callback=log_callback)
-            clean_followup = followup_response.replace("```json", "").replace("```", "").strip()
+            clean_followup = self._MARKDOWN_CODE_RE.sub('', followup_response).strip()
             data = json.loads(clean_followup)
             result = str(data.get("translation", ""))
             
@@ -553,7 +564,7 @@ class Translator:
         # This handles cases where LLM returns plain text translation instead of JSON
         clean_response_check = response.strip()
         # Check if response is mostly Chinese characters and doesn't look like an error message
-        chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', clean_response_check))
+        chinese_chars = len(self._CJK_CHAR_RE.findall(clean_response_check))
         if chinese_chars > 0 and not clean_response_check.startswith('{'):
             # Looks like a valid plain text Chinese translation
             log_emit(log_callback, self.rag_engine.config, 'DEBUG', 

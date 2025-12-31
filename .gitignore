@@ -21,3 +21,6 @@ env/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Test files
+test_performance.py
