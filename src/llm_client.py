@@ -48,10 +48,13 @@ class LLMClient:
 
         model = self.config.get("embedding", "model", "text-embedding-ada-002")
         try:
+            is_batch = isinstance(text, list)
             response = self.embed_client.embeddings.create(
                 input=text,
                 model=model
             )
+            if is_batch:
+                return [item.embedding for item in response.data]
             return response.data[0].embedding
         except Exception as e:
             log_emit(callback, self.config, 'ERROR', f"Embedding error: {e}", exc=e, module='llm_client', func='get_embedding')

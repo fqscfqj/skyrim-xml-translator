@@ -514,6 +514,22 @@ Text: "{text}"
         results = {}
         debug_info: Optional[List[Dict[str, Any]]] = [] if return_debug else None
         per_keyword_limit = max_terms_per_keyword if max_terms_per_keyword is not None else None
+
+        # Pre-fetch embeddings in batch
+        query_embeddings = {}
+        unique_queries = list(set([q for q in query_list if q]))
+        if unique_queries and self.vectors is not None and len(self.terms) > 0:
+            try:
+                # OpenAI typically supports up to 2048 in array, but safer to batch smaller
+                batch_size_embed = 100
+                for i in range(0, len(unique_queries), batch_size_embed):
+                    batch_qs = unique_queries[i : i + batch_size_embed]
+                    batch_vecs = self.llm_client.get_embedding(batch_qs, log_callback=log_callback)
+                    for q, v in zip(batch_qs, batch_vecs):
+                        query_embeddings[q] = v
+            except Exception as e:
+                log_emit(log_callback, self.config, 'WARNING', f"[RAG] Batch embedding failed, falling back to individual: {e}", exc=e, module='rag_engine', func='search_terms')
+
         for query in query_list:
             if per_keyword_limit is not None and per_keyword_limit <= 0:
                 continue
@@ -541,7 +557,10 @@ Text: "{text}"
                 # Use local variable to let static type checkers know we're operating on a non-None array
                 vectors = self.vectors
                 if vectors is not None and len(self.terms) > 0:
-                    query_vec = self.llm_client.get_embedding(query, log_callback=log_callback)
+                    raw_vec = query_embeddings.get(query)
+                    if raw_vec is None:
+                        raw_vec = self.llm_client.get_embedding(query, log_callback=log_callback)
+                    query_vec = raw_vec
                     query_vec = np.array(query_vec, dtype=np.float32).flatten()
                     
                     # Normalize query vector once
