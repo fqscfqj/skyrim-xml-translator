@@ -15,6 +15,7 @@ def collect_data_files():
         ('config.json', '.'),
         ('config.example.json', '.'),
         ('glossary.json', '.'),
+        ('assets', 'assets'),
     ]
     add_data = []
     for src, dst in candidates:
@@ -93,7 +94,7 @@ def parse_args():
     p.add_argument('--windowed', dest='windowed', action='store_true', help='Hide console (windowed)')
     p.set_defaults(windowed=True)
     p.add_argument('--name', default='SkyrimXMLTranslator')
-    p.add_argument('--icon', default=None, help='Path to .ico file to use as application icon')
+    p.add_argument('--icon', default='assets/logo.ico', help='Path to .ico file to use as application icon')
     return p.parse_args()
 
 

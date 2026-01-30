@@ -5,7 +5,7 @@
 param(
     [switch]$OneFile = $true,
     [switch]$Windowed = $true,
-    [string]$IconPath = ''
+    [string]$IconPath = 'assets\logo.ico'
 )
 
 $ErrorActionPreference = 'Stop'
