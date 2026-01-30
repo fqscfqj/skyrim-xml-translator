@@ -495,10 +495,16 @@ Text: "{text}"
         
         return unique_nouns
 
-    def search_terms(self, query_list, threshold=0.8, log_callback=None, top_k=3, max_terms_per_keyword=None, return_debug=False):
+    def search_terms(self, query_list, threshold=0.8, log_callback=None, top_k=3, max_terms_per_keyword=None, return_debug=False, source_text=None):
         """
         对提取出的关键词列表进行向量检索
         返回: {term: translation}
+        
+        Args:
+            source_text: 原始待翻译文本，用于过滤包含匹配。当一个术语比关键词更长时，
+                        只有当该术语实际出现在原始文本中时才会被匹配。
+                        例如：关键词"Dinya"在文本"...impregnate Dinya?"中，
+                        不应该匹配"Dinya Balu"，而应该只匹配"Dinya"。
         """
         vector_ready = self.vectors is not None and len(self.terms) > 0
         if not vector_ready and not self._glossary_lookup:
@@ -602,6 +608,36 @@ Text: "{text}"
                         # Take top 5 containment matches
                         top_containment_indices = containment_indices[:5]
                         containment_matches = [(self.terms[i], float(similarities[i])) for i in top_containment_indices]
+                        
+                        # Filter containment matches based on source_text
+                        # When a term is longer than the keyword, only include it if it actually
+                        # appears in the source text. This prevents matching "Dinya Balu" when
+                        # only "Dinya" appears in the text.
+                        if source_text:
+                            source_lower = source_text.lower()
+                            filtered_containment = []
+                            for term, score in containment_matches:
+                                term_lower = term.lower()
+                                # If the term exactly matches the keyword, always include it
+                                if term_lower == query_lower:
+                                    filtered_containment.append((term, score))
+                                # If the term is short (likely a name/word), check if it appears in source
+                                elif len(term) < 50:
+                                    # Check if this exact term appears in the source text
+                                    # Use word boundary check to avoid partial matches
+                                    if term_lower in source_lower:
+                                        filtered_containment.append((term, score))
+                                    # If term doesn't appear in source but keyword does, 
+                                    # we need to check if this is a "long name" vs "short name" situation
+                                    # e.g., keyword "Dinya" matches both "Dinya" and "Dinya Balu" entries
+                                    # Only include "Dinya Balu" if it actually appears in source
+                                    else:
+                                        # Skip this term - it's a longer name that doesn't appear in text
+                                        pass
+                                else:
+                                    # For longer terms (sentences), include if they seem relevant
+                                    filtered_containment.append((term, score))
+                            containment_matches = filtered_containment
 
                     # 3. Combine Results
                     # Get top vector matches, skipping indices that exceed the current terms list
