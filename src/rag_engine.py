@@ -629,8 +629,10 @@ Text: "{text}"
                                     filtered_containment.append((term, score))
                                 # Short terms (names/titles) must appear in source text
                                 elif len(term) < self._NAME_VS_SENTENCE_THRESHOLD:
-                                    # Simple substring check - if term appears in source, include it
-                                    if term_lower in source_lower:
+                                    # Use a word-boundary-aware regex check so the term appears
+                                    # as a complete word/phrase in the source text
+                                    pattern = r"\b{}\b".format(re.escape(term_lower))
+                                    if re.search(pattern, source_lower):
                                         filtered_containment.append((term, score))
                                     # Skip terms that don't appear in source text
                                     # This filters out longer name variants (e.g., "Dinya Balu") 
