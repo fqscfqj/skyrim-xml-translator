@@ -17,9 +17,8 @@ class RAGEngine:
     _MARKDOWN_CODE_RE = re.compile(r'```(?:json)?')
     
     # Threshold to distinguish name-like terms from sentence-like terms.
-    # Terms shorter than this are treated as names/titles and require exact
-    # presence in source text. Longer terms (e.g., full sentences used as
-    # translation examples) are kept for context even if not exactly matched.
+    # Terms shorter than this are treated as names/titles and require whole-word
+    # presence in source text when source_text filtering is enabled.
     _NAME_VS_SENTENCE_THRESHOLD = 50
     
     # Use frozenset for O(1) lookup performance instead of recreating dict each time
@@ -616,31 +615,39 @@ Text: "{text}"
                         containment_matches = [(self.terms[i], float(similarities[i])) for i in top_containment_indices]
                         
                         # Filter containment matches based on source_text
-                        # When a term is longer than the keyword, only include it if it actually
-                        # appears in the source text. This prevents matching "Dinya Balu" when
-                        # only "Dinya" appears in the text.
+                        # Containment matches are terms that contain the keyword. They are useful
+                        # translation references as long as the keyword itself appears in source.
+                        # E.g., if keyword "Dinya" is in source, "Dinya Balu" -> "丁雅·巴鲁" helps
+                        # the translator infer that "Dinya" should be "丁雅".
                         if source_text:
                             source_lower = source_text.lower()
+                            # Check if the keyword itself appears in source text
+                            keyword_pattern = r"\b{}\b".format(re.escape(query_lower))
+                            keyword_in_source = bool(re.search(keyword_pattern, source_lower))
+                            
                             filtered_containment = []
                             for term, score in containment_matches:
                                 term_lower = term.lower()
                                 # If the term exactly matches the keyword, always include it
                                 if term_lower == query_lower:
                                     filtered_containment.append((term, score))
-                                # Short terms (names/titles) must appear in source text
+                                # If keyword is in source and term contains keyword, keep it as reference
+                                elif keyword_in_source and query_lower in term_lower:
+                                    # For short name-like terms, these are useful translation references
+                                    if len(term) < self._NAME_VS_SENTENCE_THRESHOLD:
+                                        filtered_containment.append((term, score))
+                                    # For long sentence-like terms, only include if they provide
+                                    # direct context (the term literally appears in source)
+                                    elif term_lower in source_lower:
+                                        filtered_containment.append((term, score))
+                                # Fallback: check if the term itself appears in source
                                 elif len(term) < self._NAME_VS_SENTENCE_THRESHOLD:
-                                    # Use a word-boundary-aware regex check so the term appears
-                                    # as a complete word/phrase in the source text
                                     pattern = r"\b{}\b".format(re.escape(term_lower))
                                     if re.search(pattern, source_lower):
                                         filtered_containment.append((term, score))
-                                    # Skip terms that don't appear in source text
-                                    # This filters out longer name variants (e.g., "Dinya Balu") 
-                                    # when only the short name ("Dinya") is in the text
                                 else:
-                                    # Long terms (full sentences) are kept as translation examples
-                                    # even if not exactly matching, since they provide useful context
-                                    filtered_containment.append((term, score))
+                                    if term_lower in source_lower:
+                                        filtered_containment.append((term, score))
                             containment_matches = filtered_containment
 
                     # 3. Combine Results
@@ -649,6 +656,39 @@ Text: "{text}"
                     for idx in ranked_idx[:top_k]:
                         if idx < len(self.terms):
                             vector_matches.append((self.terms[idx], float(similarities[idx])))
+
+                    # Filter vector matches based on source_text as well.
+                    # Keep terms that either appear in source or contain the keyword (as references).
+                    if source_text and vector_matches:
+                        source_lower = source_text.lower()
+                        keyword_pattern = r"\b{}\b".format(re.escape(query_lower))
+                        keyword_in_source = bool(re.search(keyword_pattern, source_lower))
+                        
+                        filtered = []
+                        for term, score in vector_matches:
+                            term_lower = term.lower()
+                            if term_lower == query_lower:
+                                filtered.append((term, score))
+                                continue
+
+                            # If keyword is in source and term contains keyword, keep as reference
+                            if keyword_in_source and query_lower in term_lower:
+                                if len(term) < self._NAME_VS_SENTENCE_THRESHOLD:
+                                    filtered.append((term, score))
+                                    continue
+
+                            # For name-like terms we require a whole-word/phrase match in source.
+                            if len(term) < self._NAME_VS_SENTENCE_THRESHOLD:
+                                pattern = r"\b{}\b".format(re.escape(term_lower))
+                                if re.search(pattern, source_lower):
+                                    filtered.append((term, score))
+                                continue
+
+                            # For long sentence-like terms, require literal presence.
+                            if term_lower in source_lower:
+                                filtered.append((term, score))
+
+                        vector_matches = filtered
                     
                     # 释放similarities数组
                     del similarities
