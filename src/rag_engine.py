@@ -16,6 +16,12 @@ class RAGEngine:
     _PROPER_NOUN_RE = re.compile(r"\b([A-Z][a-z]{2,})\b")
     _MARKDOWN_CODE_RE = re.compile(r'```(?:json)?')
     
+    # Threshold to distinguish name-like terms from sentence-like terms.
+    # Terms shorter than this are treated as names/titles and require exact
+    # presence in source text. Longer terms (e.g., full sentences used as
+    # translation examples) are kept for context even if not exactly matched.
+    _NAME_VS_SENTENCE_THRESHOLD = 50
+    
     # Use frozenset for O(1) lookup performance instead of recreating dict each time
     _COMMON_WORDS = frozenset({
         'i', 'a', 'an', 'the', 'and', 'or', 'but', 'if', 'then', 'else', 'when',
@@ -621,21 +627,17 @@ Text: "{text}"
                                 # If the term exactly matches the keyword, always include it
                                 if term_lower == query_lower:
                                     filtered_containment.append((term, score))
-                                # If the term is short (likely a name/word), check if it appears in source
-                                elif len(term) < 50:
-                                    # Check if this exact term appears in the source text
-                                    # Use word boundary check to avoid partial matches
+                                # Short terms (names/titles) must appear in source text
+                                elif len(term) < self._NAME_VS_SENTENCE_THRESHOLD:
+                                    # Simple substring check - if term appears in source, include it
                                     if term_lower in source_lower:
                                         filtered_containment.append((term, score))
-                                    # If term doesn't appear in source but keyword does, 
-                                    # we need to check if this is a "long name" vs "short name" situation
-                                    # e.g., keyword "Dinya" matches both "Dinya" and "Dinya Balu" entries
-                                    # Only include "Dinya Balu" if it actually appears in source
-                                    else:
-                                        # Skip this term - it's a longer name that doesn't appear in text
-                                        pass
+                                    # Skip terms that don't appear in source text
+                                    # This filters out longer name variants (e.g., "Dinya Balu") 
+                                    # when only the short name ("Dinya") is in the text
                                 else:
-                                    # For longer terms (sentences), include if they seem relevant
+                                    # Long terms (full sentences) are kept as translation examples
+                                    # even if not exactly matching, since they provide useful context
                                     filtered_containment.append((term, score))
                             containment_matches = filtered_containment
 
