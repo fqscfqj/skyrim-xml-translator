@@ -322,6 +322,7 @@ class Translator:
                 threshold=threshold,
                 log_callback=log_callback,
                 max_terms_per_keyword=max_terms_per_keyword,
+                source_text=text,  # Pass source text to filter containment matches
             )
             try:
                 log_emit(log_callback, self.rag_engine.config, 'DEBUG', f"[RAG] Translator received {len(matched_terms)} matched glossary terms: {list(matched_terms.keys())}", module='translator', func='translate_text', extra={'rag_matches': list(matched_terms.keys())})

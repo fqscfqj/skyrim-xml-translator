@@ -16,6 +16,12 @@ class RAGEngine:
     _PROPER_NOUN_RE = re.compile(r"\b([A-Z][a-z]{2,})\b")
     _MARKDOWN_CODE_RE = re.compile(r'```(?:json)?')
     
+    # Threshold to distinguish name-like terms from sentence-like terms.
+    # Terms shorter than this are treated as names/titles and require exact
+    # presence in source text. Longer terms (e.g., full sentences used as
+    # translation examples) are kept for context even if not exactly matched.
+    _NAME_VS_SENTENCE_THRESHOLD = 50
+    
     # Use frozenset for O(1) lookup performance instead of recreating dict each time
     _COMMON_WORDS = frozenset({
         'i', 'a', 'an', 'the', 'and', 'or', 'but', 'if', 'then', 'else', 'when',
@@ -495,10 +501,16 @@ Text: "{text}"
         
         return unique_nouns
 
-    def search_terms(self, query_list, threshold=0.8, log_callback=None, top_k=3, max_terms_per_keyword=None, return_debug=False):
+    def search_terms(self, query_list, threshold=0.8, log_callback=None, top_k=3, max_terms_per_keyword=None, return_debug=False, source_text=None):
         """
         对提取出的关键词列表进行向量检索
         返回: {term: translation}
+        
+        Args:
+            source_text: 原始待翻译文本，用于过滤包含匹配。当一个术语比关键词更长时，
+                        只有当该术语实际出现在原始文本中时才会被匹配。
+                        例如：关键词"Dinya"在文本"...impregnate Dinya?"中，
+                        不应该匹配"Dinya Balu"，而应该只匹配"Dinya"。
         """
         vector_ready = self.vectors is not None and len(self.terms) > 0
         if not vector_ready and not self._glossary_lookup:
@@ -602,6 +614,34 @@ Text: "{text}"
                         # Take top 5 containment matches
                         top_containment_indices = containment_indices[:5]
                         containment_matches = [(self.terms[i], float(similarities[i])) for i in top_containment_indices]
+                        
+                        # Filter containment matches based on source_text
+                        # When a term is longer than the keyword, only include it if it actually
+                        # appears in the source text. This prevents matching "Dinya Balu" when
+                        # only "Dinya" appears in the text.
+                        if source_text:
+                            source_lower = source_text.lower()
+                            filtered_containment = []
+                            for term, score in containment_matches:
+                                term_lower = term.lower()
+                                # If the term exactly matches the keyword, always include it
+                                if term_lower == query_lower:
+                                    filtered_containment.append((term, score))
+                                # Short terms (names/titles) must appear in source text
+                                elif len(term) < self._NAME_VS_SENTENCE_THRESHOLD:
+                                    # Use a word-boundary-aware regex check so the term appears
+                                    # as a complete word/phrase in the source text
+                                    pattern = r"\b{}\b".format(re.escape(term_lower))
+                                    if re.search(pattern, source_lower):
+                                        filtered_containment.append((term, score))
+                                    # Skip terms that don't appear in source text
+                                    # This filters out longer name variants (e.g., "Dinya Balu") 
+                                    # when only the short name ("Dinya") is in the text
+                                else:
+                                    # Long terms (full sentences) are kept as translation examples
+                                    # even if not exactly matching, since they provide useful context
+                                    filtered_containment.append((term, score))
+                            containment_matches = filtered_containment
 
                     # 3. Combine Results
                     # Get top vector matches, skipping indices that exceed the current terms list
