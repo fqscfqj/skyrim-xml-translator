@@ -1,5 +1,7 @@
 import sys
 import os
+import time
+import threading
 from typing import Optional, cast
 import csv
 from concurrent.futures import ThreadPoolExecutor
@@ -99,8 +101,9 @@ class Worker(QThread):
         self.translator = translator
         self.num_threads = num_threads
         self.is_running = True
-        self.is_paused = False
         self.stop_receiving = False  # Flag to immediately stop receiving data
+        self._pause_event = threading.Event()
+        self._pause_event.set()  # Initially not paused (set = running)
 
     def run(self):
         try:
@@ -134,10 +137,8 @@ class Worker(QThread):
                 row_idx, source = item
                 if not self.is_running or self.stop_receiving:
                     return None
-                # Wait while paused
-                while self.is_paused and self.is_running and not self.stop_receiving:
-                    import time
-                    time.sleep(0.1)
+                # Wait while paused using threading.Event for efficient blocking
+                self._pause_event.wait()
                 if not self.is_running or self.stop_receiving:
                     return None
                 try:
@@ -243,12 +244,13 @@ class Worker(QThread):
     def stop(self):
         self.is_running = False
         self.stop_receiving = True  # Immediately stop receiving data
+        self._pause_event.set()  # Unblock any waiting tasks so they can exit
 
     def pause(self):
-        self.is_paused = True
+        self._pause_event.clear()  # Block waiting tasks
 
     def resume(self):
-        self.is_paused = False
+        self._pause_event.set()  # Unblock waiting tasks
 
 
 # Custom widgets to prevent accidental change via mouse wheel.
