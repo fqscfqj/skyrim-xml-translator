@@ -99,6 +99,8 @@ class Worker(QThread):
         self.translator = translator
         self.num_threads = num_threads
         self.is_running = True
+        self.is_paused = False
+        self.stop_receiving = False  # Flag to immediately stop receiving data
 
     def run(self):
         try:
@@ -130,7 +132,13 @@ class Worker(QThread):
 
             def translate_task(item):
                 row_idx, source = item
-                if not self.is_running:
+                if not self.is_running or self.stop_receiving:
+                    return None
+                # Wait while paused
+                while self.is_paused and self.is_running and not self.stop_receiving:
+                    import time
+                    time.sleep(0.1)
+                if not self.is_running or self.stop_receiving:
                     return None
                 try:
                     translation = self.translator.translate_text(source, log_callback=self.log.emit)
@@ -160,7 +168,7 @@ class Worker(QThread):
                         break
                 
                 while active_futures:
-                    if not self.is_running:
+                    if not self.is_running or self.stop_receiving:
                         executor.shutdown(wait=False)
                         break
 
@@ -169,6 +177,11 @@ class Worker(QThread):
                     
                     for future in done:
                         active_futures.remove(future)
+                        
+                        # Check stop_receiving flag before processing result
+                        if self.stop_receiving:
+                            continue
+                            
                         result = future.result()
                         
                         if result:
@@ -180,40 +193,45 @@ class Worker(QThread):
                                 # 获取所有具有相同源文本的行
                                 all_rows = source_to_rows.get(source, [row_idx])
                                 
-                                # 为所有相同内容的行发送翻译结果
-                                for target_row in all_rows:
-                                    self.result_ready.emit(target_row, safe_translation)
-                                
-                                # 缓存翻译结果
-                                translation_cache[source] = safe_translation
-                                
-                                if len(all_rows) > 1:
-                                    log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', 
-                                            f"[{processed_count+1}/{unique_count}] {safe_source[:20]}... -> {safe_translation[:20]}... (x{len(all_rows)} {i18n.t('msg_duplicate_applied')})", 
-                                            module='gui_main', func='Worker.run')
-                                else:
-                                    log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', 
-                                            f"[{processed_count+1}/{unique_count}] {safe_source[:20]}... -> {safe_translation[:20]}...", 
-                                            module='gui_main', func='Worker.run')
+                                # Check stop_receiving again before emitting results
+                                if not self.stop_receiving:
+                                    # 为所有相同内容的行发送翻译结果
+                                    for target_row in all_rows:
+                                        self.result_ready.emit(target_row, safe_translation)
+                                    
+                                    # 缓存翻译结果
+                                    translation_cache[source] = safe_translation
+                                    
+                                    if len(all_rows) > 1:
+                                        log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', 
+                                                f"[{processed_count+1}/{unique_count}] {safe_source[:20]}... -> {safe_translation[:20]}... (x{len(all_rows)} {i18n.t('msg_duplicate_applied')})", 
+                                                module='gui_main', func='Worker.run')
+                                    else:
+                                        log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', 
+                                                f"[{processed_count+1}/{unique_count}] {safe_source[:20]}... -> {safe_translation[:20]}...", 
+                                                module='gui_main', func='Worker.run')
                             else:
                                 row_idx, source, _, error = result
-                                log_emit(self.log.emit, self.translator.rag_engine.config, 'ERROR', f"Error translating {str(source)[:20]}...: {error}", module='gui_main', func='Worker.run')
+                                if not self.stop_receiving:
+                                    log_emit(self.log.emit, self.translator.rag_engine.config, 'ERROR', f"Error translating {str(source)[:20]}...: {error}", module='gui_main', func='Worker.run')
 
                         processed_count += 1
                         # 进度基于总项目数而非唯一项目数，以反映实际完成进度
-                        completed_total = sum(len(source_to_rows.get(s, [])) for s in translation_cache.keys())
-                        self.progress.emit(int(completed_total / total * 100))
+                        if not self.stop_receiving:
+                            completed_total = sum(len(source_to_rows.get(s, [])) for s in translation_cache.keys())
+                            self.progress.emit(int(completed_total / total * 100))
 
                         # Submit next task
                         try:
-                            if self.is_running:
+                            if self.is_running and not self.stop_receiving:
                                 next_item = next(items_iter)
                                 new_future = executor.submit(translate_task, next_item)
                                 active_futures.add(new_future)
                         except StopIteration:
                             pass
 
-                log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', i18n.t("msg_translation_finished"), module='gui_main', func='Worker.run')
+                if not self.stop_receiving:
+                    log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', i18n.t("msg_translation_finished"), module='gui_main', func='Worker.run')
                 self.finished.emit()
         except BaseException as e:
             log_emit(self.log.emit, self.translator.rag_engine.config, 'ERROR', i18n.t("msg_worker_error").format(error=e), exc=e, module='gui_main', func='Worker.run')
@@ -224,6 +242,13 @@ class Worker(QThread):
 
     def stop(self):
         self.is_running = False
+        self.stop_receiving = True  # Immediately stop receiving data
+
+    def pause(self):
+        self.is_paused = True
+
+    def resume(self):
+        self.is_paused = False
 
 
 # Custom widgets to prevent accidental change via mouse wheel.
@@ -274,6 +299,8 @@ class MainWindow(QMainWindow):
         self.translator = Translator(self.llm_client, self.rag_engine)
         self.model_param_controls = {}
         self.search_param_controls = {}
+        self.worker = None  # Translation worker reference
+        self.stop_receiving_results = False  # Flag to immediately stop receiving translation results
         
         # Pagination state
         self.current_page = 1
@@ -382,10 +409,20 @@ class MainWindow(QMainWindow):
         self.stop_btn.clicked.connect(self.stop_translation)
         self.stop_btn.setEnabled(False)
         
+        self.trans_pause_btn = QPushButton(i18n.t("btn_pause"))
+        self.trans_pause_btn.clicked.connect(self.pause_translation)
+        self.trans_pause_btn.setEnabled(False)
+        
+        self.trans_resume_btn = QPushButton(i18n.t("btn_resume"))
+        self.trans_resume_btn.clicked.connect(self.resume_translation)
+        self.trans_resume_btn.setEnabled(False)
+        
         action_layout.addStretch()
         action_layout.addWidget(self.start_btn)
         action_layout.addWidget(self.trans_sel_btn)
         action_layout.addWidget(self.stop_btn)
+        action_layout.addWidget(self.trans_pause_btn)
+        action_layout.addWidget(self.trans_resume_btn)
         # Add clear buttons: Clear All translations and Clear Selected translations
         self.clear_all_btn = QPushButton(i18n.t("btn_clear_all"))
         self.clear_all_btn.clicked.connect(self.clear_all_translations)
@@ -853,6 +890,9 @@ class MainWindow(QMainWindow):
 
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
+        self.trans_pause_btn.setEnabled(True)
+        self.trans_resume_btn.setEnabled(False)
+        self.stop_receiving_results = False  # Reset flag when starting new translation
         self.progress_bar.setValue(0)
         log_emit(self.log, self.config_manager, 'INFO', i18n.t("msg_starting_translation_task"), module='gui_main', func='start_translation')
 
@@ -950,6 +990,10 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, i18n.t("title_error"), i18n.t("msg_failed_save").format(error=e))
 
     def update_table_row(self, row, translation):
+        # Check if we should stop receiving results (cancel was clicked)
+        if self.stop_receiving_results:
+            return
+            
         dest_item = self.trans_table.item(row, 2)
         if dest_item:
             # Update UI
@@ -992,14 +1036,34 @@ class MainWindow(QMainWindow):
         self.clear_sel_btn.setEnabled(has_selection)
 
     def stop_translation(self):
+        # Immediately set flag to stop receiving results in the UI
+        self.stop_receiving_results = True
         if self.worker:
             self.worker.stop()
             self.log(i18n.t("msg_stopping"))
+            self.trans_pause_btn.setEnabled(False)
+            self.trans_resume_btn.setEnabled(False)
+
+    def pause_translation(self):
+        if self.worker:
+            self.worker.pause()
+            self.log(i18n.t("msg_task_paused"))
+            self.trans_pause_btn.setEnabled(False)
+            self.trans_resume_btn.setEnabled(True)
+
+    def resume_translation(self):
+        if self.worker:
+            self.worker.resume()
+            self.log(i18n.t("msg_task_resumed"))
+            self.trans_pause_btn.setEnabled(True)
+            self.trans_resume_btn.setEnabled(False)
 
     def on_translation_finished(self):
         self.start_btn.setEnabled(True)
         self.trans_sel_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
+        self.trans_pause_btn.setEnabled(False)
+        self.trans_resume_btn.setEnabled(False)
         self.log(i18n.t("msg_task_finished"))
 
     def add_term(self):
@@ -1208,6 +1272,9 @@ class MainWindow(QMainWindow):
         self.start_btn.setEnabled(False)
         self.trans_sel_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
+        self.trans_pause_btn.setEnabled(True)
+        self.trans_resume_btn.setEnabled(False)
+        self.stop_receiving_results = False  # Reset flag when starting new translation
         self.progress_bar.setValue(0)
         self.log(i18n.t("msg_starting_selected_translation").format(count=len(selected_rows)))
 
