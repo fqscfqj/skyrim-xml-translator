@@ -1,6 +1,5 @@
 import sys
 import os
-import time
 import threading
 from typing import Optional, cast
 import csv
@@ -137,7 +136,9 @@ class Worker(QThread):
                 row_idx, source = item
                 if not self.is_running or self.stop_receiving:
                     return None
-                # Wait while paused using threading.Event for efficient blocking
+                # Wait while paused using threading.Event for efficient blocking.
+                # Note: In-flight translations (currently executing translate_text) 
+                # will complete before pause takes effect for that task.
                 self._pause_event.wait()
                 if not self.is_running or self.stop_receiving:
                     return None
@@ -216,9 +217,10 @@ class Worker(QThread):
                                 if not self.stop_receiving:
                                     log_emit(self.log.emit, self.translator.rag_engine.config, 'ERROR', f"Error translating {str(source)[:20]}...: {error}", module='gui_main', func='Worker.run')
 
-                        processed_count += 1
-                        # 进度基于总项目数而非唯一项目数，以反映实际完成进度
+                        # Only update progress when not stopping to avoid inaccurate calculations
                         if not self.stop_receiving:
+                            processed_count += 1
+                            # 进度基于总项目数而非唯一项目数，以反映实际完成进度
                             completed_total = sum(len(source_to_rows.get(s, [])) for s in translation_cache.keys())
                             self.progress.emit(int(completed_total / total * 100))
 
@@ -1047,14 +1049,14 @@ class MainWindow(QMainWindow):
             self.trans_resume_btn.setEnabled(False)
 
     def pause_translation(self):
-        if self.worker:
+        if self.worker and self.worker.isRunning():
             self.worker.pause()
             self.log(i18n.t("msg_task_paused"))
             self.trans_pause_btn.setEnabled(False)
             self.trans_resume_btn.setEnabled(True)
 
     def resume_translation(self):
-        if self.worker:
+        if self.worker and self.worker.isRunning():
             self.worker.resume()
             self.log(i18n.t("msg_task_resumed"))
             self.trans_pause_btn.setEnabled(True)
@@ -1067,6 +1069,10 @@ class MainWindow(QMainWindow):
         self.trans_pause_btn.setEnabled(False)
         self.trans_resume_btn.setEnabled(False)
         self.log(i18n.t("msg_task_finished"))
+        # Clean up worker thread after translation finishes
+        if self.worker:
+            self.worker.deleteLater()
+            self.worker = None
 
     def add_term(self):
         source = self.term_source.text().strip()
