@@ -518,6 +518,12 @@ Text: "{text}"
         messages = [{"role": "user", "content": prompt}]
         llm_keywords = []
 
+        # Pre-extract TitleCase phrases once for downstream filtering/expansion.
+        try:
+            titlecase_phrases_in_text = self._extract_titlecase_phrases(text)
+        except Exception:
+            titlecase_phrases_in_text = []
+
         def is_single_word_generic(term: str) -> bool:
             if not term:
                 return True
@@ -538,7 +544,7 @@ Text: "{text}"
             return False
 
         def expand_non_exact_phrase(term: str) -> List[str]:
-            """For a non-exact phrase, prefer exact glossary sub-phrases; otherwise fall back to signal tokens."""
+            """For a non-exact phrase, prefer exact glossary sub-phrases; otherwise fall back to the most specific signal token(s)."""
             norm = self._normalize_term_key(term)
             if not norm or " " not in norm:
                 return [term]
@@ -564,11 +570,48 @@ Text: "{text}"
             if hits:
                 return hits
 
-            # 2) Otherwise, keep signal tokens only
-            # Prefer non-exact tokens: exact single-word glossary entries are often generic categories.
-            signal_tokens = [t for t in tokens if self._is_signal_token(t) and t not in self._glossary_lookup]
-            # Return in TitleCase-ish for nicer queries
-            return [t.capitalize() for t in signal_tokens]
+            # 2) Otherwise, pick the most specific token(s) from the phrase.
+            # Use glossary-driven DF to avoid returning generic category words.
+            candidates = []
+            for t in tokens:
+                df = self._token_df.get(t, 0)
+                is_exact = t in self._glossary_lookup
+                is_signal = self._is_signal_token(t)
+                if not (is_exact or is_signal):
+                    continue
+                # Keep (token, df, exact) for ranking.
+                candidates.append((t, df, is_exact))
+
+            if not candidates:
+                return [term]
+
+            # Prefer tokens that are rare in glossary, but down-rank very short singletons (often noisy).
+            def effective_df(tok: str, df: int) -> int:
+                if df == 1 and len(tok) <= 3:
+                    return df + 3
+                return df
+
+            if any(df > 0 for _, df, _ in candidates):
+                min_eff = min(effective_df(t, df) for t, df, _ in candidates if df > 0)
+                best = [c for c in candidates if (c[1] > 0 and effective_df(c[0], c[1]) == min_eff)]
+            else:
+                best = list(candidates)
+
+            # If DF ties, prefer longer tokens (often more entity-like than short common words).
+            max_len = max(len(t) for t, _, _ in best)
+            best = [c for c in best if len(c[0]) == max_len]
+
+            # If still tied, prefer exact glossary hits.
+            if any(is_exact for _, _, is_exact in best):
+                best = [c for c in best if c[2]]
+
+            results: List[str] = []
+            for t, _, is_exact in best[:2]:
+                if is_exact:
+                    results.append(self._glossary_lookup[t])
+                else:
+                    results.append(t.capitalize())
+            return results
         try:
             # Ensure keyword extraction gets enough output tokens unless user explicitly set it
             max_tokens_override = None
@@ -645,10 +688,7 @@ Text: "{text}"
 
             # Add phrase candidates from the original text to avoid splitting into generic sub-words
             # e.g. "Telvanni Sex Spell" -> keep the phrase, drop "Sex"/"Spell"
-            try:
-                processed_keywords.extend(self._extract_titlecase_phrases(text))
-            except Exception:
-                pass
+            processed_keywords.extend(titlecase_phrases_in_text)
 
             for kw in keywords:
                 if not isinstance(kw, str):
@@ -719,7 +759,7 @@ Text: "{text}"
         # prefer the phrase and avoid re-adding component words from regex.
         blocked_regex_tokens = set()
         try:
-            for phr in self._extract_titlecase_phrases(text):
+            for phr in titlecase_phrases_in_text:
                 pnorm = self._normalize_term_key(phr)
                 for t in pnorm.split():
                     if not t:
@@ -744,6 +784,90 @@ Text: "{text}"
 
         # Final cleanup pass: remove generic single words and decompose noise from regex.
         try:
+            # Build component-token suppression set from TitleCase phrases.
+            # Goal: if a multi-word phrase exists, avoid returning its generic component words as standalone keywords.
+            blocked_phrase_tokens = set()
+            allowed_phrase_tokens = set()
+            try:
+                for phr in titlecase_phrases_in_text:
+                    pnorm = self._normalize_term_key(phr)
+                    if not pnorm or " " not in pnorm:
+                        continue
+                    toks = [t for t in pnorm.split() if t and t not in self._COMMON_WORDS and t not in self._TITLE_CONNECTORS]
+                    if len(toks) < 2:
+                        continue
+
+                    # Pick the most specific token inside the phrase (rare + long),
+                    # but down-rank very short singleton tokens (often noisy).
+                    scored = []
+                    for t in toks:
+                        df = self._token_df.get(t, 0)
+                        is_exact = t in self._glossary_lookup
+                        is_signal = self._is_signal_token(t)
+                        if not (is_exact or is_signal):
+                            continue
+                        scored.append((t, df, len(t), is_exact))
+
+                    if scored:
+                        def eff_df(tok: str, df: int) -> int:
+                            if df == 1 and len(tok) <= 3:
+                                return df + 3
+                            return df
+
+                        df_candidates = [eff_df(t, df) for t, df, _, _ in scored if df > 0]
+                        min_df = min(df_candidates) if df_candidates else 0
+                        best = [s for s in scored if (s[1] > 0 and eff_df(s[0], s[1]) == min_df) or (min_df == 0 and s[1] == 0)]
+                        max_len = max(l for _, _, l, _ in best)
+                        best = [s for s in best if s[2] == max_len]
+                        if any(is_exact for _, _, _, is_exact in best):
+                            best = [s for s in best if s[3]]
+                        allowed = {best[0][0]}
+                    else:
+                        allowed = set()
+
+                    for t in toks:
+                        if t in allowed:
+                            allowed_phrase_tokens.add(t)
+                        else:
+                            blocked_phrase_tokens.add(t)
+            except Exception:
+                blocked_phrase_tokens = set()
+                allowed_phrase_tokens = set()
+
+            # If a TitleCase phrase exists in the source text, the leading token is often a generic prefix
+            # (e.g. "Lady Elisif", "Temple of Mara"). Drop such leading tokens when they are less specific
+            # than another token in the same phrase, based on glossary DF.
+            droppable_lead_tokens = set()
+            try:
+                def _eff_df(tok: str, df: int) -> int:
+                    if df == 1 and len(tok) <= 3:
+                        return df + 3
+                    return df
+
+                for phr in titlecase_phrases_in_text:
+                    norm = self._normalize_term_key(phr)
+                    if not norm or " " not in norm:
+                        continue
+                    toks = [t for t in norm.split() if t and t not in self._COMMON_WORDS and t not in self._TITLE_CONNECTORS]
+                    if len(toks) < 2:
+                        continue
+                    lead = toks[0]
+                    others = toks[1:]
+                    lead_df = self._token_df.get(lead, 0)
+                    lead_eff = _eff_df(lead, lead_df) if lead_df > 0 else 0
+                    other_eff = []
+                    for t in others:
+                        df = self._token_df.get(t, 0)
+                        if df <= 0:
+                            continue
+                        other_eff.append(_eff_df(t, df))
+                    # If we have DF evidence and the lead is clearly more frequent than some other token,
+                    # treat it as a generic prefix to suppress.
+                    if other_eff and lead_eff > min(other_eff):
+                        droppable_lead_tokens.add(lead)
+            except Exception:
+                droppable_lead_tokens = set()
+
             # Expand non-exact phrases into glossary sub-phrases or signal tokens
             expanded: List[str] = []
             for kw in llm_keywords:
@@ -756,6 +880,27 @@ Text: "{text}"
 
             # Remove generic single-word keywords
             llm_keywords = [kw for kw in llm_keywords if not is_single_word_generic(kw)]
+
+            # Suppress standalone tokens that are components of a TitleCase phrase, unless they are the
+            # most specific token for that phrase.
+            if blocked_phrase_tokens:
+                cleaned = []
+                for kw in llm_keywords:
+                    norm = self._normalize_term_key(kw)
+                    if norm and " " not in norm and norm in blocked_phrase_tokens and norm not in allowed_phrase_tokens:
+                        continue
+                    cleaned.append(kw)
+                llm_keywords = cleaned
+
+            # Suppress single-word generic prefixes when a more specific TitleCase phrase exists.
+            if droppable_lead_tokens:
+                llm_keywords = [
+                    kw for kw in llm_keywords
+                    if not (
+                        " " not in (self._normalize_term_key(kw) or "")
+                        and (self._normalize_term_key(kw) in droppable_lead_tokens)
+                    )
+                ]
 
             # Drop phrase keywords that have no "signal" tokens (i.e., no token that appears in glossary at a reasonable DF)
             phrase_filtered = []
@@ -799,6 +944,8 @@ Text: "{text}"
             if not isinstance(kw, str):
                 continue
             k = kw.strip()
+            # Final trim to avoid punctuation artifacts from LLM output, e.g. 'Elisif...'
+            k = re.sub(r"^[^\w\u4e00-\u9fff]+|[^\w\u4e00-\u9fff]+$", "", k)
             if not k:
                 continue
             kl = k.lower()
