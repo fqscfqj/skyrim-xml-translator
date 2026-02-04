@@ -356,6 +356,7 @@ class RAGVisualizationDialog(QDialog):
         self.rag_tree.setAlternatingRowColors(True)
         self.rag_tree.setUniformRowHeights(False)
         header = self.rag_tree.header()
+        assert header is not None
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         header.setMinimumSectionSize(120)
