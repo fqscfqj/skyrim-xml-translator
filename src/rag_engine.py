@@ -613,6 +613,16 @@ Text: """ + f'"{text}"'
 
             tokens = [t for t in norm.split() if t and t not in self._COMMON_WORDS]
             if len(tokens) < 2:
+                # If the phrase collapses to a single meaningful token after removing common words
+                # (e.g., "Although Erikur" -> ["erikur"]), keep that entity instead of dropping it.
+                if len(tokens) == 1:
+                    t = tokens[0]
+                    if getattr(self, "_stopwords_set", None) and t in self._stopwords_set:
+                        return []
+                    if t in self._glossary_lookup:
+                        return [self._glossary_lookup[t]]
+                    if self._is_signal_token(t):
+                        return [t.capitalize()]
                 return []
 
             # 1) Find longest exact glossary sub-phrases (contiguous spans)
@@ -841,18 +851,30 @@ Text: """ + f'"{text}"'
 
         # If a word is part of a multi-word TitleCase phrase in the source text,
         # prefer the phrase and avoid re-adding component words from regex.
+        # IMPORTANT: only block component tokens when the phrase has at least one
+        # "signal" token (appears in glossary at a reasonable DF) or exact hit.
+        # Otherwise, blocking can cause missed entities like "Solitude" in
+        # "Thane of Solitude" when the whole phrase later gets filtered out.
         blocked_regex_tokens = set()
         try:
             for phr in titlecase_phrases_in_text:
                 pnorm = self._normalize_term_key(phr)
-                for t in pnorm.split():
-                    if not t:
-                        continue
-                    if t in self._COMMON_WORDS:
-                        continue
-                    if t in self._TITLE_CONNECTORS:
-                        continue
-                    blocked_regex_tokens.add(t)
+                if not pnorm or " " not in pnorm:
+                    continue
+                toks = [
+                    t
+                    for t in pnorm.split()
+                    if t and t not in self._COMMON_WORDS and t not in self._TITLE_CONNECTORS
+                ]
+                if not toks:
+                    continue
+                if any(self._is_signal_token(t) or t in self._glossary_lookup for t in toks):
+                    # For "X of Y" phrases, keep the last token (often a location/person like Solitude/Mara)
+                    # to avoid losing key entities when the full phrase isn't a useful glossary term.
+                    if " of " in pnorm and len(toks) >= 2:
+                        blocked_regex_tokens.update(toks[:-1])
+                    else:
+                        blocked_regex_tokens.update(toks)
         except Exception:
             blocked_regex_tokens = set()
         
@@ -865,6 +887,18 @@ Text: """ + f'"{text}"'
             if kw.lower() not in seen_lower:
                 seen_lower.add(kw.lower())
                 llm_keywords.append(kw)
+
+        try:
+            log_emit(
+                log_callback,
+                self.config,
+                'DEBUG',
+                f"[RAG] After regex merge: {llm_keywords}",
+                module='rag_engine',
+                func='extract_keywords',
+            )
+        except Exception:
+            pass
 
         # Final cleanup pass: remove generic single words and decompose noise from regex.
         try:
@@ -908,6 +942,12 @@ Text: """ + f'"{text}"'
                         allowed = {best[0][0]}
                     else:
                         allowed = set()
+
+                    # For "X of Y" phrases (e.g., "Thane of Solitude", "Temple of Mara"),
+                    # the trailing token is often the most important entity. Keep it as allowed too.
+                    norm_phrase = self._normalize_term_key(phr)
+                    if norm_phrase and " of " in norm_phrase and toks:
+                        allowed.add(toks[-1])
 
                     for t in toks:
                         if t in allowed:
@@ -962,8 +1002,28 @@ Text: """ + f'"{text}"'
                     expanded.append(kw)
             llm_keywords = expanded
 
-            # Remove generic single-word keywords
-            llm_keywords = [kw for kw in llm_keywords if not is_single_word_generic(kw)]
+            # Remove generic single-word keywords.
+            # NOTE: allow regex-derived TitleCase singletons (unknown entities) to pass through,
+            # otherwise we will systematically miss proper nouns that are not yet in glossary.
+            allow_singletons_norm = set()
+            try:
+                for w in regex_keywords:
+                    n = self._normalize_term_key(w)
+                    if n and " " not in n:
+                        allow_singletons_norm.add(n)
+            except Exception:
+                allow_singletons_norm = set()
+
+            cleaned_singletons = []
+            for kw in llm_keywords:
+                n = self._normalize_term_key(kw)
+                if n and " " not in n and n in allow_singletons_norm:
+                    cleaned_singletons.append(kw)
+                    continue
+                if is_single_word_generic(kw):
+                    continue
+                cleaned_singletons.append(kw)
+            llm_keywords = cleaned_singletons
 
             # Suppress standalone tokens that are components of a TitleCase phrase, unless they are the
             # most specific token for that phrase.
@@ -1021,6 +1081,18 @@ Text: """ + f'"{text}"'
         except Exception:
             pass
 
+        try:
+            log_emit(
+                log_callback,
+                self.config,
+                'DEBUG',
+                f"[RAG] After final cleanup: {llm_keywords}",
+                module='rag_engine',
+                func='extract_keywords',
+            )
+        except Exception:
+            pass
+
         # Final de-duplication while preserving order
         seen = set()
         deduped = []
@@ -1071,15 +1143,25 @@ Text: """ + f'"{text}"'
         # 提取大写开头的单词（可能是专有名词）
         # 匹配：句首或句中的大写开头单词
         matches = self._PROPER_NOUN_RE.findall(text)
-        
-        # 过滤掉常见词，并用 token DF 通用规则跳过明显泛词
+
+        # 过滤掉常见词/停用词；对不在术语表中的专有名词做“宽松保留”，
+        # 用于补齐 LLM 漏提取的实体（例如 Erikur、Solitude）。
         proper_nouns = []
         for word in matches:
             lw = word.lower()
             if lw in self._COMMON_WORDS:
                 continue
-            # Keep only "signal" tokens (appear in glossary terms, but not too frequent)
+            if getattr(self, "_stopwords_set", None) and lw in self._stopwords_set:
+                continue
+
+            # Strong signals: exact glossary hit or reasonable-DF token
             if self._is_signal_token(lw) or lw in self._glossary_lookup:
+                proper_nouns.append(word)
+                continue
+
+            # Weak signals: unknown TitleCase singletons.
+            # Keep only if long enough to avoid noise (e.g. skip "Yes").
+            if len(lw) >= 4:
                 proper_nouns.append(word)
         
         # 去重但保持顺序
