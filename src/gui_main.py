@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QTableWidget, QTableWidgetItem, QHeaderView, QSplitter, QDoubleSpinBox,
                              QComboBox, QAbstractSpinBox, QScrollArea, QDialog, QTreeWidget, QTreeWidgetItem)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QWheelEvent
+from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QWheelEvent, QGuiApplication
 
 from src.config_manager import ConfigManager
 from src.llm_client import LLMClient
@@ -144,9 +144,11 @@ class Worker(QThread):
                 if not self.is_running or self.stop_receiving:
                     return None
                 try:
-                    translation = self.translator.translate_text(source, log_callback=self.log.emit)
-                    # Get RAG debug info for caching
-                    debug_info = self.translator.get_last_rag_debug_info()
+                    translation, debug_info = self.translator.translate_text(
+                        source,
+                        log_callback=self.log.emit,
+                        return_debug_info=True,
+                    )
                     return (row_idx, source, translation, debug_info)
                 except Exception as e:
                     return (row_idx, source, None, None, str(e))
@@ -298,6 +300,7 @@ class RAGVisualizationDialog(QDialog):
         self.translated_text = translated_text
         self.translator = translator
         self.cached_debug_info = cached_debug_info
+        self.debug_info = None
         
         self.setWindowTitle(i18n.t("title_rag_visualization"))
         self.resize(1100, 800)
@@ -383,10 +386,19 @@ class RAGVisualizationDialog(QDialog):
         main_splitter.setStretchFactor(0, 1)
         main_splitter.setStretchFactor(1, 3)
 
-        # 关闭按钮
+        # 底部操作按钮
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+
+        copy_btn = QPushButton(i18n.t("btn_copy_rag_log"))
+        copy_btn.clicked.connect(self._copy_rag_log)
+        btn_row.addWidget(copy_btn)
+
         close_btn = QPushButton(i18n.t("btn_close"))
         close_btn.clicked.connect(self.accept)
-        layout.addWidget(close_btn)
+        btn_row.addWidget(close_btn)
+
+        layout.addLayout(btn_row)
 
         self.rag_tree.currentItemChanged.connect(self._update_detail_view)
 
@@ -444,6 +456,8 @@ class RAGVisualizationDialog(QDialog):
             else:
                 # 如果没有缓存，才重新获取RAG调试信息
                 debug_info = self.translator.get_rag_debug_info(self.original_text, use_rag=True)
+
+            self.debug_info = debug_info
             
             # 1. 关键词提取
             keywords_item = self._create_tree_item(None, i18n.t("step_keyword_extraction"))
@@ -522,6 +536,101 @@ class RAGVisualizationDialog(QDialog):
         except Exception as e:
             error_item = QTreeWidgetItem([f"Error loading RAG info: {str(e)}", ""])
             self.rag_tree.addTopLevelItem(error_item)
+
+    def _format_rag_log_text(self) -> str:
+        di = self.debug_info or {}
+        lines = []
+        lines.append("=== RAG Debug Log ===")
+        lines.append("")
+
+        src = di.get("original_text", self.original_text)
+        dst = self.translated_text
+        lines.append("[Original]")
+        lines.append(str(src or ""))
+        lines.append("")
+        lines.append("[Translation]")
+        lines.append(str(dst or ""))
+        lines.append("")
+
+        keywords = di.get("keywords") or []
+        lines.append("[Keywords]")
+        if keywords:
+            for kw in keywords:
+                lines.append(f"- {kw}")
+        else:
+            lines.append("(none)")
+        lines.append("")
+
+        search_results = di.get("search_results") or []
+        lines.append("[Vector Search]")
+        if isinstance(search_results, list) and search_results:
+            for qr in search_results:
+                query = qr.get("query", "") if isinstance(qr, dict) else ""
+                lines.append(f"Query: {query}")
+
+                if isinstance(qr, dict) and qr.get("direct_match"):
+                    lines.append(f"  Direct Match: {qr.get('direct_match')}")
+
+                vector_matches = qr.get("vector_matches", []) if isinstance(qr, dict) else []
+                if vector_matches:
+                    lines.append("  Vector Matches:")
+                    for term, score in vector_matches:
+                        try:
+                            lines.append(f"    - {term} ({float(score):.4f})")
+                        except Exception:
+                            lines.append(f"    - {term} ({score})")
+
+                containment_matches = qr.get("containment_matches", []) if isinstance(qr, dict) else []
+                if containment_matches:
+                    lines.append("  Containment Matches:")
+                    for term, score in containment_matches:
+                        try:
+                            lines.append(f"    - {term} ({float(score):.4f})")
+                        except Exception:
+                            lines.append(f"    - {term} ({score})")
+                lines.append("")
+        else:
+            lines.append("(none)")
+            lines.append("")
+
+        matched_terms = di.get("matched_terms") or {}
+        lines.append("[Matched Terms]")
+        if isinstance(matched_terms, dict) and matched_terms:
+            for term, trans in matched_terms.items():
+                lines.append(f"- {term} -> {trans}")
+        else:
+            lines.append("(none)")
+        lines.append("")
+
+        system_prompt = di.get("system_prompt") or ""
+        user_prompt = di.get("user_prompt") or ""
+        glossary_context = di.get("glossary_context") or ""
+        if system_prompt or user_prompt or glossary_context:
+            lines.append("[Prompts]")
+            if glossary_context:
+                lines.append("-- Glossary Context --")
+                lines.append(str(glossary_context))
+                lines.append("")
+            if system_prompt:
+                lines.append("-- System Prompt --")
+                lines.append(str(system_prompt))
+                lines.append("")
+            if user_prompt:
+                lines.append("-- User Prompt --")
+                lines.append(str(user_prompt))
+                lines.append("")
+
+        return "\n".join(lines).strip() + "\n"
+
+    def _copy_rag_log(self):
+        try:
+            text = self._format_rag_log_text()
+            cb = QGuiApplication.clipboard()
+            if cb is not None:
+                cb.setText(text)
+            QMessageBox.information(self, i18n.t("title_info"), i18n.t("msg_rag_log_copied"))
+        except Exception as e:
+            QMessageBox.warning(self, i18n.t("title_error"), str(e))
 
 
 class MainWindow(QMainWindow):

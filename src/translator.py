@@ -26,6 +26,8 @@ class Translator:
         self.llm_client = llm_client
         self.rag_engine = rag_engine
         self.prompt_manager = PromptManager(rag_engine.config)
+        # Best-effort cache for visualization; NOT thread-safe.
+        # In multi-threaded translation, prefer translate_text(..., return_debug_info=True).
         self._last_rag_debug_info = None  # Cache last RAG debug info for visualization
 
     def _extract_english_words(self, text: str) -> set:
@@ -572,9 +574,19 @@ class Translator:
         
         return not has_text_content
 
-    def translate_text(self, text, use_rag=True, log_callback=None, max_retries=2):
+    def translate_text(self, text, use_rag=True, log_callback=None, max_retries=2, return_debug_info: bool = False):
         if not text or not str(text).strip():
             # Normalize empty inputs to empty string
+            if return_debug_info:
+                return "", {
+                    "original_text": text,
+                    "keywords": [],
+                    "search_results": [],
+                    "matched_terms": {},
+                    "glossary_context": "",
+                    "system_prompt": "",
+                    "user_prompt": "",
+                }
             return ""
         
         # 如果文本只包含符号或数字，不需要翻译，直接返回
@@ -582,6 +594,16 @@ class Translator:
             log_emit(log_callback, self.rag_engine.config, 'DEBUG', 
                     f"Text contains only symbols/numbers, skipping translation: {text}", 
                     module='translator', func='translate_text')
+            if return_debug_info:
+                return str(text), {
+                    "original_text": text,
+                    "keywords": [],
+                    "search_results": [],
+                    "matched_terms": {},
+                    "glossary_context": "",
+                    "system_prompt": "",
+                    "user_prompt": "",
+                }
             return str(text)
 
         # Allow manual editing of prompts/*.json to take effect without restart
@@ -593,6 +615,7 @@ class Translator:
         glossary_context = ""
         keywords = []
         matched_terms = {}
+        search_debug = []
         
         if use_rag:
             # Get RAG settings
@@ -618,20 +641,16 @@ class Translator:
             # Handle return_debug result
             if isinstance(search_result, tuple):
                 matched_terms, search_debug = search_result
-                # Cache the debug info
-                self._last_rag_debug_info = {
-                    "original_text": text,
-                    "keywords": keywords,
-                    "search_results": search_debug,
-                    "matched_terms": matched_terms,
-                }
             else:
                 matched_terms = search_result
-                self._last_rag_debug_info = {
-                    "original_text": text,
-                    "keywords": keywords,
-                    "matched_terms": matched_terms,
-                }
+
+            # Best-effort cache (NOT thread-safe)
+            self._last_rag_debug_info = {
+                "original_text": text,
+                "keywords": keywords,
+                "search_results": search_debug if isinstance(search_debug, list) else [],
+                "matched_terms": matched_terms,
+            }
             
             try:
                 log_emit(log_callback, self.rag_engine.config, 'DEBUG', f"[RAG] Translator received {len(matched_terms)} matched glossary terms: {list(matched_terms.keys())}", module='translator', func='translate_text', extra={'rag_matches': list(matched_terms.keys())})
@@ -694,6 +713,18 @@ class Translator:
         user_template = self.prompt_manager.get("translator.user_template", "Input: {text}")
         user_content = self._apply_prompt_vars(user_template, {**prompt_vars, "text": text})
 
+        debug_info = None
+        if return_debug_info:
+            debug_info = {
+                "original_text": text,
+                "keywords": keywords,
+                "search_results": search_debug if isinstance(search_debug, list) else [],
+                "matched_terms": matched_terms,
+                "glossary_context": glossary_context,
+                "system_prompt": system_prompt,
+                "user_prompt": user_content,
+            }
+
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content}
@@ -746,6 +777,8 @@ class Translator:
                         log_emit(log_callback, self.rag_engine.config, 'WARNING', 
                                 f"Translation still appears untranslated after {max_retries} retries", 
                                 module='translator', func='translate_text')
+                        if return_debug_info:
+                            return translation, debug_info
                         return translation
                     continue
                 
@@ -754,7 +787,10 @@ class Translator:
                 
                 if not untranslated_fragments:
                     # 翻译质量良好，通过后处理并返回
-                    return self._post_process_translation(text, translation, log_callback)
+                    final_translation = self._post_process_translation(text, translation, log_callback)
+                    if return_debug_info:
+                        return final_translation, debug_info
+                    return final_translation
                 
                 # 有未翻译片段，记录并决定是否重试
                 log_emit(log_callback, self.rag_engine.config, 'DEBUG', 
@@ -766,22 +802,33 @@ class Translator:
                     log_emit(log_callback, self.rag_engine.config, 'INFO', 
                             f"Accepting translation with minor untranslated fragments after {max_retries} retries: {untranslated_fragments}", 
                             module='translator', func='translate_text')
-                    return self._post_process_translation(text, translation, log_callback)
+                    final_translation = self._post_process_translation(text, translation, log_callback)
+                    if return_debug_info:
+                        return final_translation, debug_info
+                    return final_translation
                 
                 # 如果是最后一次重试，返回结果
                 if retry_count == max_retries:
                     log_emit(log_callback, self.rag_engine.config, 'WARNING', 
                             f"Translation still has untranslated fragments after {max_retries} retries: {untranslated_fragments}", 
                             module='translator', func='translate_text')
-                    return self._post_process_translation(text, translation, log_callback)
+                    final_translation = self._post_process_translation(text, translation, log_callback)
+                    if return_debug_info:
+                        return final_translation, debug_info
+                    return final_translation
                     
             except Exception as e:
                 log_emit(log_callback, self.rag_engine.config, 'ERROR', f"Translation failed: {e}", exc=e, module='translator', func='translate_text')
                 if retry_count == max_retries:
+                    if return_debug_info:
+                        return str(text), debug_info
                     return str(text)
         
         # 如果所有重试都失败，返回最后一次的翻译结果
-        return self._post_process_translation(text, last_translation, log_callback) if last_translation else str(text)
+        final_translation = self._post_process_translation(text, last_translation, log_callback) if last_translation else str(text)
+        if return_debug_info:
+            return final_translation, debug_info
+        return final_translation
     
     def _parse_translation_response(self, response: str, original_text: str, messages: list, log_callback=None) -> str:
         """解析 LLM 的翻译响应，提取 JSON 中的 translation 字段"""
