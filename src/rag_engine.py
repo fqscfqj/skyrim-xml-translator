@@ -70,12 +70,9 @@ class RAGEngine:
         'today', 'tomorrow', 'yesterday', 'now', 'then', 'soon', 'later', 'earlier',
     })
 
-    # Extra generic words that often appear capitalized in UI/dialogue but are not Skyrim-specific entities.
-    # Applied mainly to single-word keywords.
-    _GENERIC_KEYWORDS = frozenset({
-        'especially', 'faction', 'adventure', 'adventures', 'temple', 'ruins', 'inn',
-        'armor', 'armour', 'mountain', 'mountains', 'snow', 'snowy', 'ceiling', 'ceilings',
-        'chair', 'bedroom', 'welcome', 'blessing', 'shrine',
+    # Lowercase connectors that may appear inside a title-cased proper noun.
+    _TITLE_CONNECTORS = frozenset({
+        'of', 'the', 'and', 'or', 'to', 'for', 'in', 'on', 'at', 'from', 'with',
     })
     
     def __init__(self, config_manager, llm_client: LLMClient):
@@ -85,6 +82,7 @@ class RAGEngine:
         self.vectors = None # numpy array
         self.terms = [] # list of terms corresponding to vectors
         self._glossary_lookup = {}
+        self._token_df: Dict[str, int] = {}
         
         self.glossary_path = self.config.get("paths", "glossary_file", "glossary.json")
         self.vector_path = self.config.get("paths", "vector_index_file", "vector_index.npy")
@@ -105,6 +103,112 @@ class RAGEngine:
             if normalized and normalized not in lookup:
                 lookup[normalized] = term
         self._glossary_lookup = lookup
+        self._rebuild_token_df()
+
+    def _rebuild_token_df(self) -> None:
+        """Build a token document-frequency map from glossary terms for generic keyword filtering."""
+        token_df: Dict[str, int] = {}
+        terms_source = list(self.terms) if self.terms else list(self.glossary.keys())
+        # Only use "term-like" entries (names/items/places), NOT full dialogue lines.
+        # Heuristics: skip any entry that looks like a sentence or template.
+        sentence_punct = (".", "!", "?", ",", ";")
+        for term in terms_source:
+            if not term or not isinstance(term, str):
+                continue
+            raw = term.strip()
+            if not raw:
+                continue
+            if any(p in raw for p in sentence_punct):
+                continue
+            if "<" in raw or ">" in raw:
+                continue
+            if "{" in raw or "}" in raw:
+                continue
+            # Treat colon as template-ish (e.g. 'Spell Tome: X'); we don't want such categories to drive keyword filtering.
+            if ":" in raw:
+                continue
+
+            norm = self._normalize_term_key(raw)
+            if not norm:
+                continue
+            split_tokens = norm.split()
+            # Skip short sentence-like fragments that contain common function words beyond name connectors.
+            allowed_name_connectors = {"of", "the", "and"}
+            if any((t in self._COMMON_WORDS) and (t not in allowed_name_connectors) for t in split_tokens):
+                continue
+            if len(split_tokens) > 8 or len(norm) > 60:
+                continue
+            tokens = [t for t in split_tokens if t and len(t) >= 2 and t not in self._COMMON_WORDS]
+            for t in set(tokens):
+                token_df[t] = token_df.get(t, 0) + 1
+        self._token_df = token_df
+
+    def _signal_max_df(self) -> int:
+        """Dynamic threshold: tokens seen too often in glossary are considered generic."""
+        total_terms = len(self.terms) if self.terms else len(self.glossary)
+        if total_terms <= 0:
+            return 50
+        # 2% of glossary, with a reasonable minimum/maximum.
+        return max(50, min(250, int(total_terms * 0.02)))
+
+    def _is_signal_token(self, token_norm: str) -> bool:
+        if not token_norm or token_norm in self._COMMON_WORDS:
+            return False
+        df = self._token_df.get(token_norm, 0)
+        return 0 < df <= self._signal_max_df()
+
+    def _extract_titlecase_phrases(self, text: str) -> List[str]:
+        """Extract title-cased phrases from source text, e.g. 'Temple of Mara', 'Telvanni Sex Spell'."""
+        if not text:
+            return []
+
+        words = re.findall(r"[A-Za-z][A-Za-z0-9'\-]*", text)
+        phrases: List[str] = []
+        seen = set()
+
+        def is_title_word(w: str) -> bool:
+            if not w:
+                return False
+            if not w[0].isupper():
+                return False
+            # Avoid single-letter initials
+            return len(w) >= 2
+
+        i = 0
+        while i < len(words):
+            if not is_title_word(words[i]):
+                i += 1
+                continue
+
+            j = i
+            title_count = 0
+            parts: List[str] = []
+            while j < len(words):
+                w = words[j]
+                wl = w.lower()
+                if is_title_word(w):
+                    parts.append(w)
+                    title_count += 1
+                    j += 1
+                    continue
+                if wl in self._TITLE_CONNECTORS and parts and j + 1 < len(words) and is_title_word(words[j + 1]):
+                    parts.append(wl)
+                    j += 1
+                    continue
+                break
+
+            if title_count >= 2 and parts:
+                # Strip leading articles like "The"/"A"/"An" which often appear due to sentence start.
+                if parts and parts[0].lower() in ("the", "a", "an"):
+                    parts = parts[1:]
+                    title_count = sum(1 for p in parts if p and p[0].isupper())
+                phrase = " ".join(parts)
+                if phrase and phrase.lower() not in seen:
+                    seen.add(phrase.lower())
+                    phrases.append(phrase)
+
+            i = max(i + 1, j)
+        return phrases
 
     def _normalize_term_key(self, text: str) -> str:
         """Normalize term for case/punctuation-insensitive comparison."""
@@ -424,9 +528,47 @@ Text: "{text}"
                 return False
             if norm in self._COMMON_WORDS:
                 return True
-            if norm in self._GENERIC_KEYWORDS:
+            # Generic rule: if the token never appears in glossary terms, it's likely not a lore term.
+            # Also treat overly frequent tokens as generic (e.g., 'spell', 'tome', 'key' etc) without hardcoding.
+            df = self._token_df.get(norm, 0)
+            if df <= 0 and norm not in self._glossary_lookup:
+                return True
+            if df > self._signal_max_df():
                 return True
             return False
+
+        def expand_non_exact_phrase(term: str) -> List[str]:
+            """For a non-exact phrase, prefer exact glossary sub-phrases; otherwise fall back to signal tokens."""
+            norm = self._normalize_term_key(term)
+            if not norm or " " not in norm:
+                return [term]
+            if norm in self._glossary_lookup:
+                return [self._glossary_lookup[norm]]
+
+            tokens = [t for t in norm.split() if t and t not in self._COMMON_WORDS]
+            if len(tokens) < 2:
+                return []
+
+            # 1) Find longest exact glossary sub-phrases (contiguous spans)
+            hits: List[str] = []
+            seen_norm = set()
+            for span_len in range(min(len(tokens), 6), 1, -1):
+                for i in range(0, len(tokens) - span_len + 1):
+                    sub_norm = " ".join(tokens[i : i + span_len])
+                    if sub_norm in self._glossary_lookup and sub_norm not in seen_norm:
+                        seen_norm.add(sub_norm)
+                        hits.append(self._glossary_lookup[sub_norm])
+                if hits:
+                    break
+
+            if hits:
+                return hits
+
+            # 2) Otherwise, keep signal tokens only
+            # Prefer non-exact tokens: exact single-word glossary entries are often generic categories.
+            signal_tokens = [t for t in tokens if self._is_signal_token(t) and t not in self._glossary_lookup]
+            # Return in TitleCase-ish for nicer queries
+            return [t.capitalize() for t in signal_tokens]
         try:
             # Ensure keyword extraction gets enough output tokens unless user explicitly set it
             max_tokens_override = None
@@ -500,6 +642,14 @@ Text: "{text}"
             # 后处理：拆分包含所有格的短语，提取真正的专有名词
             # 例如 "Sybille's Bite" → "Sybille"
             processed_keywords = []
+
+            # Add phrase candidates from the original text to avoid splitting into generic sub-words
+            # e.g. "Telvanni Sex Spell" -> keep the phrase, drop "Sex"/"Spell"
+            try:
+                processed_keywords.extend(self._extract_titlecase_phrases(text))
+            except Exception:
+                pass
+
             for kw in keywords:
                 if not isinstance(kw, str):
                     continue
@@ -542,7 +692,7 @@ Text: "{text}"
                     norm = self._normalize_term_key(kw)
                     if not norm:
                         continue
-                    if " " not in norm and norm not in self._glossary_lookup:
+                    if " " not in norm:
                         contained = any(re.search(r"\b{}\b".format(re.escape(norm)), p) for p in phrases_norm)
                         if contained:
                             continue
@@ -564,28 +714,58 @@ Text: "{text}"
         # 后备机制：使用正则表达式提取大写开头的单词作为潜在专有名词
         # 这可以捕获 LLM 遗漏的名词
         regex_keywords = self._extract_proper_nouns_regex(text)
+
+        # If a word is part of a multi-word TitleCase phrase in the source text,
+        # prefer the phrase and avoid re-adding component words from regex.
+        blocked_regex_tokens = set()
+        try:
+            for phr in self._extract_titlecase_phrases(text):
+                pnorm = self._normalize_term_key(phr)
+                for t in pnorm.split():
+                    if not t:
+                        continue
+                    if t in self._COMMON_WORDS:
+                        continue
+                    if t in self._TITLE_CONNECTORS:
+                        continue
+                    blocked_regex_tokens.add(t)
+        except Exception:
+            blocked_regex_tokens = set()
         
         # 合并 LLM 提取和正则提取的结果
         seen_lower = set(kw.lower() for kw in llm_keywords)
         for kw in regex_keywords:
+            nkw = self._normalize_term_key(kw)
+            if nkw and nkw in blocked_regex_tokens:
+                continue
             if kw.lower() not in seen_lower:
                 seen_lower.add(kw.lower())
                 llm_keywords.append(kw)
 
         # Final cleanup pass: remove generic single words and decompose noise from regex.
         try:
+            # Expand non-exact phrases into glossary sub-phrases or signal tokens
+            expanded: List[str] = []
+            for kw in llm_keywords:
+                kw_norm = self._normalize_term_key(kw)
+                if kw_norm and " " in kw_norm and kw_norm not in self._glossary_lookup:
+                    expanded.extend(expand_non_exact_phrase(kw))
+                else:
+                    expanded.append(kw)
+            llm_keywords = expanded
+
             # Remove generic single-word keywords
             llm_keywords = [kw for kw in llm_keywords if not is_single_word_generic(kw)]
 
-            # Remove phrase keywords that are composed entirely of common/generic words
+            # Drop phrase keywords that have no "signal" tokens (i.e., no token that appears in glossary at a reasonable DF)
             phrase_filtered = []
             for kw in llm_keywords:
                 norm = self._normalize_term_key(kw)
                 if not norm:
                     continue
                 if " " in norm and norm not in self._glossary_lookup:
-                    toks = norm.split()
-                    if toks and all((t in self._COMMON_WORDS) or (t in self._GENERIC_KEYWORDS) for t in toks):
+                    toks = [t for t in norm.split() if t and t not in self._COMMON_WORDS]
+                    if toks and not any(self._is_signal_token(t) for t in toks):
                         continue
                 phrase_filtered.append(kw)
             llm_keywords = phrase_filtered
@@ -611,6 +791,22 @@ Text: "{text}"
                 llm_keywords = cleaned
         except Exception:
             pass
+
+        # Final de-duplication while preserving order
+        seen = set()
+        deduped = []
+        for kw in llm_keywords:
+            if not isinstance(kw, str):
+                continue
+            k = kw.strip()
+            if not k:
+                continue
+            kl = k.lower()
+            if kl in seen:
+                continue
+            seen.add(kl)
+            deduped.append(k)
+        llm_keywords = deduped
         
         try:
             log_emit(log_callback, self.config, 'DEBUG', f"[RAG] Extracted {len(llm_keywords)} keywords: {llm_keywords}", module='rag_engine', func='extract_keywords', extra={'keywords': llm_keywords, 'input_text': text[:100]})
@@ -627,11 +823,14 @@ Text: "{text}"
         # 匹配：句首或句中的大写开头单词
         matches = self._PROPER_NOUN_RE.findall(text)
         
-        # 过滤掉常见词/泛词 (using class-level frozenset for O(1) lookup)
+        # 过滤掉常见词，并用 token DF 通用规则跳过明显泛词
         proper_nouns = []
         for word in matches:
             lw = word.lower()
-            if lw not in self._COMMON_WORDS and lw not in self._GENERIC_KEYWORDS:
+            if lw in self._COMMON_WORDS:
+                continue
+            # Keep only "signal" tokens (appear in glossary terms, but not too frequent)
+            if self._is_signal_token(lw) or lw in self._glossary_lookup:
                 proper_nouns.append(word)
         
         # 去重但保持顺序
