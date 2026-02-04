@@ -15,6 +15,7 @@ class RAGEngine:
     _POSSESSIVE_S_RE = re.compile(r"['']\s*s\s+")
     _PROPER_NOUN_RE = re.compile(r"\b([A-Z][a-z]{2,})\b")
     _MARKDOWN_CODE_RE = re.compile(r'```(?:json)?')
+    _NORMALIZE_TERM_RE = re.compile(r"[^0-9a-zA-Z\u4e00-\u9fff]+")
     
     # Threshold to distinguish name-like terms from sentence-like terms.
     # Terms shorter than this are treated as names/titles and require whole-word
@@ -89,13 +90,24 @@ class RAGEngine:
         self.load_data()
 
     def _rebuild_glossary_lookup(self):
-        """Build a lowercase lookup map for instant exact hits."""
+        """Build a normalized lookup map for instant exact hits (case/punct insensitive)."""
         lookup = {}
         for term in self.glossary.keys():
-            normalized = term.strip().lower()
+            normalized = self._normalize_term_key(term)
             if normalized and normalized not in lookup:
                 lookup[normalized] = term
         self._glossary_lookup = lookup
+
+    def _normalize_term_key(self, text: str) -> str:
+        """Normalize term for case/punctuation-insensitive comparison."""
+        if not text:
+            return ""
+        cleaned = text.strip().lower()
+        # Replace punctuation/symbols with spaces, keep letters/digits/CJK
+        cleaned = self._NORMALIZE_TERM_RE.sub(" ", cleaned)
+        # Collapse whitespace
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned
 
     def load_data(self):
         """加载术语表和向量索引"""
@@ -583,7 +595,7 @@ Text: "{text}"
             def add_term_if_possible(term, score):
                 if not term:
                     return False
-                normalized = term.strip().lower()
+                normalized = self._normalize_term_key(term)
                 canonical_term = self._glossary_lookup.get(normalized, term)
                 if canonical_term not in self.glossary:
                     return False
@@ -650,39 +662,22 @@ Text: "{text}"
                         containment_matches = [(self.terms[i], float(similarities[i])) for i in top_containment_indices]
                         
                         # Filter containment matches based on source_text
-                        # Containment matches are terms that contain the keyword. They are useful
-                        # translation references as long as the keyword itself appears in source.
-                        # E.g., if keyword "Dinya" is in source, "Dinya Balu" -> "丁雅·巴鲁" helps
-                        # the translator infer that "Dinya" should be "丁雅".
+                        # Keep any term that contains the keyword when the keyword appears in source.
+                        # Do not filter out long sentence-like terms here.
                         if source_text:
                             source_lower = source_text.lower()
-                            # Check if the keyword itself appears in source text
                             keyword_pattern = r"\b{}\b".format(re.escape(query_lower))
                             keyword_in_source = bool(re.search(keyword_pattern, source_lower))
-                            
+
                             filtered_containment = []
                             for term, score in containment_matches:
                                 term_lower = term.lower()
-                                # If the term exactly matches the keyword, always include it
                                 if term_lower == query_lower:
                                     filtered_containment.append((term, score))
-                                # If keyword is in source and term contains keyword, keep it as reference
                                 elif keyword_in_source and query_lower in term_lower:
-                                    # For short name-like terms, these are useful translation references
-                                    if len(term) < self._NAME_VS_SENTENCE_THRESHOLD:
-                                        filtered_containment.append((term, score))
-                                    # For long sentence-like terms, only include if they provide
-                                    # direct context (the term literally appears in source)
-                                    elif term_lower in source_lower:
-                                        filtered_containment.append((term, score))
-                                # Fallback: check if the term itself appears in source
-                                elif len(term) < self._NAME_VS_SENTENCE_THRESHOLD:
-                                    pattern = r"\b{}\b".format(re.escape(term_lower))
-                                    if re.search(pattern, source_lower):
-                                        filtered_containment.append((term, score))
-                                else:
-                                    if term_lower in source_lower:
-                                        filtered_containment.append((term, score))
+                                    filtered_containment.append((term, score))
+                                elif term_lower in source_lower:
+                                    filtered_containment.append((term, score))
                             containment_matches = filtered_containment
 
                     # 3. Combine Results
@@ -694,11 +689,12 @@ Text: "{text}"
 
                     # Filter vector matches based on source_text as well.
                     # Keep terms that either appear in source or contain the keyword (as references).
+                    # Do not filter out long sentence-like terms here.
                     if source_text and vector_matches:
                         source_lower = source_text.lower()
                         keyword_pattern = r"\b{}\b".format(re.escape(query_lower))
                         keyword_in_source = bool(re.search(keyword_pattern, source_lower))
-                        
+
                         filtered = []
                         for term, score in vector_matches:
                             term_lower = term.lower()
@@ -706,20 +702,10 @@ Text: "{text}"
                                 filtered.append((term, score))
                                 continue
 
-                            # If keyword is in source and term contains keyword, keep as reference
                             if keyword_in_source and query_lower in term_lower:
-                                if len(term) < self._NAME_VS_SENTENCE_THRESHOLD:
-                                    filtered.append((term, score))
-                                    continue
-
-                            # For name-like terms we require a whole-word/phrase match in source.
-                            if len(term) < self._NAME_VS_SENTENCE_THRESHOLD:
-                                pattern = r"\b{}\b".format(re.escape(term_lower))
-                                if re.search(pattern, source_lower):
-                                    filtered.append((term, score))
+                                filtered.append((term, score))
                                 continue
 
-                            # For long sentence-like terms, require literal presence.
                             if term_lower in source_lower:
                                 filtered.append((term, score))
 
@@ -748,7 +734,7 @@ Text: "{text}"
                     pass
 
                 # 0. Exact glossary hit (case-insensitive)
-                normalized_query = query_lower.strip()
+                normalized_query = self._normalize_term_key(query)
                 direct_term = self._glossary_lookup.get(normalized_query)
                 if direct_term:
                     if add_term_if_possible(direct_term, 1.1) and return_debug:
