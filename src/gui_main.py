@@ -300,51 +300,139 @@ class RAGVisualizationDialog(QDialog):
         self.cached_debug_info = cached_debug_info
         
         self.setWindowTitle(i18n.t("title_rag_visualization"))
-        self.resize(900, 700)
+        self.resize(1100, 800)
         
         self._setup_ui()
         self._load_rag_info()
     
     def _setup_ui(self):
         layout = QVBoxLayout(self)
-        
-        # 原文和译文显示
-        text_group = QGroupBox(i18n.t("label_original_text"))
-        text_layout = QVBoxLayout()
-        
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        main_splitter = QSplitter(Qt.Orientation.Vertical)
+        layout.addWidget(main_splitter)
+
+        # 顶部：原文/译文并排
+        top_widget = QWidget()
+        top_layout = QHBoxLayout(top_widget)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(10)
+
+        original_group = QGroupBox(i18n.t("label_original_text"))
+        original_layout = QVBoxLayout()
         self.original_text_display = QTextEdit()
         self.original_text_display.setReadOnly(True)
-        self.original_text_display.setMaximumHeight(80)
+        self.original_text_display.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self.original_text_display.setPlainText(self.original_text)
-        text_layout.addWidget(QLabel(i18n.t("label_original_text")))
-        text_layout.addWidget(self.original_text_display)
-        
+        original_layout.addWidget(self.original_text_display)
+        original_group.setLayout(original_layout)
+
+        translated_group = QGroupBox(i18n.t("label_translated_text"))
+        translated_layout = QVBoxLayout()
         self.translated_text_display = QTextEdit()
         self.translated_text_display.setReadOnly(True)
-        self.translated_text_display.setMaximumHeight(80)
+        self.translated_text_display.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self.translated_text_display.setPlainText(self.translated_text)
-        text_layout.addWidget(QLabel(i18n.t("label_translated_text")))
-        text_layout.addWidget(self.translated_text_display)
-        
-        text_group.setLayout(text_layout)
-        layout.addWidget(text_group)
-        
-        # RAG处理步骤树形显示
+        translated_layout.addWidget(self.translated_text_display)
+        translated_group.setLayout(translated_layout)
+
+        top_layout.addWidget(original_group, 1)
+        top_layout.addWidget(translated_group, 1)
+        main_splitter.addWidget(top_widget)
+
+        # 底部：RAG步骤树 + 详情面板
+        bottom_widget = QWidget()
+        bottom_layout = QHBoxLayout(bottom_widget)
+        bottom_layout.setContentsMargins(0, 0, 0, 0)
+        bottom_layout.setSpacing(10)
+
         steps_group = QGroupBox(i18n.t("group_rag_steps"))
         steps_layout = QVBoxLayout()
-        
         self.rag_tree = QTreeWidget()
         self.rag_tree.setHeaderLabels([i18n.t("group_rag_steps"), i18n.t("label_similarity_score")])
-        self.rag_tree.setColumnWidth(0, 600)
+        self.rag_tree.setWordWrap(True)
+        self.rag_tree.setTextElideMode(Qt.TextElideMode.ElideNone)
+        self.rag_tree.setAlternatingRowColors(True)
+        self.rag_tree.setUniformRowHeights(False)
+        header = self.rag_tree.header()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setMinimumSectionSize(120)
         steps_layout.addWidget(self.rag_tree)
-        
         steps_group.setLayout(steps_layout)
-        layout.addWidget(steps_group)
-        
+
+        detail_group = QGroupBox(i18n.t("label_details"))
+        detail_layout = QVBoxLayout()
+        self.detail_title = QLabel("")
+        self.detail_title.setWordWrap(True)
+        self.detail_score = QLabel("")
+        self.detail_text = QTextEdit()
+        self.detail_text.setReadOnly(True)
+        self.detail_text.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        detail_layout.addWidget(self.detail_title)
+        detail_layout.addWidget(self.detail_score)
+        detail_layout.addWidget(self.detail_text, 1)
+        detail_group.setLayout(detail_layout)
+
+        bottom_layout.addWidget(steps_group, 2)
+        bottom_layout.addWidget(detail_group, 1)
+        main_splitter.addWidget(bottom_widget)
+
+        main_splitter.setStretchFactor(0, 1)
+        main_splitter.setStretchFactor(1, 3)
+
         # 关闭按钮
         close_btn = QPushButton(i18n.t("btn_close"))
         close_btn.clicked.connect(self.accept)
         layout.addWidget(close_btn)
+
+        self.rag_tree.currentItemChanged.connect(self._update_detail_view)
+
+    def _create_tree_item(self, parent, label, score=None, full_text=None):
+        score_text = ""
+        if score is not None:
+            try:
+                score_text = f"{float(score):.4f}"
+            except Exception:
+                score_text = str(score)
+
+        item = QTreeWidgetItem([label, score_text])
+        if parent is None:
+            self.rag_tree.addTopLevelItem(item)
+        else:
+            parent.addChild(item)
+
+        full_value = full_text if full_text is not None else label
+        item.setData(0, Qt.ItemDataRole.UserRole, full_value)
+        item.setToolTip(0, full_value)
+        if score is not None:
+            item.setData(1, Qt.ItemDataRole.UserRole, score)
+            item.setToolTip(1, score_text)
+            item.setTextAlignment(1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        return item
+
+    def _update_detail_view(self, current, previous):
+        if current is None:
+            self.detail_title.setText("")
+            self.detail_score.setText("")
+            self.detail_text.setPlainText("")
+            return
+
+        full_text = current.data(0, Qt.ItemDataRole.UserRole)
+        if full_text is None:
+            full_text = current.text(0)
+        score_value = current.data(1, Qt.ItemDataRole.UserRole)
+        score_text = ""
+        if score_value is not None and score_value != "":
+            try:
+                score_text = f"{float(score_value):.4f}"
+            except Exception:
+                score_text = str(score_value)
+
+        self.detail_title.setText(full_text)
+        self.detail_score.setText(f"{i18n.t('label_similarity_score')}: {score_text}" if score_text else i18n.t('label_similarity_score'))
+        self.detail_text.setPlainText(full_text)
     
     def _load_rag_info(self):
         """加载并显示RAG处理信息"""
@@ -357,94 +445,78 @@ class RAGVisualizationDialog(QDialog):
                 debug_info = self.translator.get_rag_debug_info(self.original_text, use_rag=True)
             
             # 1. 关键词提取
-            keywords_item = QTreeWidgetItem([i18n.t("step_keyword_extraction"), ""])
+            keywords_item = self._create_tree_item(None, i18n.t("step_keyword_extraction"))
             if debug_info.get("keywords"):
                 for keyword in debug_info["keywords"]:
-                    keyword_child = QTreeWidgetItem([str(keyword), ""])
-                    keywords_item.addChild(keyword_child)
+                    self._create_tree_item(keywords_item, str(keyword))
             else:
-                keywords_item.addChild(QTreeWidgetItem([i18n.t("msg_no_valid_terms"), ""]))
-            self.rag_tree.addTopLevelItem(keywords_item)
+                self._create_tree_item(keywords_item, i18n.t("msg_no_valid_terms"))
             keywords_item.setExpanded(True)
             
             # 2. 向量检索 - 显示每个关键词的搜索结果
-            search_item = QTreeWidgetItem([i18n.t("step_vector_search"), ""])
+            search_item = self._create_tree_item(None, i18n.t("step_vector_search"))
             if isinstance(debug_info.get("search_results"), list):
                 for query_result in debug_info["search_results"]:
                     query = query_result.get("query", "")
-                    query_node = QTreeWidgetItem([f"Query: {query}", ""])
+                    query_node = self._create_tree_item(search_item, f"Query: {query}")
                     
                     # 直接匹配
                     direct_match = query_result.get("direct_match")
                     if direct_match:
-                        direct_node = QTreeWidgetItem([f"Direct Match: {direct_match}", "1.0"])
-                        query_node.addChild(direct_node)
+                        self._create_tree_item(query_node, f"Direct Match: {direct_match}", score=1.0, full_text=direct_match)
                     
                     # 向量匹配
                     vector_matches = query_result.get("vector_matches", [])
                     if vector_matches:
-                        vector_node = QTreeWidgetItem(["Vector Matches", ""])
-                        for term, score in vector_matches[:5]:  # 只显示前5个
-                            match_child = QTreeWidgetItem([term, f"{score:.4f}"])
-                            vector_node.addChild(match_child)
-                        query_node.addChild(vector_node)
+                        vector_node = self._create_tree_item(query_node, "Vector Matches")
+                        for term, score in vector_matches:
+                            self._create_tree_item(vector_node, str(term), score=score, full_text=term)
                         vector_node.setExpanded(True)
                     
                     # 包含匹配
                     containment_matches = query_result.get("containment_matches", [])
                     if containment_matches:
-                        contain_node = QTreeWidgetItem(["Containment Matches", ""])
-                        for term, score in containment_matches[:5]:
-                            match_child = QTreeWidgetItem([term, f"{score:.4f}"])
-                            contain_node.addChild(match_child)
-                        query_node.addChild(contain_node)
+                        contain_node = self._create_tree_item(query_node, "Containment Matches")
+                        for term, score in containment_matches:
+                            self._create_tree_item(contain_node, str(term), score=score, full_text=term)
                         contain_node.setExpanded(True)
-                    
-                    search_item.addChild(query_node)
                     query_node.setExpanded(True)
-            self.rag_tree.addTopLevelItem(search_item)
             search_item.setExpanded(True)
             
             # 3. 术语表匹配 - 最终选择的术语
-            matched_item = QTreeWidgetItem([i18n.t("step_glossary_matching"), ""])
+            matched_item = self._create_tree_item(None, i18n.t("step_glossary_matching"))
             if debug_info.get("matched_terms"):
                 for term, translation in debug_info["matched_terms"].items():
-                    term_child = QTreeWidgetItem([f"{term} → {translation}", ""])
-                    matched_item.addChild(term_child)
+                    self._create_tree_item(matched_item, f"{term} → {translation}", full_text=f"{term} → {translation}")
             else:
-                matched_item.addChild(QTreeWidgetItem([i18n.t("msg_no_valid_terms"), ""]))
-            self.rag_tree.addTopLevelItem(matched_item)
+                self._create_tree_item(matched_item, i18n.t("msg_no_valid_terms"))
             matched_item.setExpanded(True)
             
             # 4. 提示词构建
-            prompt_item = QTreeWidgetItem([i18n.t("step_prompt_construction"), ""])
+            prompt_item = self._create_tree_item(None, i18n.t("step_prompt_construction"))
             
             # 系统提示词
             system_prompt = debug_info.get("system_prompt", "")
             if system_prompt:
-                system_node = QTreeWidgetItem(["System Prompt", ""])
-                system_text = QTreeWidgetItem([system_prompt[:500] + "..." if len(system_prompt) > 500 else system_prompt, ""])
-                system_node.addChild(system_text)
-                prompt_item.addChild(system_node)
+                system_node = self._create_tree_item(prompt_item, "System Prompt")
+                self._create_tree_item(system_node, system_prompt, full_text=system_prompt)
             
             # 用户提示词
             user_prompt = debug_info.get("user_prompt", "")
             if user_prompt:
-                user_node = QTreeWidgetItem(["User Prompt", ""])
-                user_text = QTreeWidgetItem([user_prompt[:200] + "..." if len(user_prompt) > 200 else user_prompt, ""])
-                user_node.addChild(user_text)
-                prompt_item.addChild(user_node)
+                user_node = self._create_tree_item(prompt_item, "User Prompt")
+                self._create_tree_item(user_node, user_prompt, full_text=user_prompt)
             
             # 术语表上下文
             glossary_context = debug_info.get("glossary_context", "")
             if glossary_context:
-                glossary_node = QTreeWidgetItem(["Glossary Context", ""])
-                glossary_text = QTreeWidgetItem([glossary_context[:500] + "..." if len(glossary_context) > 500 else glossary_context, ""])
-                glossary_node.addChild(glossary_text)
-                prompt_item.addChild(glossary_node)
+                glossary_node = self._create_tree_item(prompt_item, "Glossary Context")
+                self._create_tree_item(glossary_node, glossary_context, full_text=glossary_context)
                 
-            self.rag_tree.addTopLevelItem(prompt_item)
             prompt_item.setExpanded(True)
+
+            if self.rag_tree.topLevelItemCount() > 0:
+                self.rag_tree.setCurrentItem(self.rag_tree.topLevelItem(0))
             
         except Exception as e:
             error_item = QTreeWidgetItem([f"Error loading RAG info: {str(e)}", ""])

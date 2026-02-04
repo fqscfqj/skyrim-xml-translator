@@ -62,6 +62,7 @@
     "label_matched_terms": "匹配的术语:",
     "label_final_prompt": "最终提示词:",
     "label_similarity_score": "相似度",
+    "label_details": "详情",
     "msg_no_row_selected": "请选择一个已翻译的行。",
     "msg_row_not_translated": "所选行尚未翻译。",
     "btn_close": "关闭",

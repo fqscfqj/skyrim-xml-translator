@@ -761,59 +761,6 @@ Text: "{text}"
             except Exception as e:
                 log_emit(None, self.config, 'ERROR', f"Search error for '{query}': {e}", exc=e, module='rag_engine', func='search_terms')
         
-        # Apply short/long term quotas to the final results
-        short_threshold = self.config.get("rag", "short_term_max_tokens", 6)
-        short_limit = self.config.get("rag", "short_term_max_results", 5)
-        long_limit = self.config.get("rag", "long_term_max_results", 2)
-
-        try:
-            short_threshold = int(short_threshold)
-        except Exception:
-            short_threshold = 0
-        if short_threshold < 0:
-            short_threshold = 0
-
-        try:
-            short_limit = int(short_limit)
-        except Exception:
-            short_limit = 0
-        if short_limit < 0:
-            short_limit = 0
-
-        try:
-            long_limit = int(long_limit)
-        except Exception:
-            long_limit = 0
-        if long_limit < 0:
-            long_limit = 0
-
-        if candidate_scores:
-            short_candidates = []
-            long_candidates = []
-            for term, score in candidate_scores.items():
-                term_tokens = self._estimate_tokens(term)
-                if term_tokens <= short_threshold:
-                    short_candidates.append((term, score))
-                else:
-                    long_candidates.append((term, score))
-
-            short_candidates.sort(key=lambda x: (-x[1], len(x[0]), x[0].lower()))
-            long_candidates.sort(key=lambda x: (-x[1], len(x[0]), x[0].lower()))
-
-            selected = []
-            if short_limit > 0:
-                selected.extend(short_candidates[:short_limit])
-            if long_limit > 0:
-                selected.extend(long_candidates[:long_limit])
-
-            selected.sort(key=lambda x: (-x[1], len(x[0]), x[0].lower()))
-            results = {term: self.glossary[term] for term, _ in selected}
-
-            try:
-                log_emit(log_callback, self.config, 'DEBUG', f"[RAG] Applied short/long quotas. Short<= {short_threshold} tokens: {short_limit}, Long: {long_limit}. Selected {len(results)} terms.", module='rag_engine', func='search_terms', extra={'selected_terms': list(results.keys())})
-            except Exception:
-                pass
-
         # Always log RAG search results for debugging
         try:
             if results:

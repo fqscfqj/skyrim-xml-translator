@@ -62,6 +62,7 @@
     "label_matched_terms": "Matched Terms:",
     "label_final_prompt": "Final Prompt:",
     "label_similarity_score": "Similarity",
+    "label_details": "Details",
     "msg_no_row_selected": "Please select a translated row.",
     "msg_row_not_translated": "The selected row has not been translated yet.",
     "btn_close": "Close",
