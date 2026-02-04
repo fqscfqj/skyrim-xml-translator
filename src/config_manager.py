@@ -67,7 +67,6 @@ class ConfigManager:
                 "vectorization": 5
             },
             "rag": {
-                "max_terms": 30,
                 "similarity_threshold": 0.75,
                 "short_term_max_tokens": 6,
                 "short_term_max_results": 5,

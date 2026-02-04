@@ -88,7 +88,6 @@
     "label_trans_threads": "翻译线程数:",
     "label_vec_threads": "向量化线程数:",
     "group_rag_settings": "RAG 设置",
-    "label_rag_max_terms": "每个词汇最大术语数:",
     "label_rag_threshold": "相似度阈值 (0-1):",
     "label_rag_short_token_threshold": "短词典 token 阈值（估算，≤此值为短词典）:",
     "tooltip_rag_short_token_threshold": "Token 为本地估算：中文单字=1，连续英文/数字=1。用于区分短/长词典；≤阈值为短词典，>阈值为长词典。",

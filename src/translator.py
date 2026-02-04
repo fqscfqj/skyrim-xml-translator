@@ -313,8 +313,6 @@ class Translator:
         if use_rag:
             # Get RAG settings
             threshold = self.rag_engine.config.get("rag", "similarity_threshold", 0.75)
-            max_terms_per_keyword = self.rag_engine.config.get("rag", "max_terms", 30)
-
             # 1. Extract keywords (RAG)
             keywords = self.rag_engine.extract_keywords(text, log_callback=log_callback)
             debug_info["keywords"] = keywords
@@ -324,7 +322,6 @@ class Translator:
                 keywords,
                 threshold=threshold,
                 log_callback=log_callback,
-                max_terms_per_keyword=max_terms_per_keyword,
                 source_text=text,
                 return_debug=True,
             )
@@ -468,8 +465,6 @@ class Translator:
         if use_rag:
             # Get RAG settings
             threshold = self.rag_engine.config.get("rag", "similarity_threshold", 0.75)
-            max_terms_per_keyword = self.rag_engine.config.get("rag", "max_terms", 30)
-
             # 1. Extract keywords (RAG)
             log_emit(log_callback, self.rag_engine.config, 'DEBUG', f"[RAG] Starting keyword extraction for text (length={len(text)}): {text[:200]}{'...' if len(text) > 200 else ''}", module='translator', func='translate_text')
             keywords = self.rag_engine.extract_keywords(text, log_callback=log_callback)
@@ -484,7 +479,6 @@ class Translator:
                 keywords,
                 threshold=threshold,
                 log_callback=log_callback,
-                max_terms_per_keyword=max_terms_per_keyword,
                 source_text=text,  # Pass source text to filter containment matches
                 return_debug=True,  # Get debug info for caching
             )

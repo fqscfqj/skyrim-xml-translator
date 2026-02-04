@@ -404,21 +404,54 @@ Text: "{text}"
         messages = [{"role": "user", "content": prompt}]
         llm_keywords = []
         try:
-            response = self.llm_client.chat_completion_search(messages, temperature=0.1, log_callback=log_callback)
+            # Ensure keyword extraction gets enough output tokens unless user explicitly set it
+            max_tokens_override = None
+            try:
+                search_params = self.config.get("llm_search", "parameters", {}) or {}
+                llm_params = self.config.get("llm", "parameters", {}) or {}
+                if search_params.get("max_tokens") is None and llm_params.get("max_tokens") is None:
+                    max_tokens_override = 256
+            except Exception:
+                max_tokens_override = 256
+
+            response = self.llm_client.chat_completion_search(
+                messages,
+                temperature=0.1,
+                max_tokens=max_tokens_override,
+                log_callback=log_callback,
+            )
             # 清理 markdown 代码块标记
             response = self._MARKDOWN_CODE_RE.sub('', response).strip()
             
             # 尝试解析 JSON，处理可能被截断的情况
             keywords = None
+            parsed = None
             try:
-                keywords = json.loads(response)
-            except json.JSONDecodeError as json_err:
+                parsed = json.loads(response)
+            except json.JSONDecodeError:
+                parsed = None
+
+            if isinstance(parsed, list):
+                keywords = parsed
+            elif isinstance(parsed, dict):
+                for key in ("keywords", "terms", "entities"):
+                    value = parsed.get(key)
+                    if isinstance(value, list):
+                        keywords = value
+                        break
+
+            if keywords is None:
+                # 尝试从混杂文本中提取 JSON 数组
+                array_match = re.search(r"\[[\s\S]*?\]", response)
+                if array_match:
+                    try:
+                        keywords = json.loads(array_match.group(0))
+                    except json.JSONDecodeError:
+                        keywords = None
+
+            if keywords is None:
                 # 尝试修复被截断的 JSON 数组
-                # 查找最后一个完整的元素位置
                 if response.startswith("["):
-                    # 找到最后一个有效的逗号或引号位置
-                    # 尝试找到最后一个完整的字符串元素 (以 " 结尾，后面是 , 或 ])
-                    # 匹配所有完整的字符串元素
                     matches = list(self._JSON_STRING_RE.finditer(response))
                     if matches:
                         last_match = matches[-1]
@@ -427,12 +460,12 @@ Text: "{text}"
                             keywords = json.loads(truncated_response)
                             log_emit(log_callback, self.config, 'WARNING', f"[RAG] JSON was truncated, recovered {len(keywords)} keywords", module='rag_engine', func='extract_keywords')
                         except json.JSONDecodeError:
-                            pass
-                
-                # 如果仍然无法解析，记录警告并返回空列表
-                if keywords is None:
-                    log_emit(log_callback, self.config, 'WARNING', f"[RAG] Could not parse keyword extraction response (truncated or malformed JSON)", module='rag_engine', func='extract_keywords')
-                    keywords = []
+                            keywords = None
+
+            # 如果仍然无法解析，记录警告并返回空列表
+            if keywords is None:
+                log_emit(log_callback, self.config, 'WARNING', f"[RAG] Could not parse keyword extraction response (truncated or malformed JSON)", module='rag_engine', func='extract_keywords')
+                keywords = []
             
             # Log extracted keywords with detail (debug only)
             if not isinstance(keywords, list):
@@ -538,7 +571,7 @@ Text: "{text}"
             i += 1
         return tokens
 
-    def search_terms(self, query_list, threshold=0.8, log_callback=None, top_k=3, max_terms_per_keyword=None, return_debug=False, source_text=None):
+    def search_terms(self, query_list, threshold=0.8, log_callback=None, top_k=3, return_debug=False, source_text=None):
         """
         对提取出的关键词列表进行向量检索
         返回: {term: translation}
@@ -562,8 +595,9 @@ Text: "{text}"
 
         results = {}
         debug_info: Optional[List[Dict[str, Any]]] = [] if return_debug else None
-        per_keyword_limit = max_terms_per_keyword if max_terms_per_keyword is not None else None
-        candidate_scores: Dict[str, float] = {}
+        short_token_threshold = self.config.get("rag", "short_term_max_tokens", 6)
+        short_limit = self.config.get("rag", "short_term_max_results", 5)
+        long_limit = self.config.get("rag", "long_term_max_results", 2)
 
         # Pre-fetch embeddings in batch
         query_embeddings = {}
@@ -581,7 +615,8 @@ Text: "{text}"
                 log_emit(log_callback, self.config, 'WARNING', f"[RAG] Batch embedding failed, falling back to individual: {e}", exc=e, module='rag_engine', func='search_terms')
 
         for query in query_list:
-            if per_keyword_limit is not None and per_keyword_limit <= 0:
+            total_limit = max(0, short_limit) + max(0, long_limit)
+            if total_limit <= 0:
                 continue
 
             query_selected_terms = []
@@ -589,20 +624,15 @@ Text: "{text}"
             if debug_info is not None:
                 debug_info.append(query_details)
 
-            def can_add_more():
-                return per_keyword_limit is None or len(query_selected_terms) < per_keyword_limit
+            candidate_scores: Dict[str, float] = {}
 
-            def add_term_if_possible(term, score):
+            def add_candidate(term, score):
                 if not term:
                     return False
                 normalized = self._normalize_term_key(term)
                 canonical_term = self._glossary_lookup.get(normalized, term)
                 if canonical_term not in self.glossary:
                     return False
-                if canonical_term not in query_selected_terms:
-                    if not can_add_more():
-                        return False
-                    query_selected_terms.append(canonical_term)
                 prev_score = candidate_scores.get(canonical_term)
                 if prev_score is None or score > prev_score:
                     candidate_scores[canonical_term] = score
@@ -683,7 +713,8 @@ Text: "{text}"
                     # 3. Combine Results
                     # Get top vector matches, skipping indices that exceed the current terms list
                     vector_matches = []
-                    for idx in ranked_idx[:top_k]:
+                    desired_top_k = max(top_k, total_limit)
+                    for idx in ranked_idx[:desired_top_k]:
                         if idx < len(self.terms):
                             vector_matches.append((self.terms[idx], float(similarities[idx])))
 
@@ -737,23 +768,49 @@ Text: "{text}"
                 normalized_query = self._normalize_term_key(query)
                 direct_term = self._glossary_lookup.get(normalized_query)
                 if direct_term:
-                    if add_term_if_possible(direct_term, 1.1) and return_debug:
+                    if add_candidate(direct_term, 1.1) and return_debug:
                         query_details["direct_match"] = direct_term
 
                 # 1. Containment matches should have priority because they include the literal keyword
-                if can_add_more():
-                    for term, score in containment_matches:
-                        add_term_if_possible(term, score)
-                        if not can_add_more():
-                            break
+                for term, score in containment_matches:
+                    add_candidate(term, score)
 
                 # 2. Fill the remaining slots with semantic vector matches
-                if can_add_more():
-                    for term, score in vector_matches:
-                        if score >= threshold:
-                            add_term_if_possible(term, score)
-                            if not can_add_more():
-                                break
+                for term, score in vector_matches:
+                    if score >= threshold:
+                        add_candidate(term, score)
+
+                # 3. Rank all candidates by similarity and apply short/long limits
+                ranked_candidates = sorted(candidate_scores.items(), key=lambda x: x[1], reverse=True)
+                short_selected = 0
+                long_selected = 0
+                selected_set = set()
+
+                def is_short(term: str) -> bool:
+                    return self._estimate_tokens(term) <= short_token_threshold
+
+                for term, _score in ranked_candidates:
+                    if term in selected_set:
+                        continue
+                    if is_short(term):
+                        if short_selected < short_limit:
+                            query_selected_terms.append(term)
+                            selected_set.add(term)
+                            short_selected += 1
+                    else:
+                        if long_selected < long_limit:
+                            query_selected_terms.append(term)
+                            selected_set.add(term)
+                            long_selected += 1
+
+                if len(query_selected_terms) < total_limit:
+                    for term, _score in ranked_candidates:
+                        if term in selected_set:
+                            continue
+                        query_selected_terms.append(term)
+                        selected_set.add(term)
+                        if len(query_selected_terms) >= total_limit:
+                            break
 
                 for term in query_selected_terms:
                     results[term] = self.glossary[term]

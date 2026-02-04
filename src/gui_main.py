@@ -985,11 +985,6 @@ class MainWindow(QMainWindow):
         form_layout.addRow(i18n.t("label_vec_threads"), self.vec_threads)
 
         form_layout.addRow(QLabel(f"<b>{i18n.t('group_rag_settings')}</b>"))
-        self.rag_max_terms = NoWheelSpinBox()
-        self.rag_max_terms.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        self.rag_max_terms.setRange(0, 200)
-        self.rag_max_terms.setValue(self.config_manager.get("rag", "max_terms", 30))
-        
         self.rag_threshold = NoWheelDoubleSpinBox()
         self.rag_threshold.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.rag_threshold.setRange(0.0, 1.0)
@@ -1017,7 +1012,6 @@ class MainWindow(QMainWindow):
         self.rag_long_max_results.setValue(self.config_manager.get("rag", "long_term_max_results", 2))
         self.rag_long_max_results.setToolTip(i18n.t("tooltip_rag_long_max_results"))
 
-        form_layout.addRow(i18n.t("label_rag_max_terms"), self.rag_max_terms)
         form_layout.addRow(i18n.t("label_rag_threshold"), self.rag_threshold)
         form_layout.addRow(i18n.t("label_rag_short_token_threshold"), self.rag_short_token_threshold)
         form_layout.addRow(i18n.t("label_rag_short_max_results"), self.rag_short_max_results)
@@ -1514,7 +1508,6 @@ class MainWindow(QMainWindow):
         self.config_manager.set("threads", "translation", self.trans_threads.value())
         self.config_manager.set("threads", "vectorization", self.vec_threads.value())
         
-        self.config_manager.set("rag", "max_terms", self.rag_max_terms.value())
         self.config_manager.set("rag", "similarity_threshold", self.rag_threshold.value())
         self.config_manager.set("rag", "short_term_max_tokens", self.rag_short_token_threshold.value())
         self.config_manager.set("rag", "short_term_max_results", self.rag_short_max_results.value())

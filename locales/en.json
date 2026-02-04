@@ -88,7 +88,6 @@
     "label_trans_threads": "Translation Threads:",
     "label_vec_threads": "Vectorization Threads:",
     "group_rag_settings": "RAG Settings",
-    "label_rag_max_terms": "Max Terms per Keyword:",
     "label_rag_threshold": "Similarity Threshold (0-1):",
     "label_rag_short_token_threshold": "Short-term token threshold (estimated, ≤ = short):",
     "tooltip_rag_short_token_threshold": "Tokens are estimated locally (CJK char=1, alnum sequence=1). Used to classify short vs long terms (≤ threshold is short).",
