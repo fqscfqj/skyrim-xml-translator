@@ -500,6 +500,32 @@ Text: "{text}"
         
         return unique_nouns
 
+    def _estimate_tokens(self, text: str) -> int:
+        """Estimate token count with a lightweight heuristic (CJK=1, alnum sequences=1)."""
+        if not text:
+            return 0
+        i = 0
+        length = len(text)
+        tokens = 0
+        while i < length:
+            ch = text[i]
+            if "\u4e00" <= ch <= "\u9fff":
+                tokens += 1
+                i += 1
+                continue
+            if ch.isalnum():
+                i += 1
+                while i < length:
+                    nxt = text[i]
+                    if nxt.isalnum() or nxt in ("_", "'"):
+                        i += 1
+                        continue
+                    break
+                tokens += 1
+                continue
+            i += 1
+        return tokens
+
     def search_terms(self, query_list, threshold=0.8, log_callback=None, top_k=3, max_terms_per_keyword=None, return_debug=False, source_text=None):
         """
         对提取出的关键词列表进行向量检索
@@ -525,6 +551,7 @@ Text: "{text}"
         results = {}
         debug_info: Optional[List[Dict[str, Any]]] = [] if return_debug else None
         per_keyword_limit = max_terms_per_keyword if max_terms_per_keyword is not None else None
+        candidate_scores: Dict[str, float] = {}
 
         # Pre-fetch embeddings in batch
         query_embeddings = {}
@@ -553,13 +580,17 @@ Text: "{text}"
             def can_add_more():
                 return per_keyword_limit is None or len(query_selected_terms) < per_keyword_limit
 
-            def add_term_if_possible(term):
-                if not can_add_more():
+            def add_term_if_possible(term, score):
+                if term not in self.glossary:
                     return False
-                if term in self.glossary and term not in query_selected_terms:
+                if term not in query_selected_terms:
+                    if not can_add_more():
+                        return False
                     query_selected_terms.append(term)
-                    return True
-                return False
+                prev_score = candidate_scores.get(term)
+                if prev_score is None or score > prev_score:
+                    candidate_scores[term] = score
+                return True
 
             try:
                 query_lower = query.lower()
@@ -716,13 +747,13 @@ Text: "{text}"
                 normalized_query = query_lower.strip()
                 direct_term = self._glossary_lookup.get(normalized_query)
                 if direct_term:
-                    if add_term_if_possible(direct_term) and return_debug:
+                    if add_term_if_possible(direct_term, 1.1) and return_debug:
                         query_details["direct_match"] = direct_term
 
                 # 1. Containment matches should have priority because they include the literal keyword
                 if can_add_more():
                     for term, score in containment_matches:
-                        add_term_if_possible(term)
+                        add_term_if_possible(term, score)
                         if not can_add_more():
                             break
 
@@ -730,7 +761,7 @@ Text: "{text}"
                 if can_add_more():
                     for term, score in vector_matches:
                         if score >= threshold:
-                            add_term_if_possible(term)
+                            add_term_if_possible(term, score)
                             if not can_add_more():
                                 break
 
@@ -740,6 +771,59 @@ Text: "{text}"
             except Exception as e:
                 log_emit(None, self.config, 'ERROR', f"Search error for '{query}': {e}", exc=e, module='rag_engine', func='search_terms')
         
+        # Apply short/long term quotas to the final results
+        short_threshold = self.config.get("rag", "short_term_max_tokens", 6)
+        short_limit = self.config.get("rag", "short_term_max_results", 5)
+        long_limit = self.config.get("rag", "long_term_max_results", 2)
+
+        try:
+            short_threshold = int(short_threshold)
+        except Exception:
+            short_threshold = 0
+        if short_threshold < 0:
+            short_threshold = 0
+
+        try:
+            short_limit = int(short_limit)
+        except Exception:
+            short_limit = 0
+        if short_limit < 0:
+            short_limit = 0
+
+        try:
+            long_limit = int(long_limit)
+        except Exception:
+            long_limit = 0
+        if long_limit < 0:
+            long_limit = 0
+
+        if candidate_scores:
+            short_candidates = []
+            long_candidates = []
+            for term, score in candidate_scores.items():
+                term_tokens = self._estimate_tokens(term)
+                if term_tokens <= short_threshold:
+                    short_candidates.append((term, score))
+                else:
+                    long_candidates.append((term, score))
+
+            short_candidates.sort(key=lambda x: (-x[1], len(x[0]), x[0].lower()))
+            long_candidates.sort(key=lambda x: (-x[1], len(x[0]), x[0].lower()))
+
+            selected = []
+            if short_limit > 0:
+                selected.extend(short_candidates[:short_limit])
+            if long_limit > 0:
+                selected.extend(long_candidates[:long_limit])
+
+            selected.sort(key=lambda x: (-x[1], len(x[0]), x[0].lower()))
+            results = {term: self.glossary[term] for term, _ in selected}
+
+            try:
+                log_emit(log_callback, self.config, 'DEBUG', f"[RAG] Applied short/long quotas. Short<= {short_threshold} tokens: {short_limit}, Long: {long_limit}. Selected {len(results)} terms.", module='rag_engine', func='search_terms', extra={'selected_terms': list(results.keys())})
+            except Exception:
+                pass
+
         # Always log RAG search results for debugging
         try:
             if results:

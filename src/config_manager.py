@@ -69,7 +69,9 @@ class ConfigManager:
             "rag": {
                 "max_terms": 30,
                 "similarity_threshold": 0.75,
-                "reference_max_tokens": 0
+                "short_term_max_tokens": 6,
+                "short_term_max_results": 5,
+                "long_term_max_results": 2
             },
             "paths": {
                 "glossary_file": "glossary.json",

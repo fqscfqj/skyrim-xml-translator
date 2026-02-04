@@ -22,7 +22,7 @@
   * 自定义 Embedding 模型参数。
   * 支持 "Default" 和 "NSFW" 等不同的提示词风格。
   * 可调整并发线程数。
-   * 可限制每条 RAG 参考注入上下文的最大 token 数（`rag.reference_max_tokens`，0 表示不限制）。
+   * 可按短/长词典分别设置单次召回上限（`rag.short_term_max_tokens`、`rag.short_term_max_results`、`rag.long_term_max_results`）。
 
 ## 安装
 ## Recent Fixes

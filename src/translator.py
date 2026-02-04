@@ -305,7 +305,6 @@ class Translator:
             # Get RAG settings
             threshold = self.rag_engine.config.get("rag", "similarity_threshold", 0.75)
             max_terms_per_keyword = self.rag_engine.config.get("rag", "max_terms", 30)
-            ref_max_tokens = self.rag_engine.config.get("rag", "reference_max_tokens", 0)
 
             # 1. Extract keywords (RAG)
             log_emit(log_callback, self.rag_engine.config, 'DEBUG', f"[RAG] Starting keyword extraction for text (length={len(text)}): {text[:200]}{'...' if len(text) > 200 else ''}", module='translator', func='translate_text')
@@ -342,10 +341,6 @@ class Translator:
                 for k, v in matched_terms.items():
                     if len(k) < 100:
                         v_str = "" if v is None else str(v)
-                        anchors = [k]
-                        if isinstance(keywords, list) and keywords:
-                            anchors.extend([kw for kw in keywords if isinstance(kw, str)])
-                        v_str = self._truncate_rag_reference(v_str, anchors=anchors, max_tokens=ref_max_tokens)
                         if k.lower() in text_lower:
                             priority_terms.append(f"- {k} : {v_str}")
                         else:
