@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QTableWidget, QTableWidgetItem, QHeaderView, QSplitter, QDoubleSpinBox,
                              QComboBox, QAbstractSpinBox, QScrollArea, QDialog, QTreeWidget, QTreeWidgetItem)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QIcon
+from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QWheelEvent
 
 from src.config_manager import ConfigManager
 from src.llm_client import LLMClient
@@ -243,7 +243,7 @@ class Worker(QThread):
                 if not self.stop_receiving:
                     log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', i18n.t("msg_translation_finished"), module='gui_main', func='Worker.run')
                 self.finished.emit()
-        except BaseException as e:
+        except Exception as e:
             log_emit(self.log.emit, self.translator.rag_engine.config, 'ERROR', i18n.t("msg_worker_error").format(error=e), exc=e, module='gui_main', func='Worker.run')
             try:
                 self.finished.emit()
@@ -265,28 +265,29 @@ class Worker(QThread):
 # Custom widgets to prevent accidental change via mouse wheel.
 # We still allow keyboard editing and explicit dropdown selection by the user.
 class NoWheelSpinBox(QSpinBox):
-    def wheelEvent(self, event):
+    def wheelEvent(self, e):
         # Ignore all wheel events to prevent accidental value changes
-        event.ignore()
+        cast(QWheelEvent, e).ignore()
 
 
 class NoWheelDoubleSpinBox(QDoubleSpinBox):
-    def wheelEvent(self, event):
+    def wheelEvent(self, e):
         # Ignore all wheel events to prevent accidental value changes
-        event.ignore()
+        cast(QWheelEvent, e).ignore()
 
 
 class NoWheelComboBox(QComboBox):
-    def wheelEvent(self, event):
+    def wheelEvent(self, e):
         # Allow wheel only when the popup is visible (i.e., when user explicitly opened it)
         try:
-            # view() returns the list view; isVisible indicates whether popup is open
-            if self.view().isVisible():
-                return super().wheelEvent(event)
+            view = self.view()
+            # view() may return None according to stubs; guard against it
+            if view and view.isVisible():
+                return super().wheelEvent(e)
         except Exception:
             # If we cannot determine state, ignore wheel to be safe
             pass
-        event.ignore()
+        cast(QWheelEvent, e).ignore()
 
 
 class RAGVisualizationDialog(QDialog):
@@ -1074,7 +1075,7 @@ class MainWindow(QMainWindow):
         # Limit log size to prevent memory issues - reduced to 200 lines
         max_lines = 200
         doc = self.log_output.document()
-        if doc.blockCount() > max_lines:
+        if doc is not None and doc.blockCount() > max_lines:
             cursor = self.log_output.textCursor()
             cursor.movePosition(cursor.MoveOperation.Start)
             cursor.movePosition(cursor.MoveOperation.Down, cursor.MoveMode.KeepAnchor, doc.blockCount() - max_lines)
