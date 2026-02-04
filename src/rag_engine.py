@@ -24,7 +24,7 @@ class RAGEngine:
     
     # Use frozenset for O(1) lookup performance instead of recreating dict each time
     _COMMON_WORDS = frozenset({
-        'i', 'a', 'an', 'the', 'and', 'or', 'but', 'if', 'then', 'else', 'when',
+        'i', 'me', 'a', 'an', 'the', 'and', 'or', 'but', 'if', 'then', 'else', 'when',
         'at', 'by', 'for', 'with', 'about', 'against', 'between', 'into', 'through',
         'during', 'before', 'after', 'above', 'below', 'to', 'from', 'up', 'down',
         'in', 'out', 'on', 'off', 'over', 'under', 'again', 'further', 'once',
@@ -68,6 +68,14 @@ class RAGEngine:
         'basically', 'essentially', 'generally', 'normally', 'typically', 'usually',
         'suddenly', 'finally', 'eventually', 'immediately', 'recently', 'currently',
         'today', 'tomorrow', 'yesterday', 'now', 'then', 'soon', 'later', 'earlier',
+    })
+
+    # Extra generic words that often appear capitalized in UI/dialogue but are not Skyrim-specific entities.
+    # Applied mainly to single-word keywords.
+    _GENERIC_KEYWORDS = frozenset({
+        'especially', 'faction', 'adventure', 'adventures', 'temple', 'ruins', 'inn',
+        'armor', 'armour', 'mountain', 'mountains', 'snow', 'snowy', 'ceiling', 'ceilings',
+        'chair', 'bedroom', 'welcome', 'blessing', 'shrine',
     })
     
     def __init__(self, config_manager, llm_client: LLMClient):
@@ -383,7 +391,7 @@ class RAGEngine:
         except Exception:
             pass
         
-        prompt = f"""Extract ALL proper nouns from the text for glossary lookup in Elder Scrolls/Skyrim context.
+        prompt = f"""Extract Skyrim/Elder Scrolls proper nouns / lore terms from the text for glossary lookup.
 
 MUST extract: 
 - Character names (e.g., Lydia, Ulfric, Mjoll, Serana, Aerin)
@@ -394,15 +402,31 @@ MUST extract:
 - Items, spells, lore terms
 
 Rules:
-1. Extract ANY capitalized words that could be proper nouns
-2. Include ALL names even if they seem common (like "Mjoll", "Aerin", etc.)
-3. Remove possessive 's from names
-4. Return JSON array, e.g. ["Mjoll", "Thane", "Whiterun"] or [] if none found
+    1. ONLY include terms that are likely Elder Scrolls/Skyrim entities or in-game proper nouns (names, places, factions, races, titles, artifacts).
+    2. Do NOT include generic English words even if capitalized by sentence/title case (e.g., "Especially", "Faction", "Adventures", "Temple" by itself).
+    3. Prefer the MOST specific phrase: keep "Temple of Mara" rather than also returning "Temple".
+    4. Keep single-word names (e.g., "Mara", "Ingun", "Dwemer", "Falmer", "Nords") when they are true lore terms.
+    5. Remove possessive 's from names.
+    6. Return ONLY a JSON array of strings, e.g. ["Mjoll", "Temple of Mara", "Whiterun"], or [] if none.
 
 Text: "{text}"
 """
         messages = [{"role": "user", "content": prompt}]
         llm_keywords = []
+
+        def is_single_word_generic(term: str) -> bool:
+            if not term:
+                return True
+            norm = self._normalize_term_key(term)
+            if not norm:
+                return True
+            if " " in norm:
+                return False
+            if norm in self._COMMON_WORDS:
+                return True
+            if norm in self._GENERIC_KEYWORDS:
+                return True
+            return False
         try:
             # Ensure keyword extraction gets enough output tokens unless user explicitly set it
             max_tokens_override = None
@@ -433,6 +457,8 @@ Text: "{text}"
 
             if isinstance(parsed, list):
                 keywords = parsed
+            elif isinstance(parsed, str):
+                keywords = [parsed]
             elif isinstance(parsed, dict):
                 for key in ("keywords", "terms", "entities"):
                     value = parsed.get(key)
@@ -478,6 +504,8 @@ Text: "{text}"
                 if not isinstance(kw, str):
                     continue
                 kw = kw.strip()
+                # 去除首尾标点（避免 "Ingun..." 这类无法匹配的问题）
+                kw = re.sub(r"^[^\w\u4e00-\u9fff]+|[^\w\u4e00-\u9fff]+$", "", kw)
                 if not kw:
                     continue
                 
@@ -492,6 +520,36 @@ Text: "{text}"
                     processed_keywords.append(kw[:-2].strip())
                 else:
                     processed_keywords.append(kw)
+
+            # 1) Remove obvious generic single-word keywords (unless exact glossary hit)
+            filtered = []
+            for kw in processed_keywords:
+                if is_single_word_generic(kw):
+                    continue
+                filtered.append(kw)
+
+            # 2) If a single-word keyword is fully contained in a longer phrase keyword,
+            # drop it unless it's an exact glossary hit (keeps e.g. "Mara" if present as a term).
+            phrases_norm = []
+            for kw in filtered:
+                norm = self._normalize_term_key(kw)
+                if norm and " " in norm:
+                    phrases_norm.append(norm)
+
+            if phrases_norm:
+                filtered2 = []
+                for kw in filtered:
+                    norm = self._normalize_term_key(kw)
+                    if not norm:
+                        continue
+                    if " " not in norm and norm not in self._glossary_lookup:
+                        contained = any(re.search(r"\b{}\b".format(re.escape(norm)), p) for p in phrases_norm)
+                        if contained:
+                            continue
+                    filtered2.append(kw)
+                filtered = filtered2
+
+            processed_keywords = filtered
             
             # 去重但保持顺序
             seen = set()
@@ -513,6 +571,46 @@ Text: "{text}"
             if kw.lower() not in seen_lower:
                 seen_lower.add(kw.lower())
                 llm_keywords.append(kw)
+
+        # Final cleanup pass: remove generic single words and decompose noise from regex.
+        try:
+            # Remove generic single-word keywords
+            llm_keywords = [kw for kw in llm_keywords if not is_single_word_generic(kw)]
+
+            # Remove phrase keywords that are composed entirely of common/generic words
+            phrase_filtered = []
+            for kw in llm_keywords:
+                norm = self._normalize_term_key(kw)
+                if not norm:
+                    continue
+                if " " in norm and norm not in self._glossary_lookup:
+                    toks = norm.split()
+                    if toks and all((t in self._COMMON_WORDS) or (t in self._GENERIC_KEYWORDS) for t in toks):
+                        continue
+                phrase_filtered.append(kw)
+            llm_keywords = phrase_filtered
+
+            # Drop single words that are contained in longer phrases (prefer specific phrases)
+            phrases_norm = []
+            for kw in llm_keywords:
+                norm = self._normalize_term_key(kw)
+                if norm and " " in norm:
+                    phrases_norm.append(norm)
+
+            if phrases_norm:
+                cleaned = []
+                for kw in llm_keywords:
+                    norm = self._normalize_term_key(kw)
+                    if not norm:
+                        continue
+                    if " " not in norm:
+                        contained = any(re.search(r"\b{}\b".format(re.escape(norm)), p) for p in phrases_norm)
+                        if contained:
+                            continue
+                    cleaned.append(kw)
+                llm_keywords = cleaned
+        except Exception:
+            pass
         
         try:
             log_emit(log_callback, self.config, 'DEBUG', f"[RAG] Extracted {len(llm_keywords)} keywords: {llm_keywords}", module='rag_engine', func='extract_keywords', extra={'keywords': llm_keywords, 'input_text': text[:100]})
@@ -529,10 +627,11 @@ Text: "{text}"
         # 匹配：句首或句中的大写开头单词
         matches = self._PROPER_NOUN_RE.findall(text)
         
-        # 过滤掉常见词 (using class-level frozenset for O(1) lookup)
+        # 过滤掉常见词/泛词 (using class-level frozenset for O(1) lookup)
         proper_nouns = []
         for word in matches:
-            if word.lower() not in self._COMMON_WORDS:
+            lw = word.lower()
+            if lw not in self._COMMON_WORDS and lw not in self._GENERIC_KEYWORDS:
                 proper_nouns.append(word)
         
         # 去重但保持顺序
