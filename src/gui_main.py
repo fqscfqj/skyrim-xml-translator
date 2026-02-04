@@ -92,6 +92,7 @@ class Worker(QThread):
     progress = pyqtSignal(int)
     log = pyqtSignal(str)
     result_ready = pyqtSignal(int, str) # row_index, translation
+    rag_debug_ready = pyqtSignal(str, object) # original_text, debug_info
     finished = pyqtSignal()
 
     def __init__(self, items_to_process, translator, num_threads=1):
@@ -144,9 +145,11 @@ class Worker(QThread):
                     return None
                 try:
                     translation = self.translator.translate_text(source, log_callback=self.log.emit)
-                    return (row_idx, source, translation)
+                    # Get RAG debug info for caching
+                    debug_info = self.translator.get_last_rag_debug_info()
+                    return (row_idx, source, translation, debug_info)
                 except Exception as e:
-                    return (row_idx, source, None, str(e))
+                    return (row_idx, source, None, None, str(e))
 
             # Limit concurrent tasks to reduce memory pressure
             # Each task holds embedding vectors and LLM context in memory
@@ -187,8 +190,8 @@ class Worker(QThread):
                         result = future.result()
                         
                         if result:
-                            if len(result) == 3:
-                                row_idx, source, translation = result
+                            if len(result) == 4:
+                                row_idx, source, translation, debug_info = result
                                 safe_translation = str(translation) if translation is not None else ""
                                 safe_source = str(source) if source is not None else ""
                                 
@@ -197,6 +200,10 @@ class Worker(QThread):
                                 
                                 # Check stop_receiving again before emitting results
                                 if not self.stop_receiving:
+                                    # Cache debug info for visualization
+                                    if debug_info and safe_source:
+                                        self.rag_debug_ready.emit(safe_source, debug_info)
+                                    
                                     # 为所有相同内容的行发送翻译结果
                                     for target_row in all_rows:
                                         self.result_ready.emit(target_row, safe_translation)
@@ -213,7 +220,7 @@ class Worker(QThread):
                                                 f"[{processed_count+1}/{unique_count}] {safe_source[:20]}... -> {safe_translation[:20]}...", 
                                                 module='gui_main', func='Worker.run')
                             else:
-                                row_idx, source, _, error = result
+                                row_idx, source, _, _, error = result
                                 if not self.stop_receiving:
                                     log_emit(self.log.emit, self.translator.rag_engine.config, 'ERROR', f"Error translating {str(source)[:20]}...: {error}", module='gui_main', func='Worker.run')
 
@@ -284,11 +291,12 @@ class NoWheelComboBox(QComboBox):
 
 class RAGVisualizationDialog(QDialog):
     """对话框用于可视化展示RAG处理过程"""
-    def __init__(self, parent, original_text, translated_text, translator):
+    def __init__(self, parent, original_text, translated_text, translator, cached_debug_info=None):
         super().__init__(parent)
         self.original_text = original_text
         self.translated_text = translated_text
         self.translator = translator
+        self.cached_debug_info = cached_debug_info
         
         self.setWindowTitle(i18n.t("title_rag_visualization"))
         self.resize(900, 700)
@@ -340,8 +348,12 @@ class RAGVisualizationDialog(QDialog):
     def _load_rag_info(self):
         """加载并显示RAG处理信息"""
         try:
-            # 获取RAG调试信息
-            debug_info = self.translator.get_rag_debug_info(self.original_text, use_rag=True)
+            # 优先使用缓存的RAG调试信息，避免重复翻译
+            if self.cached_debug_info:
+                debug_info = self.cached_debug_info
+            else:
+                # 如果没有缓存，才重新获取RAG调试信息
+                debug_info = self.translator.get_rag_debug_info(self.original_text, use_rag=True)
             
             # 1. 关键词提取
             keywords_item = QTreeWidgetItem([i18n.t("step_keyword_extraction"), ""])
@@ -462,6 +474,10 @@ class MainWindow(QMainWindow):
         self.search_param_controls = {}
         self.worker = None  # Translation worker reference
         self.stop_receiving_results = False  # Flag to immediately stop receiving translation results
+        
+        # Cache for RAG debug info to avoid re-running translation for visualization
+        # Key: original_text, Value: debug_info dict
+        self.rag_debug_cache = {}
         
         # Pagination state
         self.current_page = 1
@@ -1108,6 +1124,7 @@ class MainWindow(QMainWindow):
         self.worker.log.connect(self.log)
         self.worker.progress.connect(self.progress_bar.setValue)
         self.worker.result_ready.connect(self.update_table_row)
+        self.worker.rag_debug_ready.connect(self.cache_rag_debug_info)
         self.worker.finished.connect(self.on_translation_finished)
         self.worker.start()
 
@@ -1147,6 +1164,10 @@ class MainWindow(QMainWindow):
 
         self.trans_table.blockSignals(False)
         log_emit(self.log, self.config_manager, 'INFO', i18n.t("msg_loaded_strings").format(count=len(strings)), module='gui_main', func='load_xml_to_table')
+        
+        # Clear RAG debug cache when loading new file
+        self.rag_debug_cache.clear()
+        
         # Update UI button enabled state
         self.update_translate_buttons_enabled()
         return True
@@ -1233,6 +1254,11 @@ class MainWindow(QMainWindow):
                 can_visualize = True
         
         self.visualize_rag_btn.setEnabled(can_visualize)
+
+    def cache_rag_debug_info(self, original_text, debug_info):
+        """缓存RAG调试信息以供可视化使用"""
+        if original_text and debug_info:
+            self.rag_debug_cache[original_text] = debug_info
 
     def stop_translation(self):
         # Immediately set flag to stop receiving results in the UI
@@ -1494,6 +1520,7 @@ class MainWindow(QMainWindow):
         self.worker.log.connect(self.log)
         self.worker.progress.connect(self.progress_bar.setValue)
         self.worker.result_ready.connect(self.update_table_row)
+        self.worker.rag_debug_ready.connect(self.cache_rag_debug_info)
         self.worker.finished.connect(self.on_translation_finished)
         self.worker.start()
 
@@ -1577,7 +1604,10 @@ class MainWindow(QMainWindow):
         original_text = source_item.text()
         translated_text = dest_item.text()
         
+        # Get cached RAG debug info if available
+        cached_debug_info = self.rag_debug_cache.get(original_text)
+        
         # 显示RAG可视化对话框
-        dialog = RAGVisualizationDialog(self, original_text, translated_text, self.translator)
+        dialog = RAGVisualizationDialog(self, original_text, translated_text, self.translator, cached_debug_info)
         dialog.exec()
 

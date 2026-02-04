@@ -22,6 +22,7 @@ class Translator:
         self.llm_client = llm_client
         self.rag_engine = rag_engine
         self.prompt_manager = PromptManager(rag_engine.config)
+        self._last_rag_debug_info = None  # Cache last RAG debug info for visualization
 
     def _extract_english_words(self, text: str) -> set:
         """
@@ -410,6 +411,10 @@ class Translator:
         
         return debug_info
 
+    def get_last_rag_debug_info(self):
+        """获取最后一次翻译的RAG调试信息（用于缓存）"""
+        return self._last_rag_debug_info
+
     def translate_text(self, text, use_rag=True, log_callback=None, max_retries=2):
         if not text or not str(text).strip():
             # Normalize empty inputs to empty string
@@ -422,6 +427,9 @@ class Translator:
             pass
 
         glossary_context = ""
+        keywords = []
+        matched_terms = {}
+        
         if use_rag:
             # Get RAG settings
             threshold = self.rag_engine.config.get("rag", "similarity_threshold", 0.75)
@@ -437,13 +445,33 @@ class Translator:
                 pass
             
             # 2. Search for terms (Vector Search)
-            matched_terms = self.rag_engine.search_terms(
+            search_result = self.rag_engine.search_terms(
                 keywords,
                 threshold=threshold,
                 log_callback=log_callback,
                 max_terms_per_keyword=max_terms_per_keyword,
                 source_text=text,  # Pass source text to filter containment matches
+                return_debug=True,  # Get debug info for caching
             )
+            
+            # Handle return_debug result
+            if isinstance(search_result, tuple):
+                matched_terms, search_debug = search_result
+                # Cache the debug info
+                self._last_rag_debug_info = {
+                    "original_text": text,
+                    "keywords": keywords,
+                    "search_results": search_debug,
+                    "matched_terms": matched_terms,
+                }
+            else:
+                matched_terms = search_result
+                self._last_rag_debug_info = {
+                    "original_text": text,
+                    "keywords": keywords,
+                    "matched_terms": matched_terms,
+                }
+            
             try:
                 log_emit(log_callback, self.rag_engine.config, 'DEBUG', f"[RAG] Translator received {len(matched_terms)} matched glossary terms: {list(matched_terms.keys())}", module='translator', func='translate_text', extra={'rag_matches': list(matched_terms.keys())})
             except Exception:
