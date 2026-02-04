@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QTabWidget, QFileDialog, QCheckBox, QProgressBar, 
                              QListWidget, QMessageBox, QGroupBox, QFormLayout, QSpinBox,
                              QTableWidget, QTableWidgetItem, QHeaderView, QSplitter, QDoubleSpinBox,
-                             QComboBox, QAbstractSpinBox, QScrollArea)
+                             QComboBox, QAbstractSpinBox, QScrollArea, QDialog, QTreeWidget, QTreeWidgetItem)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QIcon
 
@@ -281,6 +281,163 @@ class NoWheelComboBox(QComboBox):
             pass
         event.ignore()
 
+
+class RAGVisualizationDialog(QDialog):
+    """对话框用于可视化展示RAG处理过程"""
+    def __init__(self, parent, original_text, translated_text, translator):
+        super().__init__(parent)
+        self.original_text = original_text
+        self.translated_text = translated_text
+        self.translator = translator
+        
+        self.setWindowTitle(i18n.t("title_rag_visualization"))
+        self.resize(900, 700)
+        
+        self._setup_ui()
+        self._load_rag_info()
+    
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        
+        # 原文和译文显示
+        text_group = QGroupBox(i18n.t("label_original_text"))
+        text_layout = QVBoxLayout()
+        
+        self.original_text_display = QTextEdit()
+        self.original_text_display.setReadOnly(True)
+        self.original_text_display.setMaximumHeight(80)
+        self.original_text_display.setPlainText(self.original_text)
+        text_layout.addWidget(QLabel(i18n.t("label_original_text")))
+        text_layout.addWidget(self.original_text_display)
+        
+        self.translated_text_display = QTextEdit()
+        self.translated_text_display.setReadOnly(True)
+        self.translated_text_display.setMaximumHeight(80)
+        self.translated_text_display.setPlainText(self.translated_text)
+        text_layout.addWidget(QLabel(i18n.t("label_translated_text")))
+        text_layout.addWidget(self.translated_text_display)
+        
+        text_group.setLayout(text_layout)
+        layout.addWidget(text_group)
+        
+        # RAG处理步骤树形显示
+        steps_group = QGroupBox(i18n.t("group_rag_steps"))
+        steps_layout = QVBoxLayout()
+        
+        self.rag_tree = QTreeWidget()
+        self.rag_tree.setHeaderLabels([i18n.t("group_rag_steps"), i18n.t("label_similarity_score")])
+        self.rag_tree.setColumnWidth(0, 600)
+        steps_layout.addWidget(self.rag_tree)
+        
+        steps_group.setLayout(steps_layout)
+        layout.addWidget(steps_group)
+        
+        # 关闭按钮
+        close_btn = QPushButton(i18n.t("btn_close"))
+        close_btn.clicked.connect(self.accept)
+        layout.addWidget(close_btn)
+    
+    def _load_rag_info(self):
+        """加载并显示RAG处理信息"""
+        try:
+            # 获取RAG调试信息
+            debug_info = self.translator.get_rag_debug_info(self.original_text, use_rag=True)
+            
+            # 1. 关键词提取
+            keywords_item = QTreeWidgetItem([i18n.t("step_keyword_extraction"), ""])
+            if debug_info.get("keywords"):
+                for keyword in debug_info["keywords"]:
+                    keyword_child = QTreeWidgetItem([str(keyword), ""])
+                    keywords_item.addChild(keyword_child)
+            else:
+                keywords_item.addChild(QTreeWidgetItem([i18n.t("msg_no_valid_terms"), ""]))
+            self.rag_tree.addTopLevelItem(keywords_item)
+            keywords_item.setExpanded(True)
+            
+            # 2. 向量检索 - 显示每个关键词的搜索结果
+            search_item = QTreeWidgetItem([i18n.t("step_vector_search"), ""])
+            if isinstance(debug_info.get("search_results"), list):
+                for query_result in debug_info["search_results"]:
+                    query = query_result.get("query", "")
+                    query_node = QTreeWidgetItem([f"Query: {query}", ""])
+                    
+                    # 直接匹配
+                    direct_match = query_result.get("direct_match")
+                    if direct_match:
+                        direct_node = QTreeWidgetItem([f"Direct Match: {direct_match}", "1.0"])
+                        query_node.addChild(direct_node)
+                    
+                    # 向量匹配
+                    vector_matches = query_result.get("vector_matches", [])
+                    if vector_matches:
+                        vector_node = QTreeWidgetItem(["Vector Matches", ""])
+                        for term, score in vector_matches[:5]:  # 只显示前5个
+                            match_child = QTreeWidgetItem([term, f"{score:.4f}"])
+                            vector_node.addChild(match_child)
+                        query_node.addChild(vector_node)
+                        vector_node.setExpanded(True)
+                    
+                    # 包含匹配
+                    containment_matches = query_result.get("containment_matches", [])
+                    if containment_matches:
+                        contain_node = QTreeWidgetItem(["Containment Matches", ""])
+                        for term, score in containment_matches[:5]:
+                            match_child = QTreeWidgetItem([term, f"{score:.4f}"])
+                            contain_node.addChild(match_child)
+                        query_node.addChild(contain_node)
+                        contain_node.setExpanded(True)
+                    
+                    search_item.addChild(query_node)
+                    query_node.setExpanded(True)
+            self.rag_tree.addTopLevelItem(search_item)
+            search_item.setExpanded(True)
+            
+            # 3. 术语表匹配 - 最终选择的术语
+            matched_item = QTreeWidgetItem([i18n.t("step_glossary_matching"), ""])
+            if debug_info.get("matched_terms"):
+                for term, translation in debug_info["matched_terms"].items():
+                    term_child = QTreeWidgetItem([f"{term} → {translation}", ""])
+                    matched_item.addChild(term_child)
+            else:
+                matched_item.addChild(QTreeWidgetItem([i18n.t("msg_no_valid_terms"), ""]))
+            self.rag_tree.addTopLevelItem(matched_item)
+            matched_item.setExpanded(True)
+            
+            # 4. 提示词构建
+            prompt_item = QTreeWidgetItem([i18n.t("step_prompt_construction"), ""])
+            
+            # 系统提示词
+            system_prompt = debug_info.get("system_prompt", "")
+            if system_prompt:
+                system_node = QTreeWidgetItem(["System Prompt", ""])
+                system_text = QTreeWidgetItem([system_prompt[:500] + "..." if len(system_prompt) > 500 else system_prompt, ""])
+                system_node.addChild(system_text)
+                prompt_item.addChild(system_node)
+            
+            # 用户提示词
+            user_prompt = debug_info.get("user_prompt", "")
+            if user_prompt:
+                user_node = QTreeWidgetItem(["User Prompt", ""])
+                user_text = QTreeWidgetItem([user_prompt[:200] + "..." if len(user_prompt) > 200 else user_prompt, ""])
+                user_node.addChild(user_text)
+                prompt_item.addChild(user_node)
+            
+            # 术语表上下文
+            glossary_context = debug_info.get("glossary_context", "")
+            if glossary_context:
+                glossary_node = QTreeWidgetItem(["Glossary Context", ""])
+                glossary_text = QTreeWidgetItem([glossary_context[:500] + "..." if len(glossary_context) > 500 else glossary_context, ""])
+                glossary_node.addChild(glossary_text)
+                prompt_item.addChild(glossary_node)
+                
+            self.rag_tree.addTopLevelItem(prompt_item)
+            prompt_item.setExpanded(True)
+            
+        except Exception as e:
+            error_item = QTreeWidgetItem([f"Error loading RAG info: {str(e)}", ""])
+            self.rag_tree.addTopLevelItem(error_item)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -437,6 +594,13 @@ class MainWindow(QMainWindow):
         self.clear_sel_btn.clicked.connect(self.clear_selected_translations)
         self.clear_sel_btn.setEnabled(False)
         action_layout.addWidget(self.clear_sel_btn)
+        
+        # Add visualize RAG button
+        self.visualize_rag_btn = QPushButton(i18n.t("btn_visualize_rag"))
+        self.visualize_rag_btn.clicked.connect(self.visualize_rag_process)
+        self.visualize_rag_btn.setEnabled(False)
+        action_layout.addWidget(self.visualize_rag_btn)
+        
         layout.addLayout(action_layout)
 
         # Table
@@ -1054,6 +1218,21 @@ class MainWindow(QMainWindow):
         self.clear_all_btn.setEnabled(has_rows)
         has_selection = len(self.trans_table.selectedItems()) > 0
         self.clear_sel_btn.setEnabled(has_selection)
+        
+        # Enable visualize RAG button only if exactly one row is selected and it has translation
+        selected_rows = set()
+        for item in self.trans_table.selectedItems():
+            selected_rows.add(item.row())
+        
+        can_visualize = False
+        if len(selected_rows) == 1:
+            row = list(selected_rows)[0]
+            source_item = self.trans_table.item(row, 1)
+            dest_item = self.trans_table.item(row, 2)
+            if source_item and dest_item and source_item.text() and dest_item.text():
+                can_visualize = True
+        
+        self.visualize_rag_btn.setEnabled(can_visualize)
 
     def stop_translation(self):
         # Immediately set flag to stop receiving results in the UI
@@ -1365,16 +1544,40 @@ class MainWindow(QMainWindow):
         self.trans_table.blockSignals(True)
         for row in selected_rows:
             dest_item = self.trans_table.item(row, 2)
-            if dest_item is None:
-                dest_item = QTableWidgetItem("")
-                self.trans_table.setItem(row, 2, dest_item)
-            else:
+            if dest_item:
                 dest_item.setText("")
-            node = dest_item.data(Qt.ItemDataRole.UserRole)
-            if node is not None:
-                try:
-                    self.xml_processor.update_dest(node, "", overwrite=True)
-                except Exception as e:
-                    self.log(f"Error clearing translation for row {row}: {e}")
+                node = dest_item.data(Qt.ItemDataRole.UserRole)
+                if node is not None:
+                    node.text = ""
         self.trans_table.blockSignals(False)
-        self.log(i18n.t("msg_cleared_selected_translations").format(count=len(selected_rows)))
+        log_emit(self.log, self.config_manager, 'INFO', i18n.t("msg_cleared_translations").format(count=len(selected_rows)), module='gui_main', func='clear_selected_translations')
+
+    def visualize_rag_process(self):
+        """可视化显示选中行的RAG处理过程"""
+        selected_rows = set()
+        for item in self.trans_table.selectedItems():
+            selected_rows.add(item.row())
+        
+        if len(selected_rows) != 1:
+            QMessageBox.warning(self, i18n.t("title_error"), i18n.t("msg_no_row_selected"))
+            return
+        
+        row = list(selected_rows)[0]
+        source_item = self.trans_table.item(row, 1)
+        dest_item = self.trans_table.item(row, 2)
+        
+        if not source_item or not source_item.text():
+            QMessageBox.warning(self, i18n.t("title_error"), i18n.t("msg_no_row_selected"))
+            return
+        
+        if not dest_item or not dest_item.text():
+            QMessageBox.warning(self, i18n.t("title_error"), i18n.t("msg_row_not_translated"))
+            return
+        
+        original_text = source_item.text()
+        translated_text = dest_item.text()
+        
+        # 显示RAG可视化对话框
+        dialog = RAGVisualizationDialog(self, original_text, translated_text, self.translator)
+        dialog.exec()
+

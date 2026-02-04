@@ -289,6 +289,127 @@ class Translator:
         
         return translation
 
+    def get_rag_debug_info(self, text, use_rag=True, log_callback=None):
+        """获取RAG处理过程的详细调试信息，用于可视化"""
+        debug_info = {
+            "original_text": text,
+            "keywords": [],
+            "search_results": {},
+            "matched_terms": {},
+            "glossary_context": "",
+            "system_prompt": "",
+            "user_prompt": "",
+        }
+        
+        if not text or not str(text).strip():
+            return debug_info
+        
+        try:
+            self.prompt_manager.reload_if_changed()
+        except Exception:
+            pass
+        
+        if use_rag:
+            # Get RAG settings
+            threshold = self.rag_engine.config.get("rag", "similarity_threshold", 0.75)
+            max_terms_per_keyword = self.rag_engine.config.get("rag", "max_terms", 30)
+
+            # 1. Extract keywords (RAG)
+            keywords = self.rag_engine.extract_keywords(text, log_callback=log_callback)
+            debug_info["keywords"] = keywords
+            
+            # 2. Search for terms (Vector Search) with debug info
+            matched_terms = self.rag_engine.search_terms(
+                keywords,
+                threshold=threshold,
+                log_callback=log_callback,
+                max_terms_per_keyword=max_terms_per_keyword,
+                source_text=text,
+                return_debug=True,
+            )
+            
+            # If return_debug=True, search_terms returns (results_dict, debug_list)
+            if isinstance(matched_terms, tuple):
+                debug_info["matched_terms"], debug_info["search_results"] = matched_terms
+            else:
+                debug_info["matched_terms"] = matched_terms
+
+            # 3. Construct glossary context
+            if debug_info["matched_terms"]:
+                glossary_lines = []
+                text_lower = text.lower()
+                priority_terms = []
+                other_terms = []
+                
+                for k, v in debug_info["matched_terms"].items():
+                    if len(k) < 100:
+                        v_str = "" if v is None else str(v)
+                        if k.lower() in text_lower:
+                            priority_terms.append(f"- {k} : {v_str}")
+                        else:
+                            other_terms.append(f"- {k} : {v_str}")
+                
+                glossary_lines = priority_terms + other_terms
+                
+                if glossary_lines:
+                    glossary_header = self.prompt_manager.get(
+                        "translator.glossary_header",
+                        "## Mandatory Dictionary\nThe following terms MUST be translated exactly as shown below. Do NOT transliterate names if they are in this list:",
+                    )
+                    debug_info["glossary_context"] = glossary_header + "\n" + "\n".join(glossary_lines)
+        
+        # 4. Construct Prompt (same as translate_text)
+        prompt_style = self.rag_engine.config.get("general", "prompt_style", "default")
+        source_lang_setting = self.rag_engine.config.get("general", "source_language", "auto")
+        target_lang_setting = self.rag_engine.config.get("general", "target_language", "zh")
+        
+        source_lang_code = str(source_lang_setting) if source_lang_setting else "auto"
+        target_lang_code = str(target_lang_setting) if target_lang_setting else "zh"
+        
+        prompt_vars = {
+            "source_language_code": source_lang_code,
+            "target_language_code": target_lang_code,
+            "source_language": self._language_display_name(source_lang_code),
+            "target_language": self._language_display_name(target_lang_code),
+        }
+        
+        system_prompt = self.prompt_manager.get(
+            f"translator.system_prompts.{prompt_style}",
+            None,
+        )
+        if not system_prompt:
+            try:
+                system_prompts = self.prompt_manager.get("translator.system_prompts", {})
+                if isinstance(system_prompts, dict) and system_prompts:
+                    first_key = next(iter(system_prompts.keys()))
+                    system_prompt = system_prompts.get(first_key)
+            except Exception:
+                pass
+        
+        if not system_prompt:
+            system_prompt = (
+                "Translate the input text to {target_language}. "
+                "Output strictly as JSON only: {\"translation\": \"...\"}. "
+                "Preserve all XML/HTML tags, placeholders, and whitespace."
+            )
+        
+        system_prompt = self._apply_prompt_vars(system_prompt, prompt_vars)
+        
+        if debug_info["glossary_context"]:
+            glossary_append = self.prompt_manager.get(
+                "translator.glossary_instruction_append",
+                "\n\nInstruction: Translate the text to {target_language}, strictly adhering to the Mandatory Dictionary above for any matching terms.",
+            )
+            glossary_append = self._apply_prompt_vars(glossary_append, prompt_vars)
+            system_prompt += f"\n\n{debug_info['glossary_context']}{glossary_append}"
+        
+        debug_info["system_prompt"] = system_prompt
+        
+        user_template = self.prompt_manager.get("translator.user_template", "Input: {text}")
+        debug_info["user_prompt"] = self._apply_prompt_vars(user_template, {**prompt_vars, "text": text})
+        
+        return debug_info
+
     def translate_text(self, text, use_rag=True, log_callback=None, max_retries=2):
         if not text or not str(text).strip():
             # Normalize empty inputs to empty string
