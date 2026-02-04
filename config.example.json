@@ -30,7 +30,8 @@
     },
     "paths": {
         "glossary_file": "glossary.json",
-        "vector_index_file": "vector_index.npy"
+        "vector_index_file": "vector_index.npy",
+        "stopwords_file": "stopwords.json"
     },
     "threads": {
         "translation": 5,

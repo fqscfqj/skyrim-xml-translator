@@ -108,13 +108,16 @@ class RAGEngine:
         self.glossary_path = self.config.get("paths", "glossary_file", "glossary.json")
         self.vector_path = self.config.get("paths", "vector_index_file", "vector_index.npy")
         self.terms_path = os.path.join(os.path.dirname(self.vector_path) if os.path.dirname(self.vector_path) else ".", "terms_index.json")
+        self.stopwords_path = self.config.get("paths", "stopwords_file", "stopwords.json")
         
         self.embed_dim = self.config.get("embedding", "dimensions", 1536)
+        self._stopwords_set: frozenset = frozenset()  # 外部停用词集合
 
         self.stop_flag = False
         self.pause_flag = False
 
         self.load_data()
+        self.load_stopwords()
 
     def _rebuild_glossary_lookup(self):
         """Build a normalized lookup map for instant exact hits (case/punct insensitive)."""
@@ -241,6 +244,30 @@ class RAGEngine:
         # Collapse whitespace
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
         return cleaned
+
+    def load_stopwords(self):
+        """加载外部停用词配置文件"""
+        stopwords = set()
+        if os.path.exists(self.stopwords_path):
+            try:
+                with open(self.stopwords_path, 'r', encoding='utf-8') as f:
+                    stopwords_config = json.load(f)
+                
+                # 从各个类别中收集停用词
+                for category in stopwords_config.values():
+                    if isinstance(category, dict) and "terms" in category:
+                        terms = category["terms"]
+                        if isinstance(terms, list):
+                            # 规范化后存储（小写）
+                            stopwords.update(term.lower() for term in terms if isinstance(term, str))
+                
+                log_emit(None, self.config, 'INFO', f"Loaded {len(stopwords)} stopwords from {self.stopwords_path}", module='rag_engine', func='load_stopwords')
+            except Exception as e:
+                log_emit(None, self.config, 'WARNING', f"Failed to load stopwords from {self.stopwords_path}: {e}", exc=e, module='rag_engine', func='load_stopwords')
+        else:
+            log_emit(None, self.config, 'INFO', f"Stopwords file not found at {self.stopwords_path}, using default filtering only", module='rag_engine', func='load_stopwords')
+        
+        self._stopwords_set = frozenset(stopwords)
 
     def load_data(self):
         """加载术语表和向量索引"""
@@ -516,27 +543,38 @@ class RAGEngine:
         except Exception:
             pass
         
-        prompt = f"""Extract Skyrim/Elder Scrolls proper nouns / lore terms from the text for glossary lookup.
+        prompt = """Extract Skyrim/Elder Scrolls proper nouns / lore terms from the text for glossary lookup.
 
 MUST extract: 
 - Character names (e.g., Lydia, Ulfric, Mjoll, Serana, Aerin)
-- Place names (e.g., Whiterun, Solitude, Riften)
+- Place names (e.g., Whiterun, Solitude, Riften, Dragonsreach)
 - Faction names (e.g., Stormcloaks, Thalmor, Thieves Guild)
-- Race names (e.g., Dunmer, Nord, Khajiit)
+- Race names (e.g., Dunmer, Nord, Khajiit, Hagraven)
 - Titles (e.g., Thane, Jarl, Housecarl, Dragonborn)
-- Items, spells, lore terms
+- Items, spells, potions, artifacts (e.g., Love Potion, Ebony Blade, Fire Bolt)
+- Lore terms and creature names (e.g., Spriggan, Forsworn)
 
-Rules:
+Strict Constraints & Rules:
     1. ONLY return terms that APPEAR IN THE PROVIDED TEXT (verbatim or with only minor punctuation differences). Do NOT infer or add terms that are not present.
     2. ONLY include terms that are likely Elder Scrolls/Skyrim entities or in-game proper nouns (names, places, factions, races, titles, artifacts).
-    3. Do NOT include generic English words even if capitalized by sentence/title case (e.g., "Especially", "Faction", "Adventures", "Temple" by itself).
-    4. Prefer the MOST specific phrase present in the text (e.g., keep "Thieves Guild" rather than also returning "Guild").
-    5. Keep single-word names (e.g., "Mara", "Ingun", "Dwemer", "Falmer", "Nords") when they are true lore terms AND they appear in the text.
-    6. Remove possessive 's from names.
-    7. Return ONLY a JSON array of strings, e.g. ["Mjoll", "Thieves Guild", "Whiterun"], or [] if none.
+    3. Do NOT extract common English words just because they are capitalized at the start of a sentence.
+       - IGNORE: "Time" in "Time to go", "Now" in "Now I know", "Then" in "Then he said"
+       - EXTRACT: "Time Slow" (spell), "Stop Time" (shout), because these are game mechanics
+    4. Do NOT extract generic category words when they appear alone without a specific name.
+       - IGNORE: "Temple" (generic), "Guard" (generic), "Spell" (generic)
+       - EXTRACT: "Temple of Mara" (specific place), "Whiterun Guard" (specific NPC type), "Fire Spell" (specific item category)
+    5. Context Check for ambiguous words:
+       - If "Time" appears in "Time to confront" -> IGNORE (sentence structure)
+       - If "Time" appears in "Cast Time Slow" -> EXTRACT "Time Slow" (spell name)
+       - If "Guard" appears in "a guard approached" -> IGNORE (generic)
+       - If "Guard" appears in "Dragonsreach Guard" -> EXTRACT "Dragonsreach Guard" (specific)
+    6. ALWAYS extract city/location names (Riften, Whiterun, Solitude, etc.) and item names (Love Potion, etc.)
+    7. Prefer the MOST specific phrase present in the text (e.g., keep "Thieves Guild" rather than also returning "Guild").
+    8. Keep single-word names (e.g., "Mara", "Ingun", "Dwemer", "Falmer", "Nords") when they are true lore terms AND they appear in the text.
+    9. Remove possessive forms from names.
+    10. Return ONLY a JSON array of strings, e.g. ["Mjoll", "Thieves Guild", "Whiterun"], or [] if none.
 
-Text: "{text}"
-"""
+Text: """ + f'"{text}"'
         messages = [{"role": "user", "content": prompt}]
         llm_keywords = []
 
@@ -762,6 +800,30 @@ Text: "{text}"
                 filtered = filtered2
 
             processed_keywords = filtered
+            
+            # 3) 应用外部停用词过滤
+            if self._stopwords_set:
+                filtered3 = []
+                for kw in processed_keywords:
+                    norm = self._normalize_term_key(kw)
+                    # 检查是否在停用词列表中（单词级别）
+                    if norm:
+                        # 对于多词短语，只要不是全部都是停用词就保留
+                        tokens = norm.split()
+                        if " " in norm:
+                            # 多词短语：检查是否所有实质性词汇都在停用词中
+                            non_connector_tokens = [t for t in tokens if t not in self._TITLE_CONNECTORS]
+                            if non_connector_tokens and all(t in self._stopwords_set for t in non_connector_tokens):
+                                continue
+                        else:
+                            # 单个词：直接检查是否在停用词中
+                            if norm in self._stopwords_set:
+                                # 停用词强制过滤，即使在术语表中也要过滤
+                                # 理由：像 "Time" 这样的词在句首被误判时，应该被过滤
+                                # 如果真的需要（如 "Time Slow" 魔法），会以组合形式出现
+                                continue
+                    filtered3.append(kw)
+                processed_keywords = filtered3
             
             # 去重但保持顺序
             seen = set()
