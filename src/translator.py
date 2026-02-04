@@ -415,10 +415,45 @@ class Translator:
         """获取最后一次翻译的RAG调试信息（用于缓存）"""
         return self._last_rag_debug_info
 
+    def _is_only_symbols_or_numbers(self, text: str) -> bool:
+        """
+        检测文本是否只包含符号、数字，没有其他文字性内容
+        """
+        if not text:
+            return True
+        
+        # 移除 XML 标签
+        text_clean = self._XML_TAG_RE.sub('', text)
+        # 移除占位符如 %s, %d, {0}, [TAG] 等
+        text_clean = self._PLACEHOLDER_RE.sub('', text_clean)
+        # 移除所有空白字符
+        text_clean = re.sub(r'\s+', '', text_clean)
+        
+        if not text_clean:
+            return True
+        
+        # 检查是否只包含非字母字符（数字、符号、标点等）
+        # 包括英文字母、中文字符、日文字符、韩文字符等
+        has_text_content = False
+        for ch in text_clean:
+            # 检查是否为字母或CJK字符
+            if ch.isalpha() or '\u4e00' <= ch <= '\u9fff' or '\u3040' <= ch <= '\u30ff' or '\uac00' <= ch <= '\ud7af':
+                has_text_content = True
+                break
+        
+        return not has_text_content
+
     def translate_text(self, text, use_rag=True, log_callback=None, max_retries=2):
         if not text or not str(text).strip():
             # Normalize empty inputs to empty string
             return ""
+        
+        # 如果文本只包含符号或数字，不需要翻译，直接返回
+        if self._is_only_symbols_or_numbers(str(text)):
+            log_emit(log_callback, self.rag_engine.config, 'DEBUG', 
+                    f"Text contains only symbols/numbers, skipping translation: {text}", 
+                    module='translator', func='translate_text')
+            return str(text)
 
         # Allow manual editing of prompts/*.json to take effect without restart
         try:
