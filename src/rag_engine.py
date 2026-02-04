@@ -21,6 +21,27 @@ class RAGEngine:
     # Terms shorter than this are treated as names/titles and require whole-word
     # presence in source text when source_text filtering is enabled.
     _NAME_VS_SENTENCE_THRESHOLD = 50
+
+    @classmethod
+    def _normalize_for_source_match(cls, text: str) -> str:
+        """Normalize for case/punctuation-insensitive containment checks against the source text."""
+        if not text:
+            return ""
+        cleaned = text.strip().lower()
+        cleaned = cls._NORMALIZE_TERM_RE.sub(" ", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned
+
+    @classmethod
+    def _keyword_appears_in_text(cls, keyword: str, source_text: str) -> bool:
+        """Return True only if keyword is present in source_text after normalization."""
+        kw = cls._normalize_for_source_match(keyword)
+        src = cls._normalize_for_source_match(source_text)
+        if not kw or not src:
+            return False
+        if " " in kw:
+            return kw in src
+        return f" {kw} " in f" {src} "
     
     # Use frozenset for O(1) lookup performance instead of recreating dict each time
     _COMMON_WORDS = frozenset({
@@ -506,12 +527,13 @@ MUST extract:
 - Items, spells, lore terms
 
 Rules:
-    1. ONLY include terms that are likely Elder Scrolls/Skyrim entities or in-game proper nouns (names, places, factions, races, titles, artifacts).
-    2. Do NOT include generic English words even if capitalized by sentence/title case (e.g., "Especially", "Faction", "Adventures", "Temple" by itself).
-    3. Prefer the MOST specific phrase: keep "Temple of Mara" rather than also returning "Temple".
-    4. Keep single-word names (e.g., "Mara", "Ingun", "Dwemer", "Falmer", "Nords") when they are true lore terms.
-    5. Remove possessive 's from names.
-    6. Return ONLY a JSON array of strings, e.g. ["Mjoll", "Temple of Mara", "Whiterun"], or [] if none.
+    1. ONLY return terms that APPEAR IN THE PROVIDED TEXT (verbatim or with only minor punctuation differences). Do NOT infer or add terms that are not present.
+    2. ONLY include terms that are likely Elder Scrolls/Skyrim entities or in-game proper nouns (names, places, factions, races, titles, artifacts).
+    3. Do NOT include generic English words even if capitalized by sentence/title case (e.g., "Especially", "Faction", "Adventures", "Temple" by itself).
+    4. Prefer the MOST specific phrase present in the text (e.g., keep "Thieves Guild" rather than also returning "Guild").
+    5. Keep single-word names (e.g., "Mara", "Ingun", "Dwemer", "Falmer", "Nords") when they are true lore terms AND they appear in the text.
+    6. Remove possessive 's from names.
+    7. Return ONLY a JSON array of strings, e.g. ["Mjoll", "Thieves Guild", "Whiterun"], or [] if none.
 
 Text: "{text}"
 """
@@ -954,6 +976,24 @@ Text: "{text}"
             seen.add(kl)
             deduped.append(k)
         llm_keywords = deduped
+
+        # Final safety filter: drop any keyword that does not actually appear in the source text.
+        # This prevents LLM hallucinations (e.g., returning a lore term that isn't in the input).
+        dropped = []
+        present = []
+        for kw in llm_keywords:
+            if self._keyword_appears_in_text(kw, text):
+                present.append(kw)
+            else:
+                dropped.append(kw)
+        if dropped:
+            try:
+                preview = dropped[:10]
+                suffix = "..." if len(dropped) > 10 else ""
+                log_emit(log_callback, self.config, 'DEBUG', f"[RAG] Dropped {len(dropped)} keyword(s) not present in text: {preview}{suffix}", module='rag_engine', func='extract_keywords')
+            except Exception:
+                pass
+        llm_keywords = present
         
         try:
             log_emit(log_callback, self.config, 'DEBUG', f"[RAG] Extracted {len(llm_keywords)} keywords: {llm_keywords}", module='rag_engine', func='extract_keywords', extra={'keywords': llm_keywords, 'input_text': text[:100]})

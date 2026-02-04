@@ -17,6 +17,10 @@ class Translator:
     _POSSESSIVE_RE = re.compile(r"['']\s*s\s+")
     _JSON_EXTRACT_RE = re.compile(r"\{.*\}", flags=re.DOTALL)
     _MARKDOWN_CODE_RE = re.compile(r'```(?:json)?')
+    _ALNUM_UNDERSCORE_RE = re.compile(r"[a-z0-9_]", flags=re.IGNORECASE)
+    _ASCII_NAME_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9'\-]*")
+    _CJK_QUOTE_SPAN_RE = re.compile(r"[\"“”‘’「」『』].*?[\"“”‘’「」『』]")
+    _PAREN_SPAN_RE = re.compile(r"\(.*?\)|（.*?）")
     
     def __init__(self, llm_client: LLMClient, rag_engine: RAGEngine):
         self.llm_client = llm_client
@@ -87,6 +91,151 @@ class Translator:
         for key, value in variables.items():
             out = out.replace("{" + str(key) + "}", str(value))
         return out
+
+    def _term_appears_in_source(self, term: str, source_text: str) -> bool:
+        """Check whether a glossary term appears in the source text.
+
+        This is intentionally conservative: we only treat it as a match when
+        the term appears as a whole word/phrase (case-insensitive) for ASCII-ish
+        terms, to avoid mapping a full name to a short form.
+        """
+        if not term or not source_text:
+            return False
+
+        term = str(term).strip()
+        if not term:
+            return False
+
+        src = str(source_text)
+        term_lower = term.lower()
+        src_lower = src.lower()
+
+        if term_lower == src_lower:
+            return True
+
+        # If term contains ASCII letters/digits/underscore, apply boundary checks.
+        if self._ALNUM_UNDERSCORE_RE.search(term_lower):
+            escaped = re.escape(term_lower)
+            pattern = escaped
+            if re.match(r"[a-z0-9_]", term_lower):
+                pattern = r"(?<![a-z0-9_])" + pattern
+            if re.search(r"[a-z0-9_]$", term_lower):
+                pattern = pattern + r"(?![a-z0-9_])"
+            return re.search(pattern, src_lower) is not None
+
+        # Non-ASCII: fallback to simple substring.
+        return term in src
+
+    def _strip_epithet_for_short_name(self, text: str) -> str:
+        """Try to extract the 'core' name from a full translated name.
+
+        Example: “星歌”林立 -> 林立
+        """
+        if not text or not isinstance(text, str):
+            return ""
+        out = text.strip()
+        out = self._CJK_QUOTE_SPAN_RE.sub("", out)
+        out = self._PAREN_SPAN_RE.sub("", out)
+        out = out.strip()
+        out = re.sub(r"^[\s\-·•]+|[\s\-·•]+$", "", out)
+        return out
+
+    def _derive_preferred_alias_lines(self, source_text: str, matched_terms: dict) -> List[str]:
+        """Derive short-name aliases from full-name entries.
+
+        If a full name like "Lynly Star-Sung" is matched but the source only
+        contains "Lynly", we add a preferred alias "Lynly : 林立" (best-effort).
+        """
+        if not source_text or not matched_terms:
+            return []
+
+        # Precompute normalized keys for matched terms to avoid generating duplicates.
+        try:
+            normalize = self.rag_engine._normalize_term_key  # type: ignore[attr-defined]
+        except Exception:
+            normalize = lambda s: str(s).strip().lower()
+
+        matched_norm = {normalize(k) for k in matched_terms.keys() if isinstance(k, str)}
+        alias_lines: List[str] = []
+        seen_alias_norm: set[str] = set()
+
+        for term, translation in matched_terms.items():
+            if not isinstance(term, str) or not term.strip():
+                continue
+            if len(term) >= 100:
+                continue
+
+            # Only derive from multi-token ASCII-ish names.
+            tokens = [t for t in self._ASCII_NAME_TOKEN_RE.findall(term) if t]
+            if len(tokens) < 2:
+                continue
+
+            first = tokens[0]
+            if not first or len(first) < 3 or not first[0].isupper():
+                continue
+
+            # Only add alias if the short form appears in source.
+            if not self._term_appears_in_source(first, source_text):
+                continue
+
+            # If the glossary already has a direct/normalized entry for the short name, don't derive.
+            if normalize(first) in matched_norm:
+                continue
+
+            v_str = "" if translation is None else str(translation)
+            short_v = self._strip_epithet_for_short_name(v_str) or v_str
+            if not short_v or short_v == v_str:
+                # Still allow identical fallback; but avoid spamming if nothing changes.
+                # If we can't reliably extract a shorter form, skip.
+                continue
+
+            alias_norm = normalize(first)
+            if alias_norm in seen_alias_norm:
+                continue
+            seen_alias_norm.add(alias_norm)
+            alias_lines.append(f"- {first} : {short_v}")
+
+        return alias_lines
+
+    def _build_glossary_context(self, source_text: str, matched_terms: dict) -> str:
+        if not matched_terms:
+            return ""
+
+        exact_lines: List[str] = []
+        related_lines: List[str] = []
+
+        for k, v in matched_terms.items():
+            if not isinstance(k, str) or not k.strip():
+                continue
+            if len(k) >= 100:
+                continue
+
+            v_str = "" if v is None else str(v)
+            if self._term_appears_in_source(k, source_text):
+                exact_lines.append(f"- {k} : {v_str}")
+            else:
+                related_lines.append(f"- {k} : {v_str}")
+
+        alias_lines = self._derive_preferred_alias_lines(source_text, matched_terms)
+
+        # Nothing useful to show.
+        if not exact_lines and not alias_lines and not related_lines:
+            return ""
+
+        glossary_header = self.prompt_manager.get(
+            "translator.glossary_header",
+            "## Dictionary\nUse these entries to keep translations consistent:",
+        )
+
+        sections: List[str] = []
+        if exact_lines:
+            sections.append("### Exact Matches (mandatory)\n" + "\n".join(exact_lines))
+        if alias_lines:
+            sections.append("### Derived Aliases (preferred)\n" + "\n".join(alias_lines))
+        if related_lines:
+            sections.append("### Related Terms (reference only)\n" + "\n".join(related_lines))
+
+        return glossary_header + "\n\n" + "\n\n".join(sections)
 
     def _rag_token_spans(self, text: str) -> List[tuple[int, int]]:
         """Very lightweight token span estimator.
@@ -334,27 +483,10 @@ class Translator:
 
             # 3. Construct glossary context
             if debug_info["matched_terms"]:
-                glossary_lines = []
-                text_lower = text.lower()
-                priority_terms = []
-                other_terms = []
-                
-                for k, v in debug_info["matched_terms"].items():
-                    if len(k) < 100:
-                        v_str = "" if v is None else str(v)
-                        if k.lower() in text_lower:
-                            priority_terms.append(f"- {k} : {v_str}")
-                        else:
-                            other_terms.append(f"- {k} : {v_str}")
-                
-                glossary_lines = priority_terms + other_terms
-                
-                if glossary_lines:
-                    glossary_header = self.prompt_manager.get(
-                        "translator.glossary_header",
-                        "## Mandatory Dictionary\nThe following terms MUST be translated exactly as shown below. Do NOT transliterate names if they are in this list:",
-                    )
-                    debug_info["glossary_context"] = glossary_header + "\n" + "\n".join(glossary_lines)
+                debug_info["glossary_context"] = self._build_glossary_context(
+                    text,
+                    debug_info["matched_terms"],
+                )
         
         # 4. Construct Prompt (same as translate_text)
         prompt_style = self.rag_engine.config.get("general", "prompt_style", "default")
@@ -508,31 +640,7 @@ class Translator:
 
             # 3. Construct glossary context (Limit terms)
             if matched_terms:
-                # Format glossary as a clear list
-                glossary_lines = []
-                
-                # Prioritize terms that are actually in the text
-                text_lower = text.lower()
-                priority_terms = []
-                other_terms = []
-                
-                for k, v in matched_terms.items():
-                    if len(k) < 100:
-                        v_str = "" if v is None else str(v)
-                        if k.lower() in text_lower:
-                            priority_terms.append(f"- {k} : {v_str}")
-                        else:
-                            other_terms.append(f"- {k} : {v_str}")
-                
-                # Combine lists, putting priority terms first
-                glossary_lines = priority_terms + other_terms
-                
-                if glossary_lines:
-                    glossary_header = self.prompt_manager.get(
-                        "translator.glossary_header",
-                        "## Mandatory Dictionary\nThe following terms MUST be translated exactly as shown below. Do NOT transliterate names if they are in this list:",
-                    )
-                    glossary_context = glossary_header + "\n" + "\n".join(glossary_lines)
+                glossary_context = self._build_glossary_context(text, matched_terms)
 
         # 4. Construct Prompt
         prompt_style = self.rag_engine.config.get("general", "prompt_style", "default")
