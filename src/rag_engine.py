@@ -581,15 +581,19 @@ Text: "{text}"
                 return per_keyword_limit is None or len(query_selected_terms) < per_keyword_limit
 
             def add_term_if_possible(term, score):
-                if term not in self.glossary:
+                if not term:
                     return False
-                if term not in query_selected_terms:
+                normalized = term.strip().lower()
+                canonical_term = self._glossary_lookup.get(normalized, term)
+                if canonical_term not in self.glossary:
+                    return False
+                if canonical_term not in query_selected_terms:
                     if not can_add_more():
                         return False
-                    query_selected_terms.append(term)
-                prev_score = candidate_scores.get(term)
+                    query_selected_terms.append(canonical_term)
+                prev_score = candidate_scores.get(canonical_term)
                 if prev_score is None or score > prev_score:
-                    candidate_scores[term] = score
+                    candidate_scores[canonical_term] = score
                 return True
 
             try:
