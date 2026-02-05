@@ -70,8 +70,7 @@ class ConfigManager:
                 "similarity_threshold": 0.75,
                 "short_term_max_tokens": 6,
                 "short_term_max_results": 5,
-                "long_term_max_results": 2,
-                "keyword_max_results": 12
+                "long_term_max_results": 2
             },
             "paths": {
                 "glossary_file": "glossary.json",

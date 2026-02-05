@@ -561,7 +561,6 @@ class RAGEngine:
         except Exception:
             pass
 
-        max_keywords = self.config.get("rag", "keyword_max_results", 12)
         prompt_template = self.prompt_manager.get("rag.keywords.prompt")
         if not prompt_template:
             prompt_template = (
@@ -577,12 +576,11 @@ class RAGEngine:
                 "3) Do NOT output common words, abstract nouns, emotions, or generic categories unless part of a specific proper-noun phrase.\n"
                 "4) Prefer the MOST specific phrase present in the text; avoid returning both a phrase and its component words unless they appear separately.\n"
                 "5) Keep original casing/spelling from the text. If unsure, omit.\n"
-                "6) Return ONLY a JSON array of strings, up to {keyword_max_results} items. Return [] if none.\n\n"
+                "6) Return ONLY a JSON array of strings. Return [] if none.\n\n"
                 "Text: \"{text}\""
             )
         prompt = self._apply_prompt_vars(prompt_template, {
             "text": text,
-            "keyword_max_results": max_keywords,
         })
         messages = [{"role": "user", "content": prompt}]
         llm_keywords = []
@@ -736,8 +734,7 @@ class RAGEngine:
                 pass
         llm_keywords = present
 
-        if isinstance(max_keywords, int) and max_keywords > 0 and len(llm_keywords) > max_keywords:
-            llm_keywords = llm_keywords[:max_keywords]
+
         
         try:
             log_emit(log_callback, self.config, 'DEBUG', f"[RAG] Extracted {len(llm_keywords)} keywords: {llm_keywords}", module='rag_engine', func='extract_keywords', extra={'keywords': llm_keywords, 'input_text': text[:100]})
