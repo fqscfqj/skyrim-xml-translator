@@ -248,9 +248,16 @@ class RAGEngine:
     def load_stopwords(self):
         """加载外部停用词配置文件"""
         stopwords = set()
-        if os.path.exists(self.stopwords_path):
+        stopwords_path = self.stopwords_path
+        # Backward compatible fallback: older configs may still point to 'stopwords.json'.
+        if not os.path.exists(stopwords_path) and os.path.normpath(stopwords_path) == os.path.normpath('stopwords.json'):
+            candidate = os.path.join('data', 'stopwords.json')
+            if os.path.exists(candidate):
+                stopwords_path = candidate
+
+        if os.path.exists(stopwords_path):
             try:
-                with open(self.stopwords_path, 'r', encoding='utf-8') as f:
+                with open(stopwords_path, 'r', encoding='utf-8') as f:
                     stopwords_config = json.load(f)
                 
                 # 从各个类别中收集停用词
@@ -261,11 +268,11 @@ class RAGEngine:
                             # 规范化后存储（小写）
                             stopwords.update(term.lower() for term in terms if isinstance(term, str))
                 
-                log_emit(None, self.config, 'INFO', f"Loaded {len(stopwords)} stopwords from {self.stopwords_path}", module='rag_engine', func='load_stopwords')
+                log_emit(None, self.config, 'INFO', f"Loaded {len(stopwords)} stopwords from {stopwords_path}", module='rag_engine', func='load_stopwords')
             except Exception as e:
-                log_emit(None, self.config, 'WARNING', f"Failed to load stopwords from {self.stopwords_path}: {e}", exc=e, module='rag_engine', func='load_stopwords')
+                log_emit(None, self.config, 'WARNING', f"Failed to load stopwords from {stopwords_path}: {e}", exc=e, module='rag_engine', func='load_stopwords')
         else:
-            log_emit(None, self.config, 'INFO', f"Stopwords file not found at {self.stopwords_path}, using default filtering only", module='rag_engine', func='load_stopwords')
+            log_emit(None, self.config, 'INFO', f"Stopwords file not found at {stopwords_path}, using default filtering only", module='rag_engine', func='load_stopwords')
         
         self._stopwords_set = frozenset(stopwords)
 

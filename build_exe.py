@@ -15,6 +15,7 @@ def collect_data_files():
         ('config.json', '.'),
         ('config.example.json', '.'),
         ('glossary.json', '.'),
+        ('data', 'data'),
         ('assets', 'assets'),
     ]
     add_data = []
@@ -25,12 +26,12 @@ def collect_data_files():
 
 
 def copy_runtime_folders_to_dist(dist_root: str):
-    """Copy runtime folders (locales/prompts) next to the executable.
+    """Copy runtime folders (locales/prompts/data) next to the executable.
 
     PyInstaller may place bundled datas under the internal extraction directory.
     This ensures the end-user can edit/override JSON files directly in dist.
     """
-    folders = ['locales', 'prompts']
+    folders = ['locales', 'prompts', 'data']
     for folder in folders:
         src = os.path.abspath(folder)
         if not os.path.isdir(src):
@@ -83,6 +84,7 @@ def build(onefile=True, windowed=True, name='SkyrimXMLTranslator', icon=None):
     if os.path.isdir(dist_root):
         copy_runtime_folders_to_dist(dist_root)
     print("Build finished. Executable is in 'dist' folder.")
+
 
 
 def parse_args():
