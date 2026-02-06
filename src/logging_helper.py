@@ -113,8 +113,11 @@ def emit(log_callback: Optional[Callable[[str], None]], config_manager, level: s
     except Exception:
         pass
 
-    # Try to deduce caller info if none provided
-    if not module or not func or not lineno:
+    # Try to deduce caller info if none provided.
+    # Only call inspect.stack() when essential info (module/func) is missing.
+    # inspect.stack() is expensive because it builds the entire call stack with
+    # frame info; skip it when callers already supply module and func.
+    if not module or not func:
         try:
             # inspect stack: 0: emit, 1: caller of emit, 2: maybe wrapper; choose index 2
             st = inspect.stack()

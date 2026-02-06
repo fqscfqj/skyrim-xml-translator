@@ -21,7 +21,11 @@ class Translator:
     _ASCII_NAME_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9'\-]*")
     _CJK_QUOTE_SPAN_RE = re.compile(r"[\"“”‘’「」『』].*?[\"“”‘’「」『』]")
     _PAREN_SPAN_RE = re.compile(r"\(.*?\)|（.*?）")
-    
+    _WHITESPACE_RE = re.compile(r'\s+')
+    _STRIP_EDGES_RE = re.compile(r"^[\s\-·•]+|[\s\-·•]+$")
+    _ALNUM_START_RE = re.compile(r"^[a-z0-9_]")
+    _ALNUM_END_RE = re.compile(r"[a-z0-9_]$")
+
     def __init__(self, llm_client: LLMClient, rag_engine: RAGEngine):
         self.llm_client = llm_client
         self.rag_engine = rag_engine
@@ -119,9 +123,9 @@ class Translator:
         if self._ALNUM_UNDERSCORE_RE.search(term_lower):
             escaped = re.escape(term_lower)
             pattern = escaped
-            if re.match(r"[a-z0-9_]", term_lower):
+            if self._ALNUM_START_RE.match(term_lower):
                 pattern = r"(?<![a-z0-9_])" + pattern
-            if re.search(r"[a-z0-9_]$", term_lower):
+            if self._ALNUM_END_RE.search(term_lower):
                 pattern = pattern + r"(?![a-z0-9_])"
             return re.search(pattern, src_lower) is not None
 
@@ -139,7 +143,7 @@ class Translator:
         out = self._CJK_QUOTE_SPAN_RE.sub("", out)
         out = self._PAREN_SPAN_RE.sub("", out)
         out = out.strip()
-        out = re.sub(r"^[\s\-·•]+|[\s\-·•]+$", "", out)
+        out = self._STRIP_EDGES_RE.sub("", out)
         return out
 
     def _derive_preferred_alias_lines(self, source_text: str, matched_terms: dict) -> List[str]:
@@ -419,8 +423,9 @@ class Translator:
         suspicious_fragments = []
         for word in untranslated_fragments:
             # 检查这个词在译文中的上下文
-            pattern = re.compile(rf'(?<![a-zA-Z]){re.escape(word)}(?![a-zA-Z])', re.IGNORECASE)
-            matches = list(pattern.finditer(translation))
+            # Build pattern with word boundaries for non-alpha characters
+            escaped = re.escape(word)
+            matches = list(re.finditer(rf'(?<![a-zA-Z]){escaped}(?![a-zA-Z])', translation, re.IGNORECASE))
             for match in matches:
                 start, end = match.start(), match.end()
                 # 检查前后字符
@@ -558,7 +563,7 @@ class Translator:
         # 移除占位符如 %s, %d, {0}, [TAG] 等
         text_clean = self._PLACEHOLDER_RE.sub('', text_clean)
         # 移除所有空白字符
-        text_clean = re.sub(r'\s+', '', text_clean)
+        text_clean = self._WHITESPACE_RE.sub('', text_clean)
         
         if not text_clean:
             return True
