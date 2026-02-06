@@ -21,6 +21,7 @@ class Translator:
     _ASCII_NAME_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9'\-]*")
     _CJK_QUOTE_SPAN_RE = re.compile(r"[\"“”‘’「」『』].*?[\"“”‘’「」『』]")
     _PAREN_SPAN_RE = re.compile(r"\(.*?\)|（.*?）")
+    _TERM_EDGE_PUNCT_RE = re.compile(r"^[\s\"'“”‘’`´\(\)\[\]\{\}<>【】《》「」『』。，！？、；：.!?,;:]+|[\s\"'“”‘’`´\(\)\[\]\{\}<>【】《》「」『』。，！？、；：.!?,;:]+$")
     
     def __init__(self, llm_client: LLMClient, rag_engine: RAGEngine):
         self.llm_client = llm_client
@@ -108,6 +109,10 @@ class Translator:
         if not term:
             return False
 
+        stripped = self._strip_term_edge_punct(term)
+        if stripped:
+            term = stripped
+
         src = str(source_text)
         term_lower = term.lower()
         src_lower = src.lower()
@@ -127,6 +132,14 @@ class Translator:
 
         # Non-ASCII: fallback to simple substring.
         return term in src
+
+    def _strip_term_edge_punct(self, term: str) -> str:
+        """Strip leading/trailing punctuation for postprocessing matches."""
+        if not term or not isinstance(term, str):
+            return ""
+        stripped = term.strip()
+        stripped = self._TERM_EDGE_PUNCT_RE.sub("", stripped)
+        return stripped
 
     def _strip_epithet_for_short_name(self, text: str) -> str:
         """Try to extract the 'core' name from a full translated name.
@@ -214,7 +227,8 @@ class Translator:
 
             v_str = "" if v is None else str(v)
             if self._term_appears_in_source(k, source_text):
-                exact_lines.append(f"- {k} : {v_str}")
+                display_term = self._strip_term_edge_punct(k) or k
+                exact_lines.append(f"- {display_term} : {v_str}")
             else:
                 related_lines.append(f"- {k} : {v_str}")
 
