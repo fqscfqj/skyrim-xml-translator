@@ -1320,6 +1320,14 @@ Text: """ + f'"{text}"'
                     # We scan all terms. For 70k terms this is fast enough in Python.
                     containment_indices = [i for i, t in enumerate(self.terms) if query_lower in t.lower()]
                     
+                    # Pre-compute source text info once for filtering both containment and vector matches
+                    source_lower = None
+                    keyword_in_source = False
+                    if source_text:
+                        source_lower = source_text.lower()
+                        keyword_pattern = re.compile(r"\b{}\b".format(re.escape(query_lower)))
+                        keyword_in_source = bool(keyword_pattern.search(source_lower))
+
                     # Rank containment matches by their vector similarity to the query
                     # This helps pick the most relevant sentences among those containing the term
                     if containment_indices:
@@ -1332,11 +1340,7 @@ Text: """ + f'"{text}"'
                         # Filter containment matches based on source_text
                         # Keep any term that contains the keyword when the keyword appears in source.
                         # Do not filter out long sentence-like terms here.
-                        if source_text:
-                            source_lower = source_text.lower()
-                            keyword_pattern = re.compile(r"\b{}\b".format(re.escape(query_lower)))
-                            keyword_in_source = bool(keyword_pattern.search(source_lower))
-
+                        if source_lower is not None:
                             filtered_containment = []
                             for term, score in containment_matches:
                                 term_lower = term.lower()
@@ -1359,13 +1363,7 @@ Text: """ + f'"{text}"'
                     # Filter vector matches based on source_text as well.
                     # Keep terms that either appear in source or contain the keyword (as references).
                     # Do not filter out long sentence-like terms here.
-                    if source_text and vector_matches:
-                        # Reuse source_lower and keyword match from above if available
-                        if not containment_indices or not source_text:
-                            source_lower = source_text.lower()
-                            keyword_pattern = re.compile(r"\b{}\b".format(re.escape(query_lower)))
-                            keyword_in_source = bool(keyword_pattern.search(source_lower))
-
+                    if source_lower is not None and vector_matches:
                         filtered = []
                         for term, score in vector_matches:
                             term_lower = term.lower()

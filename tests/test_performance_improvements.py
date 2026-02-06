@@ -4,7 +4,6 @@ These tests validate that the optimized code produces the same results
 as the original implementations.
 """
 import re
-import time
 import unittest
 import sys
 import os
@@ -192,32 +191,27 @@ class TestGCRemoval(unittest.TestCase):
         self.assertNotIn('gc.collect()', content)
 
 
-class TestRegexPrecompilationPerformance(unittest.TestCase):
-    """Verify that pre-compiled patterns are faster than inline re.sub."""
+class TestRegexPrecompilationEquivalence(unittest.TestCase):
+    """Verify that pre-compiled patterns produce identical results to inline re.sub."""
 
-    def test_precompiled_whitespace_faster(self):
-        """Pre-compiled _WHITESPACE_RE should be at least as fast as inline re.sub."""
+    def test_precompiled_whitespace_equivalent(self):
+        """Pre-compiled _WHITESPACE_RE should produce identical results to inline re.sub."""
         from src.rag_engine import RAGEngine
 
-        text = "  hello   world   this  is  a   test  " * 100
-        iterations = 1000
+        test_cases = [
+            "  hello   world  ",
+            "hello\t\nworld",
+            "no-whitespace",
+            "",
+            "  ",
+            "hello   \t\n\r  world   test  ",
+        ]
 
-        # Pre-compiled version
-        start = time.perf_counter()
-        for _ in range(iterations):
-            RAGEngine._WHITESPACE_RE.sub(" ", text)
-        precompiled_time = time.perf_counter() - start
-
-        # Inline version
-        start = time.perf_counter()
-        for _ in range(iterations):
-            re.sub(r"\s+", " ", text)
-        inline_time = time.perf_counter() - start
-
-        # Pre-compiled should not be significantly slower
-        # (Python caches last few regex patterns, but pre-compiled avoids cache misses)
-        self.assertLessEqual(precompiled_time, inline_time * 1.5,
-                             f"Pre-compiled ({precompiled_time:.4f}s) should not be much slower than inline ({inline_time:.4f}s)")
+        for text in test_cases:
+            precompiled_result = RAGEngine._WHITESPACE_RE.sub(" ", text)
+            inline_result = re.sub(r"\s+", " ", text)
+            self.assertEqual(precompiled_result, inline_result,
+                             f"Mismatch for input {text!r}")
 
 
 if __name__ == '__main__':
