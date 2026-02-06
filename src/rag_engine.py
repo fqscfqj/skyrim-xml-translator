@@ -2,7 +2,6 @@ import json
 import os
 import re
 import time
-import gc
 import numpy as np
 from typing import List, Optional, Dict, Any
 from src.logging_helper import emit as log_emit
@@ -16,6 +15,9 @@ class RAGEngine:
     _PROPER_NOUN_RE = re.compile(r"\b([A-Z][a-z]{2,})\b")
     _MARKDOWN_CODE_RE = re.compile(r'```(?:json)?')
     _NORMALIZE_TERM_RE = re.compile(r"[^0-9a-zA-Z\u4e00-\u9fff]+")
+    _WHITESPACE_RE = re.compile(r"\s+")
+    _WORD_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9'\-]*")
+    _STRIP_PUNCT_RE = re.compile(r"^[^\w\u4e00-\u9fff]+|[^\w\u4e00-\u9fff]+$")
     
     # Threshold to distinguish name-like terms from sentence-like terms.
     # Terms shorter than this are treated as names/titles and require whole-word
@@ -29,7 +31,7 @@ class RAGEngine:
             return ""
         cleaned = text.strip().lower()
         cleaned = cls._NORMALIZE_TERM_RE.sub(" ", cleaned)
-        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        cleaned = cls._WHITESPACE_RE.sub(" ", cleaned).strip()
         return cleaned
 
     @classmethod
@@ -186,7 +188,7 @@ class RAGEngine:
         if not text:
             return []
 
-        words = re.findall(r"[A-Za-z][A-Za-z0-9'\-]*", text)
+        words = self._WORD_TOKEN_RE.findall(text)
         phrases: List[str] = []
         seen = set()
 
@@ -242,7 +244,7 @@ class RAGEngine:
         # Replace punctuation/symbols with spaces, keep letters/digits/CJK
         cleaned = self._NORMALIZE_TERM_RE.sub(" ", cleaned)
         # Collapse whitespace
-        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        cleaned = self._WHITESPACE_RE.sub(" ", cleaned).strip()
         return cleaned
 
     def load_stopwords(self):
@@ -772,7 +774,7 @@ Text: """ + f'"{text}"'
                     continue
                 kw = kw.strip()
                 # 去除首尾标点（避免 "Ingun..." 这类无法匹配的问题）
-                kw = re.sub(r"^[^\w\u4e00-\u9fff]+|[^\w\u4e00-\u9fff]+$", "", kw)
+                kw = self._STRIP_PUNCT_RE.sub("", kw)
                 if not kw:
                     continue
                 
@@ -1108,7 +1110,7 @@ Text: """ + f'"{text}"'
                 continue
             k = kw.strip()
             # Final trim to avoid punctuation artifacts from LLM output, e.g. 'Elisif...'
-            k = re.sub(r"^[^\w\u4e00-\u9fff]+|[^\w\u4e00-\u9fff]+$", "", k)
+            k = self._STRIP_PUNCT_RE.sub("", k)
             if not k:
                 continue
             kl = k.lower()
@@ -1318,6 +1320,14 @@ Text: """ + f'"{text}"'
                     # We scan all terms. For 70k terms this is fast enough in Python.
                     containment_indices = [i for i, t in enumerate(self.terms) if query_lower in t.lower()]
                     
+                    # Pre-compute source text info once for filtering both containment and vector matches
+                    source_lower = None
+                    keyword_in_source = False
+                    if source_text:
+                        source_lower = source_text.lower()
+                        keyword_pattern = re.compile(r"\b{}\b".format(re.escape(query_lower)))
+                        keyword_in_source = bool(keyword_pattern.search(source_lower))
+
                     # Rank containment matches by their vector similarity to the query
                     # This helps pick the most relevant sentences among those containing the term
                     if containment_indices:
@@ -1330,11 +1340,7 @@ Text: """ + f'"{text}"'
                         # Filter containment matches based on source_text
                         # Keep any term that contains the keyword when the keyword appears in source.
                         # Do not filter out long sentence-like terms here.
-                        if source_text:
-                            source_lower = source_text.lower()
-                            keyword_pattern = r"\b{}\b".format(re.escape(query_lower))
-                            keyword_in_source = bool(re.search(keyword_pattern, source_lower))
-
+                        if source_lower is not None:
                             filtered_containment = []
                             for term, score in containment_matches:
                                 term_lower = term.lower()
@@ -1357,11 +1363,7 @@ Text: """ + f'"{text}"'
                     # Filter vector matches based on source_text as well.
                     # Keep terms that either appear in source or contain the keyword (as references).
                     # Do not filter out long sentence-like terms here.
-                    if source_text and vector_matches:
-                        source_lower = source_text.lower()
-                        keyword_pattern = r"\b{}\b".format(re.escape(query_lower))
-                        keyword_in_source = bool(re.search(keyword_pattern, source_lower))
-
+                    if source_lower is not None and vector_matches:
                         filtered = []
                         for term, score in vector_matches:
                             term_lower = term.lower()
@@ -1378,10 +1380,9 @@ Text: """ + f'"{text}"'
 
                         vector_matches = filtered
                     
-                    # 释放similarities数组
+                    # Release references to large temporary arrays
                     del similarities
                     del ranked_idx
-                    gc.collect()
 
                 if return_debug:
                     query_details["vector_matches"] = vector_matches
@@ -1472,14 +1473,17 @@ Text: """ + f'"{text}"'
         deleted_count = 0
         indices_to_delete = []
         
+        # Build an index map for O(1) lookup instead of O(n) list.index() per term
+        term_to_idx = {t: i for i, t in enumerate(self.terms)}
+        
         # 1. Update glossary and collect indices
         for term in terms_list:
             if term in self.glossary:
                 del self.glossary[term]
                 deleted_count += 1
                 
-                if term in self.terms:
-                    idx = self.terms.index(term)
+                idx = term_to_idx.get(term)
+                if idx is not None:
                     indices_to_delete.append(idx)
         
         if deleted_count > 0:
