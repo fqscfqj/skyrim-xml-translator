@@ -25,3 +25,6 @@ Thumbs.db
 # Test files
 test_performance.py
 .pytest_cache/
+
+# Claude Code temporary files
+tmpclaude-*
