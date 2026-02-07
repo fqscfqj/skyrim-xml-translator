@@ -1,11 +1,11 @@
 {
   "_comment": "停用词配置 - 防止误提取通用词汇作为专有名词",
   "_usage": "该文件用于过滤RAG关键词提取中的通用词汇，避免将句首大写的普通词误识别为专有名词",
-  
+
   "sentence_starters": {
     "_comment": "句首常见词 - 通常因句首大写而被误判为专有名词",
     "terms": [
-      "Time", "Now", "Then", "Here", "There", 
+      "Time", "Now", "Then", "Here", "There",
       "Today", "Tomorrow", "Yesterday",
       "He", "She", "It", "They", "We", "You",
       "Look", "Watch", "Listen", "Wait", "Come", "Go",
@@ -21,7 +21,7 @@
       "Please", "Thanks", "Sorry", "Excuse"
     ]
   },
-  
+
   "generic_actions": {
     "_comment": "通用动作词 - 不是专有名词",
     "terms": [
@@ -36,7 +36,7 @@
       "Cast", "Equip", "Use", "Activate"
     ]
   },
-  
+
   "generic_categories": {
     "_comment": "通用类别词 - 除非与具体名称组合，否则不提取",
     "terms": [
@@ -52,7 +52,7 @@
       "Good", "Evil", "Right", "Wrong"
     ]
   },
-  
+
   "risky_ambiguous": {
     "_comment": "容易混淆的词 - 需要上下文判断，单独出现时不提取",
     "terms": [
@@ -62,7 +62,7 @@
       "Friend", "Enemy", "Stranger", "Companion"
     ]
   },
-  
+
   "custom_exceptions": {
     "_comment": "自定义例外 - 用户可以根据实际情况添加需要过滤的词",
     "terms": [
