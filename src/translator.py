@@ -26,7 +26,7 @@ class Translator:
     _STRIP_EDGES_RE = re.compile(r"^[\s\-·•]+|[\s\-·•]+$")
     _ALNUM_START_RE = re.compile(r"^[a-z0-9_]")
     _ALNUM_END_RE = re.compile(r"[a-z0-9_]$")
-    _CAPITALIZED_TOKEN_RE = re.compile(r"^[A-Z][a-z]")
+    _CAPITALIZED_TOKEN_RE = re.compile(r"^[A-Z][a-zA-Z]")
     _ALL_UPPER_RE = re.compile(r"^[A-Z][A-Z\s\-']+$")
     _COMMON_WORD_RE = re.compile(
         r"^(?:the|a|an|and|or|but|in|on|at|to|for|of|with|by|from|is|are|was|were|"
