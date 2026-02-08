@@ -1,6 +1,6 @@
 {
   "retry": {
-    "untranslated_fragments": "CRITICAL: Your previous translation contains untranslated source-language words embedded in the target text: [{fragments}]. Those words MUST be translated (unless they are required proper nouns/tags/placeholders). Re-translate the entire text into {target_language}:",
-    "generic": "IMPORTANT: You MUST translate the text into {target_language}. Do NOT return the original text. Translate now:"
+    "untranslated_fragments": "严重错误：你的上一次翻译在目标文本中包含未翻译的源语言词汇：[{fragments}]。这些词汇必须被翻译（除非它们是必需的专有名词/标签/占位符）。请将整个文本重新翻译成{target_language}：",
+    "generic": "重要提示：你必须将文本翻译成{target_language}。不要返回原文。立即翻译："
   }
 }

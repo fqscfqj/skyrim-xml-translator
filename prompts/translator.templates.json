@@ -1,5 +1,5 @@
 {
-  "glossary_header": "## Dictionary\nUse this dictionary to keep translations consistent:",
-  "glossary_instruction_append": "\n\nInstruction: Enforce 'Non-Negotiable Terms (mandatory)' EXACTLY when the term appears in the source. For 'Stylistic Vocabulary (adapt to target tone)', use as baseline but adapt wording to fit the target style. Prefer 'Derived Aliases (preferred)' for short forms when applicable. Treat 'Related Terms (reference only)' as non-binding context.",
-  "user_template": "Input: {text}"
+  "glossary_header": "## 词典\n使用此词典保持翻译一致性：",
+  "glossary_instruction_append": "\n\n说明：当术语出现在源文本中时，必须完全按照"不可协商术语（强制）"执行。对于"风格词汇（适应目标语气）"，作为基准使用但调整措辞以适应目标风格。在适用时优先使用"派生别名（首选）"作为简短形式。将"相关术语（仅供参考）"视为非约束性上下文。",
+  "user_template": "输入：{text}"
 }

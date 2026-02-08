@@ -1,5 +1,5 @@
 {
   "keywords": {
-    "prompt": "Extract glossary-relevant entities from the text for terminology consistency.\n\nTarget entities (when they appear in the text):\n- Character names, place names, faction/organization names\n- Races, titles, quests\n- Book/scroll names, spells, items, artifacts\n- Creature names and other Elder Scrolls lore terms\n\nStrict rules:\n1) Output ONLY terms that appear in the text as contiguous spans (verbatim, except minor surrounding punctuation).\n2) Do NOT infer, expand, normalize, or translate.\n3) Do NOT output common words, abstract nouns, emotions, or generic categories unless part of a specific proper-noun phrase.\n4) Prefer the MOST specific phrase present in the text; avoid returning both a phrase and its component words unless they appear separately.\n5) Keep original casing/spelling from the text. If unsure, omit.\n6) Return ONLY a JSON array of strings. Return [] if none.\n\nText: \"{text}\""
+    "prompt": "从文本中提取与术语表相关的实体，以保持术语一致性。\n\n目标实体（当它们出现在文本中时）：\n- 角色名称、地名、派系/组织名称\n- 种族、头衔、任务\n- 书籍/卷轴名称、法术、物品、神器\n- 生物名称和其他上古卷轴剧情术语\n\n严格规则：\n1) 仅输出文本中作为连续跨度出现的术语（逐字逐句，除了次要的周围标点符号）。\n2) 不要推断、扩展、规范化或翻译。\n3) 不要输出常用词、抽象名词、情感或通用类别，除非它们是特定专有名词短语的一部分。\n4) 优先选择文本中出现的最具体的短语；避免同时返回短语及其组成词，除非它们单独出现。\n5) 保持文本中的原始大小写/拼写。如有疑问，则省略。\n6) 仅返回字符串的JSON数组。如果没有则返回 []。\n\n文本：\"{text}\""
   }
 }
