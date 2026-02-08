@@ -1210,8 +1210,8 @@ class MainWindow(QMainWindow):
         if not styles:
             styles = ["default", "nsfw"]
 
-        # Deterministic order: keep default/nsfw first if present; then the rest sorted.
-        preferred_order = ["default", "nsfw"]
+        # Deterministic order: keep well-known styles first if present; then the rest sorted.
+        preferred_order = ["default", "nsfw", "lore_accurate", "modern_colloquial", "erotic_novel"]
         ordered: list[str] = []
         for p in preferred_order:
             if p in styles and p not in ordered:

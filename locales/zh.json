@@ -114,7 +114,7 @@
     "language_option_de": "德语",
     "language_option_es": "西班牙语",
     "language_option_ru": "俄语",
-    "tooltip_prompt_style": "选择使用的提示词风格：'default' 为常规本地化风格，'nsfw' 为成人/Explicit 风格（不会进行软化或自我审查）。",
+    "tooltip_prompt_style": "选择使用的提示词风格：'default' 为常规本地化风格，'nsfw' 为成人/Explicit 风格（不会进行软化或自我审查），'lore_accurate' 为最大化游戏内设定忠实度，'modern_colloquial' 为现代口语化风格，'erotic_novel' 为文学性成人小说品质。",
     "btn_save_config": "保存配置",
     "title_open_xml": "打开 XML 文件",
     "msg_loading_file": "正在加载文件: {path}",
