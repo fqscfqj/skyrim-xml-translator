@@ -114,7 +114,7 @@
     "language_option_de": "German",
     "language_option_es": "Spanish",
     "language_option_ru": "Russian",
-    "tooltip_prompt_style": "Select prompt style: 'default' for standard localization, 'nsfw' for explicit content (no softening/censorship).",
+    "tooltip_prompt_style": "Select prompt style: 'default' for standard localization, 'nsfw' for explicit content (no censorship), 'lore_accurate' for maximum lore fidelity, 'modern_colloquial' for natural everyday speech, 'erotic_novel' for literary adult fiction quality.",
     "btn_save_config": "Save Config",
     "title_open_xml": "Open XML file",
     "msg_loading_file": "Loading file: {path}",

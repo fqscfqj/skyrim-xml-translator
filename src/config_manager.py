@@ -23,7 +23,7 @@ class ConfigManager:
         return {
             "general": {
                 "log_level": "INFO",
-                "prompt_style": "default",  # Options: "default", "nsfw"
+                "prompt_style": "default",  # Options: "default", "nsfw", "lore_accurate", "modern_colloquial", "erotic_novel"
                 "language": "auto",
                 "source_language": "auto",
                 "target_language": "zh",

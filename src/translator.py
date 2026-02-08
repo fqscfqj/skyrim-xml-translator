@@ -26,6 +26,34 @@ class Translator:
     _STRIP_EDGES_RE = re.compile(r"^[\s\-·•]+|[\s\-·•]+$")
     _ALNUM_START_RE = re.compile(r"^[a-z0-9_]")
     _ALNUM_END_RE = re.compile(r"[a-z0-9_]$")
+    _CAPITALIZED_TOKEN_RE = re.compile(r"^[A-Z][a-zA-Z]")
+    _ALL_UPPER_RE = re.compile(r"^[A-Z][A-Z\s\-']+$")
+    _COMMON_WORD_RE = re.compile(
+        r"^(?:the|a|an|and|or|but|in|on|at|to|for|of|with|by|from|is|are|was|were|"
+        r"be|been|being|have|has|had|do|does|did|will|would|shall|should|may|might|"
+        r"can|could|must|not|no|yes|up|out|off|over|under|again|further|then|once|"
+        r"here|there|when|where|why|how|all|each|every|both|few|more|most|other|"
+        r"some|such|than|too|very|just|about|after|before|between|through|during|"
+        r"above|below|into|your|my|his|her|its|our|their|me|him|them|us|she|he|it|"
+        r"we|they|you|i|what|which|who|whom|this|that|these|those|am|if|so|go|get|"
+        r"got|take|took|make|made|come|came|give|gave|say|said|tell|told|think|"
+        r"know|knew|see|saw|want|need|use|find|found|put|set|run|let|keep|begin|"
+        r"show|try|ask|work|seem|feel|leave|call|good|new|old|big|small|long|"
+        r"great|little|right|left|high|low|own|same|last|next|hard|soft|hot|cold|"
+        r"full|empty|young|dark|light|white|black|red|blue|green|strong|weak|"
+        r"large|open|close|still|also|back|well|much|even|now|only|just|already|"
+        r"fill|muscular|tight|inside|deep|rough|wet|thick|heavy|raw|warm|body|"
+        r"hand|head|face|eye|mouth|skin|chest|arm|leg|finger|hair|heart|blood|"
+        r"flesh|bone|ass|breast|cock|dick|pussy|hole|tongue|lip|throat|neck|"
+        r"shoulder|waist|hip|thigh|belly|muscle|wolf|bear|dragon|sword|shield|"
+        r"bow|arrow|axe|dagger|mace|staff|armor|helmet|boot|glove|ring|amulet|"
+        r"potion|scroll|gem|gold|iron|steel|silver|leather|cloth|wood|stone|fire|"
+        r"ice|frost|lightning|storm|wind|rain|snow|sun|moon|star|night|day|dawn|"
+        r"dusk|morning|evening|north|south|east|west|mountain|river|lake|sea|"
+        r"forest|cave|mine|road|bridge|gate|wall|tower|door|floor|room|bed|"
+        r"table|chair|food|drink|wine|ale|mead|bread|meat|fish|water)$",
+        re.IGNORECASE,
+    )
     def __init__(self, llm_client: LLMClient, rag_engine: RAGEngine):
         self.llm_client = llm_client
         self.rag_engine = rag_engine
@@ -215,11 +243,75 @@ class Translator:
 
         return alias_lines
 
+    def _classify_term_type(self, term: Optional[str]) -> str:
+        """Classify a glossary term as 'proper_noun' or 'stylistic'.
+
+        Proper nouns (place names, character names, faction names, etc.) are
+        non-negotiable and must be translated exactly as the glossary says.
+        Stylistic vocabulary (common nouns, verbs, adjectives) can be adapted
+        to match the target tone/style.
+
+        Args:
+            term: The glossary term to classify. May be None or non-string,
+                  in which case 'stylistic' is returned.
+        """
+        if not term or not isinstance(term, str):
+            return "stylistic"
+        term = term.strip()
+        if not term:
+            return "stylistic"
+
+        # CJK terms: treat as proper nouns since they are likely already-localized names
+        if self._CJK_CHAR_RE.search(term):
+            return "proper_noun"
+
+        # Single common English word -> stylistic
+        tokens = term.split()
+        if len(tokens) == 1:
+            if self._COMMON_WORD_RE.match(term):
+                return "stylistic"
+            # Single capitalized token (e.g. "Whiterun", "Skyrim") -> proper noun
+            if self._CAPITALIZED_TOKEN_RE.match(term):
+                return "proper_noun"
+            # All lowercase single word -> stylistic
+            if term == term.lower():
+                return "stylistic"
+            return "proper_noun"
+
+        # ALL-CAPS multi-word (e.g. "THE ELDER SCROLLS") -> proper noun
+        if self._ALL_UPPER_RE.match(term):
+            return "proper_noun"
+
+        # Multi-word: if the first significant word is capitalized and it's NOT
+        # just a common English phrase, treat as proper noun (name/place/faction).
+        # Filter out leading articles/prepositions.
+        skip_words = {"the", "a", "an", "of", "in", "on", "at", "to", "for", "and", "or"}
+        first_significant = None
+        for t in tokens:
+            if t.lower() not in skip_words:
+                first_significant = t
+                break
+
+        if first_significant and self._CAPITALIZED_TOKEN_RE.match(first_significant):
+            # Check if ALL significant words are capitalized (title case) -> proper noun
+            significant_tokens = [t for t in tokens if t.lower() not in skip_words]
+            if significant_tokens and all(
+                self._CAPITALIZED_TOKEN_RE.match(t) for t in significant_tokens
+            ):
+                return "proper_noun"
+
+        # Fallback: if term contains any capitalized word, lean toward proper noun
+        if any(self._CAPITALIZED_TOKEN_RE.match(t) for t in tokens):
+            return "proper_noun"
+
+        return "stylistic"
+
     def _build_glossary_context(self, source_text: str, matched_terms: dict) -> str:
         if not matched_terms:
             return ""
 
-        exact_lines: List[str] = []
+        proper_noun_lines: List[str] = []
+        stylistic_lines: List[str] = []
         related_lines: List[str] = []
 
         for k, v in matched_terms.items():
@@ -231,14 +323,18 @@ class Translator:
             v_str = "" if v is None else str(v)
             if self._term_appears_in_source(k, source_text):
                 display_term = self._strip_term_edge_punct(k) or k
-                exact_lines.append(f"- {display_term} : {v_str}")
+                term_type = self._classify_term_type(display_term)
+                if term_type == "proper_noun":
+                    proper_noun_lines.append(f"- {display_term} : {v_str}")
+                else:
+                    stylistic_lines.append(f"- {display_term} : {v_str}")
             else:
                 related_lines.append(f"- {k} : {v_str}")
 
         alias_lines = self._derive_preferred_alias_lines(source_text, matched_terms)
 
         # Nothing useful to show.
-        if not exact_lines and not alias_lines and not related_lines:
+        if not proper_noun_lines and not stylistic_lines and not alias_lines and not related_lines:
             return ""
 
         glossary_header = self.prompt_manager.get(
@@ -247,8 +343,20 @@ class Translator:
         )
 
         sections: List[str] = []
-        if exact_lines:
-            sections.append("### Exact Matches (mandatory)\n" + "\n".join(exact_lines))
+        if proper_noun_lines:
+            sections.append(
+                "### Non-Negotiable Terms (mandatory)\n"
+                "These are proper nouns (names, places, factions). "
+                "You MUST use the exact translations below.\n"
+                + "\n".join(proper_noun_lines)
+            )
+        if stylistic_lines:
+            sections.append(
+                "### Stylistic Vocabulary (adapt to target tone)\n"
+                "These are common words/phrases. Use the translations as a baseline "
+                "but you MAY adapt wording to match the target style and tone.\n"
+                + "\n".join(stylistic_lines)
+            )
         if alias_lines:
             sections.append("### Derived Aliases (preferred)\n" + "\n".join(alias_lines))
         if related_lines:

@@ -1,5 +1,5 @@
 {
   "glossary_header": "## Dictionary\nUse this dictionary to keep translations consistent:",
-  "glossary_instruction_append": "\n\nInstruction: Enforce only 'Exact Matches (mandatory)' when the exact term appears in the source. Prefer 'Derived Aliases (preferred)' for short forms when applicable. Treat 'Related Terms (reference only)' as non-binding context.",
+  "glossary_instruction_append": "\n\nInstruction: Enforce 'Non-Negotiable Terms (mandatory)' EXACTLY when the term appears in the source. For 'Stylistic Vocabulary (adapt to target tone)', use as baseline but adapt wording to fit the target style. Prefer 'Derived Aliases (preferred)' for short forms when applicable. Treat 'Related Terms (reference only)' as non-binding context.",
   "user_template": "Input: {text}"
 }
