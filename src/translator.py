@@ -243,13 +243,17 @@ class Translator:
 
         return alias_lines
 
-    def _classify_term_type(self, term: str) -> str:
+    def _classify_term_type(self, term: Optional[str]) -> str:
         """Classify a glossary term as 'proper_noun' or 'stylistic'.
 
         Proper nouns (place names, character names, faction names, etc.) are
         non-negotiable and must be translated exactly as the glossary says.
         Stylistic vocabulary (common nouns, verbs, adjectives) can be adapted
         to match the target tone/style.
+
+        Args:
+            term: The glossary term to classify. May be None or non-string,
+                  in which case 'stylistic' is returned.
         """
         if not term or not isinstance(term, str):
             return "stylistic"
@@ -341,7 +345,7 @@ class Translator:
         sections: List[str] = []
         if proper_noun_lines:
             sections.append(
-                "### Non-Negotiable Terms (mandatory — use EXACTLY as listed)\n"
+                "### Non-Negotiable Terms (mandatory)\n"
                 "These are proper nouns (names, places, factions). "
                 "You MUST use the exact translations below.\n"
                 + "\n".join(proper_noun_lines)

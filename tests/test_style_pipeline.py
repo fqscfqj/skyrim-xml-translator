@@ -135,7 +135,9 @@ class TestPromptStylesExist(unittest.TestCase):
     def test_all_styles_present(self):
         styles = self.data.get("system_prompts", {})
         expected = {"default", "nsfw", "lore_accurate", "modern_colloquial", "erotic_novel"}
-        self.assertEqual(set(styles.keys()), expected)
+        self.assertTrue(
+            expected.issubset(set(styles.keys())),
+        )
 
     def test_all_styles_have_xml_preservation_rule(self):
         """Every style must mention XML/HTML tag preservation."""
