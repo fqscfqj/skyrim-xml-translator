@@ -643,7 +643,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(i18n.t("window_title"))
         self.resize(900, 700)
         self.setAcceptDrops(True)
-        
+
         # Set window icon
         icon_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'assets', 'logo.png')
         if os.path.exists(icon_path):
@@ -656,17 +656,38 @@ class MainWindow(QMainWindow):
         self.model_param_controls = {}
         self.search_param_controls = {}
         self.worker = None  # Translation worker reference
+        self.glossary_worker = None  # Glossary worker reference
         self.stop_receiving_results = False  # Flag to immediately stop receiving translation results
-        
+
         # Cache for RAG debug info to avoid re-running translation for visualization
         # Key: original_text, Value: debug_info dict
         self.rag_debug_cache = {}
-        
+
         # Pagination state
         self.current_page = 1
         self.items_per_page = 200
 
         self.init_ui()
+
+    def closeEvent(self, event):
+        """Handle window close event to properly cleanup threads"""
+        # Stop and wait for translation worker
+        if self.worker and self.worker.isRunning():
+            self.worker.stop()
+            self.worker.wait(3000)  # Wait up to 3 seconds
+            if self.worker.isRunning():
+                self.worker.terminate()
+                self.worker.wait(1000)
+
+        # Stop and wait for glossary worker
+        if self.glossary_worker and self.glossary_worker.isRunning():
+            self.glossary_worker.stop()
+            self.glossary_worker.wait(3000)  # Wait up to 3 seconds
+            if self.glossary_worker.isRunning():
+                self.glossary_worker.terminate()
+                self.glossary_worker.wait(1000)
+
+        event.accept()
 
     def dragEnterEvent(self, a0: Optional[QDragEnterEvent]) -> None:
         # Parameter name and Optional handling match the PyQt6 stub signature to satisfy static type checkers
