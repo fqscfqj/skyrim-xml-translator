@@ -22,7 +22,7 @@ def _make_translator() -> Translator:
     rag_engine.config = config
 
     # Patch PromptManager so it doesn't try to load files from disk
-    with patch("src.translator.PromptManager") as MockPM:
+    with patch("src.translation.translator.PromptManager") as MockPM:
         pm_instance = MagicMock()
         # Return the default value (second positional arg) when .get() is called
         pm_instance.get = MagicMock(side_effect=lambda key, default=None: default)

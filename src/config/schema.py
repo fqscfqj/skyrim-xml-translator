@@ -1,0 +1,155 @@
+"""Typed configuration schema with validation for trx2."""
+
+from dataclasses import dataclass, field, fields, asdict
+from typing import Any, Optional
+
+
+@dataclass
+class LLMConfig:
+    api_key: str = ""
+    base_url: str = "https://api.openai.com/v1"
+    model: str = "gpt-3.5-turbo"
+    max_retries: int = 3
+    backoff_base: float = 0.5
+    stream: bool = False
+    request_timeout: int = 30
+    parameters: dict = field(default_factory=lambda: {
+        "temperature": None,
+        "top_p": None,
+        "frequency_penalty": None,
+        "presence_penalty": None,
+        "max_tokens": None,
+    })
+
+
+@dataclass
+class EmbeddingConfig:
+    api_key: str = ""
+    base_url: str = "https://api.openai.com/v1"
+    model: str = "text-embedding-3-large"
+    dimensions: int = 1536
+
+
+@dataclass
+class RAGConfig:
+    similarity_threshold: float = 0.75
+    short_term_max_tokens: int = 6
+    short_term_max_results: int = 5
+    long_term_max_results: int = 2
+
+
+@dataclass
+class GeneralConfig:
+    log_level: str = "INFO"
+    prompt_style: str = "default"
+    language: str = "auto"
+    source_language: str = "auto"
+    target_language: str = "zh"
+    log_file: str = "logs/app.log"
+
+
+@dataclass
+class PathsConfig:
+    glossary_file: str = "glossary.json"
+    vector_index_file: str = "vector_index.npy"
+    stopwords_file: str = "data/stopwords.json"
+
+
+@dataclass
+class ThreadsConfig:
+    translation: int = 5
+    vectorization: int = 5
+
+
+@dataclass
+class CacheConfig:
+    translation_cache_size: int = 50000
+    embedding_cache_size: int = 100000
+    cache_persist_dir: str = "cache"
+    cache_ttl_hours: float = 0  # 0 = no expiry
+
+
+@dataclass
+class AppConfig:
+    llm: LLMConfig = field(default_factory=LLMConfig)
+    llm_search: LLMConfig = field(default_factory=LLMConfig)
+    embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
+    rag: RAGConfig = field(default_factory=RAGConfig)
+    general: GeneralConfig = field(default_factory=GeneralConfig)
+    paths: PathsConfig = field(default_factory=PathsConfig)
+    threads: ThreadsConfig = field(default_factory=ThreadsConfig)
+    cache: CacheConfig = field(default_factory=CacheConfig)
+
+
+# Map section names to their dataclass types
+_SECTION_MAP: dict[str, type] = {
+    "llm": LLMConfig,
+    "llm_search": LLMConfig,
+    "embedding": EmbeddingConfig,
+    "rag": RAGConfig,
+    "general": GeneralConfig,
+    "paths": PathsConfig,
+    "threads": ThreadsConfig,
+    "cache": CacheConfig,
+}
+
+
+def validate_config(raw: dict) -> list[str]:
+    """Validate a raw config dict against the schema. Returns list of error strings."""
+    errors: list[str] = []
+    if not isinstance(raw, dict):
+        return ["Config must be a JSON object"]
+
+    for section_name, dc_type in _SECTION_MAP.items():
+        section = raw.get(section_name)
+        if section is None:
+            continue
+        if not isinstance(section, dict):
+            errors.append(f"'{section_name}' must be an object")
+            continue
+
+        dc_fields = {f.name: f for f in fields(dc_type)}
+        for key, value in section.items():
+            if key not in dc_fields:
+                continue  # extra keys are allowed for forward compat
+            f = dc_fields[key]
+            expected = f.type
+            # Basic type checks for primitives
+            if expected == "int" and not isinstance(value, int) and value is not None:
+                errors.append(f"'{section_name}.{key}' should be int, got {type(value).__name__}")
+            elif expected == "float" and not isinstance(value, (int, float)) and value is not None:
+                errors.append(f"'{section_name}.{key}' should be float, got {type(value).__name__}")
+            elif expected == "str" and not isinstance(value, str):
+                errors.append(f"'{section_name}.{key}' should be str, got {type(value).__name__}")
+            elif expected == "bool" and not isinstance(value, bool) and value is not None:
+                errors.append(f"'{section_name}.{key}' should be bool, got {type(value).__name__}")
+
+    return errors
+
+
+def _dict_to_dataclass(dc_type: type, data: dict) -> Any:
+    """Convert a dict to a dataclass, ignoring unknown keys."""
+    if not isinstance(data, dict):
+        return dc_type()
+    known = {f.name for f in fields(dc_type)}
+    filtered = {k: v for k, v in data.items() if k in known}
+    return dc_type(**filtered)
+
+
+def config_to_dataclass(raw: dict) -> AppConfig:
+    """Convert a raw JSON config dict to a typed AppConfig."""
+    return AppConfig(
+        llm=_dict_to_dataclass(LLMConfig, raw.get("llm", {})),
+        llm_search=_dict_to_dataclass(LLMConfig, raw.get("llm_search", {})),
+        embedding=_dict_to_dataclass(EmbeddingConfig, raw.get("embedding", {})),
+        rag=_dict_to_dataclass(RAGConfig, raw.get("rag", {})),
+        general=_dict_to_dataclass(GeneralConfig, raw.get("general", {})),
+        paths=_dict_to_dataclass(PathsConfig, raw.get("paths", {})),
+        threads=_dict_to_dataclass(ThreadsConfig, raw.get("threads", {})),
+        cache=_dict_to_dataclass(CacheConfig, raw.get("cache", {})),
+    )
+
+
+def dataclass_to_dict(config: AppConfig) -> dict:
+    """Convert an AppConfig back to a JSON-serializable dict."""
+    return asdict(config)
