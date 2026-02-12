@@ -2,7 +2,7 @@ import json
 import re
 from bisect import bisect_right
 from typing import List, Optional
-from src.llm_client import LLMClient
+from src.llm_client import LLMClient, RequestCancelledError
 from src.rag_engine import RAGEngine
 from src.logging_helper import emit as log_emit
 from src.prompt_manager import PromptManager
@@ -700,7 +700,22 @@ class Translator:
         
         return not has_text_content
 
-    def translate_text(self, text, use_rag=True, log_callback=None, max_retries=2, return_debug_info: bool = False):
+    @staticmethod
+    def _check_cancelled(cancel_event):
+        if cancel_event is not None and cancel_event.is_set():
+            raise RequestCancelledError("Translation cancelled by user.")
+
+    def translate_text(
+        self,
+        text,
+        use_rag=True,
+        log_callback=None,
+        max_retries=2,
+        return_debug_info: bool = False,
+        cancel_event=None,
+        pause_event=None,
+    ):
+        self._check_cancelled(cancel_event)
         if not text or not str(text).strip():
             # Normalize empty inputs to empty string
             if return_debug_info:
@@ -737,6 +752,7 @@ class Translator:
             self.prompt_manager.reload_if_changed()
         except Exception:
             pass
+        self._check_cancelled(cancel_event)
 
         glossary_context = ""
         keywords = []
@@ -748,12 +764,18 @@ class Translator:
             threshold = self.rag_engine.config.get("rag", "similarity_threshold", 0.75)
             # 1. Extract keywords (RAG)
             log_emit(log_callback, self.rag_engine.config, 'DEBUG', f"[RAG] Starting keyword extraction for text (length={len(text)}): {text[:200]}{'...' if len(text) > 200 else ''}", module='translator', func='translate_text')
-            keywords = self.rag_engine.extract_keywords(text, log_callback=log_callback)
+            keywords = self.rag_engine.extract_keywords(
+                text,
+                log_callback=log_callback,
+                cancel_event=cancel_event,
+                pause_event=pause_event,
+            )
             # Log extraction result
             try:
                 log_emit(log_callback, self.rag_engine.config, 'DEBUG', f"[RAG] Translator received {len(keywords)} keywords: {keywords}", module='translator', func='translate_text', extra={'keywords': keywords})
             except Exception:
                 pass
+            self._check_cancelled(cancel_event)
             
             # 2. Search for terms (Vector Search)
             search_result = self.rag_engine.search_terms(
@@ -762,6 +784,7 @@ class Translator:
                 log_callback=log_callback,
                 source_text=text,  # Pass source text to filter containment matches
                 return_debug=True,  # Get debug info for caching
+                cancel_event=cancel_event,
             )
             
             # Handle return_debug result
@@ -786,6 +809,7 @@ class Translator:
             # 3. Construct glossary context (Limit terms)
             if matched_terms:
                 glossary_context = self._build_glossary_context(text, matched_terms)
+            self._check_cancelled(cancel_event)
 
         # 4. Construct Prompt
         prompt_style = self.rag_engine.config.get("general", "prompt_style", "default")
@@ -862,6 +886,7 @@ class Translator:
         
         for retry_count in range(max_retries + 1):
             try:
+                self._check_cancelled(cancel_event)
                 if retry_count > 0:
                     # 根据检测到的问题类型，构造不同的重试提示
                     if untranslated_fragments:
@@ -890,10 +915,23 @@ class Translator:
                     current_messages = messages
                 
                 log_emit(log_callback, self.rag_engine.config, 'DEBUG', f"Translate call: message_len={len(text)} use_rag={use_rag} retry={retry_count}", module='translator', func='translate_text')
-                response = self.llm_client.chat_completion(current_messages, log_callback=log_callback)
+                response = self.llm_client.chat_completion(
+                    current_messages,
+                    log_callback=log_callback,
+                    cancel_event=cancel_event,
+                    pause_event=pause_event,
+                )
+                self._check_cancelled(cancel_event)
                 
                 # Parse JSON
-                translation = self._parse_translation_response(response, text, messages, log_callback)
+                translation = self._parse_translation_response(
+                    response,
+                    text,
+                    messages,
+                    log_callback,
+                    cancel_event=cancel_event,
+                    pause_event=pause_event,
+                )
                 last_translation = translation
                 
                 # 检查是否完全未翻译
@@ -943,6 +981,8 @@ class Translator:
                         return final_translation, debug_info
                     return final_translation
                     
+            except RequestCancelledError:
+                raise
             except Exception as e:
                 log_emit(log_callback, self.rag_engine.config, 'ERROR', f"Translation failed: {e}", exc=e, module='translator', func='translate_text')
                 if retry_count == max_retries:
@@ -956,8 +996,17 @@ class Translator:
             return final_translation, debug_info
         return final_translation
     
-    def _parse_translation_response(self, response: str, original_text: str, messages: list, log_callback=None) -> str:
+    def _parse_translation_response(
+        self,
+        response: str,
+        original_text: str,
+        messages: list,
+        log_callback=None,
+        cancel_event=None,
+        pause_event=None,
+    ) -> str:
         """解析 LLM 的翻译响应，提取 JSON 中的 translation 字段"""
+        self._check_cancelled(cancel_event)
         # Clean potential markdown code blocks
         clean_response = self._MARKDOWN_CODE_RE.sub('', response).strip()
         
@@ -981,6 +1030,7 @@ class Translator:
         # If we couldn't extract JSON, try asking the LLM once to reformat as JSON
         followup_response = None
         try:
+            self._check_cancelled(cancel_event)
             # Use only the original user message content (without system prompt) to avoid prompt leakage
             original_input = None
             for msg in messages:
@@ -992,7 +1042,12 @@ class Translator:
                 {"role": "system", "content": "You are a JSON formatter. Output only valid JSON, nothing else."},
                 {"role": "user", "content": f"The translation task was: {original_input}\n\nThe response was: {response}\n\nExtract the Chinese translation and return it as JSON: {{\"translation\": \"...\"}}\nRespond only with valid JSON, no other text."}
             ]
-            followup_response = self.llm_client.chat_completion(followup_msg, log_callback=log_callback)
+            followup_response = self.llm_client.chat_completion(
+                followup_msg,
+                log_callback=log_callback,
+                cancel_event=cancel_event,
+                pause_event=pause_event,
+            )
             clean_followup = self._MARKDOWN_CODE_RE.sub('', followup_response).strip()
             data = json.loads(clean_followup)
             result = str(data.get("translation", ""))
@@ -1009,6 +1064,8 @@ class Translator:
                 log_emit(log_callback, self.rag_engine.config, 'WARNING', 
                         f"Followup response may contain prompt leakage, using original response instead. Followup result: {result[:100]}...", 
                         module='translator', func='_parse_translation_response')
+        except RequestCancelledError:
+            raise
         except json.JSONDecodeError:
             if followup_response:
                 log_emit(log_callback, self.rag_engine.config, 'WARNING', f"Followup JSON Parse Error. Response: {followup_response}", module='translator', func='_parse_translation_response')

@@ -33,6 +33,8 @@ class ConfigManager:
                 "api_key": "",
                 "base_url": "https://api.openai.com/v1",
                 "model": "gpt-3.5-turbo",
+                "stream": False,
+                "request_timeout": 12,
                 "parameters": {
                     "temperature": None,
                     "top_p": None,
@@ -47,6 +49,8 @@ class ConfigManager:
                 "api_key": "",
                 "base_url": "https://api.openai.com/v1",
                 "model": "gpt-3.5-turbo",
+                "stream": False,
+                "request_timeout": 8,
                 "parameters": {
                     "temperature": None,
                     "top_p": None,

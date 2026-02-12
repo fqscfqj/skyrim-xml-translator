@@ -1,9 +1,10 @@
 import sys
 import os
 import threading
+from collections import deque
 from typing import Optional, cast
 import csv
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QLabel, QLineEdit, QPushButton, QTextEdit, 
                              QTabWidget, QFileDialog, QCheckBox, QProgressBar, 
@@ -14,7 +15,7 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QWheelEvent, QGuiApplication
 
 from src.config_manager import ConfigManager
-from src.llm_client import LLMClient
+from src.llm_client import LLMClient, RequestCancelledError
 from src.rag_engine import RAGEngine
 from src.xml_processor import XMLProcessor
 from src.translator import Translator
@@ -94,6 +95,7 @@ class Worker(QThread):
     result_ready = pyqtSignal(int, str) # row_index, translation
     rag_debug_ready = pyqtSignal(str, object) # original_text, debug_info
     finished = pyqtSignal()
+    _WAIT_TIMEOUT_SECONDS = 0.05
 
     def __init__(self, items_to_process, translator, num_threads=1):
         super().__init__()
@@ -102,151 +104,196 @@ class Worker(QThread):
         self.num_threads = num_threads
         self.is_running = True
         self.stop_receiving = False  # Flag to immediately stop receiving data
+        self._stop_event = threading.Event()
         self._pause_event = threading.Event()
         self._pause_event.set()  # Initially not paused (set = running)
+        self._state_lock = threading.Lock()
+        self._active_cancel_event = threading.Event()
+
+    def _current_cancel_event(self):
+        with self._state_lock:
+            return self._active_cancel_event
+
+    def _cancel_active_requests(self):
+        with self._state_lock:
+            self._active_cancel_event.set()
+
+    def _start_new_request_window(self):
+        with self._state_lock:
+            self._active_cancel_event = threading.Event()
 
     def run(self):
+        executor = None
         try:
             total = len(self.items_to_process)
-            
-            # 优化：检测重复内容，相同内容只翻译一次
-            # 构建源文本到行索引列表的映射
+
             source_to_rows = {}  # source_text -> [row_idx1, row_idx2, ...]
             for row_idx, source in self.items_to_process:
                 if source not in source_to_rows:
                     source_to_rows[source] = []
                 source_to_rows[source].append(row_idx)
-            
-            # 只需要翻译的唯一文本列表
+
             unique_items = [(rows[0], source) for source, rows in source_to_rows.items()]
             unique_count = len(unique_items)
             duplicates_saved = total - unique_count
-            
+            source_row_counts = {source: len(rows) for source, rows in source_to_rows.items()}
+
             if duplicates_saved > 0:
-                log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', 
-                        i18n.t("msg_duplicate_optimization").format(total=total, unique=unique_count, saved=duplicates_saved), 
-                        module='gui_main', func='Worker.run')
-            
-            log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', i18n.t("msg_starting_translation").format(total=unique_count, threads=self.num_threads), module='gui_main', func='Worker.run')
+                log_emit(
+                    self.log.emit,
+                    self.translator.rag_engine.config,
+                    'INFO',
+                    i18n.t('msg_duplicate_optimization').format(total=total, unique=unique_count, saved=duplicates_saved),
+                    module='gui_main',
+                    func='Worker.run',
+                )
 
-            processed_count = 0
-            # 用于存储已翻译结果的缓存
+            log_emit(
+                self.log.emit,
+                self.translator.rag_engine.config,
+                'INFO',
+                i18n.t('msg_starting_translation').format(total=unique_count, threads=self.num_threads),
+                module='gui_main',
+                func='Worker.run',
+            )
+
             translation_cache = {}  # source_text -> translation
+            completed_sources = set()
+            completed_total_rows = 0
+            pending_items = deque(unique_items)
 
-            def translate_task(item):
-                row_idx, source = item
-                if not self.is_running or self.stop_receiving:
-                    return None
-                # Wait while paused using threading.Event for efficient blocking.
-                # Note: In-flight translations (currently executing translate_text) 
-                # will complete before pause takes effect for that task.
-                self._pause_event.wait()
-                if not self.is_running or self.stop_receiving:
-                    return None
+            def translate_task(item, cancel_event):
+                _, source = item
+                if self._stop_event.is_set():
+                    return ('cancelled', item, None, None)
                 try:
                     translation, debug_info = self.translator.translate_text(
                         source,
                         log_callback=self.log.emit,
                         return_debug_info=True,
+                        cancel_event=cancel_event,
+                        pause_event=self._pause_event,
                     )
-                    return (row_idx, source, translation, debug_info)
+                    return ('ok', item, translation, debug_info)
+                except RequestCancelledError:
+                    return ('cancelled', item, None, None)
                 except Exception as e:
-                    return (row_idx, source, None, None, str(e))
+                    return ('error', item, None, str(e))
 
-            # Limit concurrent tasks to reduce memory pressure
-            # Each task holds embedding vectors and LLM context in memory
-            max_concurrent = min(self.num_threads, 4)  # Cap at 4 to limit memory
-            
-            from concurrent.futures import wait, FIRST_COMPLETED
-            
-            with ThreadPoolExecutor(max_workers=max_concurrent) as executor:
-                # Use a set to keep track of active futures
-                active_futures = set()
-                # Iterator for unique items only
-                items_iter = iter(unique_items)
-                
-                # Fill the pool initially - only max_concurrent tasks at a time
-                for _ in range(max_concurrent):
+            max_concurrent = min(max(1, int(self.num_threads)), 4)
+            executor = ThreadPoolExecutor(max_workers=max_concurrent)
+            active_futures = {}
+
+            while pending_items or active_futures:
+                if self._stop_event.is_set():
+                    break
+
+                while (
+                    not self._stop_event.is_set()
+                    and self._pause_event.is_set()
+                    and len(active_futures) < max_concurrent
+                    and pending_items
+                ):
+                    item = pending_items.popleft()
+                    cancel_event = self._current_cancel_event()
+                    future = executor.submit(translate_task, item, cancel_event)
+                    active_futures[future] = item
+
+                if not active_futures:
+                    if self._pause_event.is_set() and not pending_items:
+                        break
+                    self.msleep(int(self._WAIT_TIMEOUT_SECONDS * 1000))
+                    continue
+
+                done, _ = wait(
+                    tuple(active_futures.keys()),
+                    timeout=self._WAIT_TIMEOUT_SECONDS,
+                    return_when=FIRST_COMPLETED,
+                )
+                if not done:
+                    continue
+
+                for future in done:
+                    item = active_futures.pop(future, None)
+                    if item is None:
+                        continue
+
+                    row_idx, source = item
                     try:
-                        item = next(items_iter)
-                        future = executor.submit(translate_task, item)
-                        active_futures.add(future)
-                    except StopIteration:
-                        break
-                
-                while active_futures:
-                    if not self.is_running or self.stop_receiving:
-                        executor.shutdown(wait=False)
-                        break
+                        status, _, translation, detail = future.result()
+                    except Exception as e:
+                        status = 'error'
+                        translation = None
+                        detail = str(e)
 
-                    # Wait for at least one future to complete using FIRST_COMPLETED
-                    done, not_done = wait(active_futures, return_when=FIRST_COMPLETED)
-                    
-                    for future in done:
-                        active_futures.remove(future)
-                        
-                        # Check stop_receiving flag before processing result
-                        if self.stop_receiving:
-                            continue
-                            
-                        result = future.result()
-                        
-                        if result:
-                            if len(result) == 4:
-                                row_idx, source, translation, debug_info = result
-                                safe_translation = str(translation) if translation is not None else ""
-                                safe_source = str(source) if source is not None else ""
-                                
-                                # 获取所有具有相同源文本的行
-                                all_rows = source_to_rows.get(source, [row_idx])
-                                
-                                # Check stop_receiving again before emitting results
-                                if not self.stop_receiving:
-                                    # Cache debug info for visualization
-                                    if debug_info and safe_source:
-                                        self.rag_debug_ready.emit(safe_source, debug_info)
-                                    
-                                    # 为所有相同内容的行发送翻译结果
-                                    for target_row in all_rows:
-                                        self.result_ready.emit(target_row, safe_translation)
-                                    
-                                    # 缓存翻译结果
-                                    translation_cache[source] = safe_translation
-                                    
-                                    if len(all_rows) > 1:
-                                        log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', 
-                                                f"[{processed_count+1}/{unique_count}] {safe_source[:20]}... -> {safe_translation[:20]}... (x{len(all_rows)} {i18n.t('msg_duplicate_applied')})", 
-                                                module='gui_main', func='Worker.run')
-                                    else:
-                                        log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', 
-                                                f"[{processed_count+1}/{unique_count}] {safe_source[:20]}... -> {safe_translation[:20]}...", 
-                                                module='gui_main', func='Worker.run')
-                            else:
-                                row_idx, source, _, _, error = result
-                                if not self.stop_receiving:
-                                    log_emit(self.log.emit, self.translator.rag_engine.config, 'ERROR', f"Error translating {str(source)[:20]}...: {error}", module='gui_main', func='Worker.run')
+                    if status == 'cancelled':
+                        if not self._stop_event.is_set():
+                            pending_items.appendleft(item)
+                        continue
 
-                        # Only update progress when not stopping to avoid inaccurate calculations
+                    if source not in completed_sources:
+                        completed_sources.add(source)
+                        completed_total_rows += source_row_counts.get(source, 1)
+                    completed_count = len(completed_sources)
+
+                    if status == 'ok':
+                        safe_translation = str(translation) if translation is not None else ''
+                        safe_source = str(source) if source is not None else ''
+                        all_rows = source_to_rows.get(source, [row_idx])
+
                         if not self.stop_receiving:
-                            processed_count += 1
-                            # 进度基于总项目数而非唯一项目数，以反映实际完成进度
-                            completed_total = sum(len(source_to_rows.get(s, [])) for s in translation_cache.keys())
-                            self.progress.emit(int(completed_total / total * 100))
+                            if detail and safe_source:
+                                self.rag_debug_ready.emit(safe_source, detail)
 
-                        # Submit next task
-                        try:
-                            if self.is_running and not self.stop_receiving:
-                                next_item = next(items_iter)
-                                new_future = executor.submit(translate_task, next_item)
-                                active_futures.add(new_future)
-                        except StopIteration:
-                            pass
+                            for target_row in all_rows:
+                                self.result_ready.emit(target_row, safe_translation)
 
-                if not self.stop_receiving:
-                    log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', i18n.t("msg_translation_finished"), module='gui_main', func='Worker.run')
-                self.finished.emit()
+                            translation_cache[source] = safe_translation
+
+                            if len(all_rows) > 1:
+                                log_emit(
+                                    self.log.emit,
+                                    self.translator.rag_engine.config,
+                                    'INFO',
+                                    f"[{completed_count}/{unique_count}] {safe_source[:20]}... -> {safe_translation[:20]}... (x{len(all_rows)} {i18n.t('msg_duplicate_applied')})",
+                                    module='gui_main',
+                                    func='Worker.run',
+                                )
+                            else:
+                                log_emit(
+                                    self.log.emit,
+                                    self.translator.rag_engine.config,
+                                    'INFO',
+                                    f"[{completed_count}/{unique_count}] {safe_source[:20]}... -> {safe_translation[:20]}...",
+                                    module='gui_main',
+                                    func='Worker.run',
+                                )
+                    else:
+                        if not self.stop_receiving:
+                            log_emit(
+                                self.log.emit,
+                                self.translator.rag_engine.config,
+                                'ERROR',
+                                f"Error translating {str(source)[:20]}...: {detail}",
+                                module='gui_main',
+                                func='Worker.run',
+                            )
+
+                    if not self.stop_receiving and total > 0:
+                        self.progress.emit(int(completed_total_rows / total * 100))
+
+            if not self.stop_receiving and not self._stop_event.is_set():
+                log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', i18n.t('msg_translation_finished'), module='gui_main', func='Worker.run')
         except Exception as e:
-            log_emit(self.log.emit, self.translator.rag_engine.config, 'ERROR', i18n.t("msg_worker_error").format(error=e), exc=e, module='gui_main', func='Worker.run')
+            log_emit(self.log.emit, self.translator.rag_engine.config, 'ERROR', i18n.t('msg_worker_error').format(error=e), exc=e, module='gui_main', func='Worker.run')
+        finally:
+            if executor is not None:
+                try:
+                    executor.shutdown(wait=False, cancel_futures=True)
+                except TypeError:
+                    executor.shutdown(wait=False)
+                except Exception:
+                    pass
             try:
                 self.finished.emit()
             except Exception:
@@ -254,16 +301,18 @@ class Worker(QThread):
 
     def stop(self):
         self.is_running = False
+        self._stop_event.set()
         self.stop_receiving = True  # Immediately stop receiving data
         self._pause_event.set()  # Unblock any waiting tasks so they can exit
+        self._cancel_active_requests()
 
     def pause(self):
+        self._cancel_active_requests()
         self._pause_event.clear()  # Block waiting tasks
 
     def resume(self):
+        self._start_new_request_window()
         self._pause_event.set()  # Unblock waiting tasks
-
-
 # Custom widgets to prevent accidental change via mouse wheel.
 # We still allow keyboard editing and explicit dropdown selection by the user.
 class NoWheelSpinBox(QSpinBox):
@@ -293,7 +342,7 @@ class NoWheelComboBox(QComboBox):
 
 
 class RAGVisualizationDialog(QDialog):
-    """对话框用于可视化展示RAG处理过程"""
+    """瀵硅瘽妗嗙敤浜庡彲瑙嗗寲灞曠ずRAG澶勭悊杩囩▼"""
     def __init__(self, parent, original_text, translated_text, translator, cached_debug_info=None):
         super().__init__(parent)
         self.original_text = original_text
@@ -316,7 +365,7 @@ class RAGVisualizationDialog(QDialog):
         main_splitter = QSplitter(Qt.Orientation.Vertical)
         layout.addWidget(main_splitter)
 
-        # 顶部：原文/译文并排
+        # 椤堕儴锛氬師鏂?璇戞枃骞舵帓
         top_widget = QWidget()
         top_layout = QHBoxLayout(top_widget)
         top_layout.setContentsMargins(0, 0, 0, 0)
@@ -344,7 +393,7 @@ class RAGVisualizationDialog(QDialog):
         top_layout.addWidget(translated_group, 1)
         main_splitter.addWidget(top_widget)
 
-        # 底部：RAG步骤树 + 详情面板
+        # Bottom area: RAG steps tree + detail panel
         bottom_widget = QWidget()
         bottom_layout = QHBoxLayout(bottom_widget)
         bottom_layout.setContentsMargins(0, 0, 0, 0)
@@ -386,7 +435,7 @@ class RAGVisualizationDialog(QDialog):
         main_splitter.setStretchFactor(0, 1)
         main_splitter.setStretchFactor(1, 3)
 
-        # 底部操作按钮
+        # 搴曢儴鎿嶄綔鎸夐挳
         btn_row = QHBoxLayout()
         btn_row.addStretch(1)
 
@@ -448,18 +497,18 @@ class RAGVisualizationDialog(QDialog):
         self.detail_text.setPlainText(full_text)
     
     def _load_rag_info(self):
-        """加载并显示RAG处理信息"""
+        """鍔犺浇骞舵樉绀篟AG澶勭悊淇℃伅"""
         try:
-            # 优先使用缓存的RAG调试信息，避免重复翻译
+            # 浼樺厛浣跨敤缂撳瓨鐨凴AG璋冭瘯淇℃伅锛岄伩鍏嶉噸澶嶇炕璇?
             if self.cached_debug_info:
                 debug_info = self.cached_debug_info
             else:
-                # 如果没有缓存，才重新获取RAG调试信息
+                # 濡傛灉娌℃湁缂撳瓨锛屾墠閲嶆柊鑾峰彇RAG璋冭瘯淇℃伅
                 debug_info = self.translator.get_rag_debug_info(self.original_text, use_rag=True)
 
             self.debug_info = debug_info
             
-            # 1. 关键词提取
+            # 1. 鍏抽敭璇嶆彁鍙?
             keywords_item = self._create_tree_item(None, i18n.t("step_keyword_extraction"))
             if debug_info.get("keywords"):
                 for keyword in debug_info["keywords"]:
@@ -468,19 +517,19 @@ class RAGVisualizationDialog(QDialog):
                 self._create_tree_item(keywords_item, i18n.t("msg_no_valid_terms"))
             keywords_item.setExpanded(True)
             
-            # 2. 向量检索 - 显示每个关键词的搜索结果
+            # 2. 鍚戦噺妫€绱?- 鏄剧ず姣忎釜鍏抽敭璇嶇殑鎼滅储缁撴灉
             search_item = self._create_tree_item(None, i18n.t("step_vector_search"))
             if isinstance(debug_info.get("search_results"), list):
                 for query_result in debug_info["search_results"]:
                     query = query_result.get("query", "")
                     query_node = self._create_tree_item(search_item, f"Query: {query}")
                     
-                    # 直接匹配
+                    # 鐩存帴鍖归厤
                     direct_match = query_result.get("direct_match")
                     if direct_match:
                         self._create_tree_item(query_node, f"Direct Match: {direct_match}", score=1.0, full_text=direct_match)
                     
-                    # 向量匹配
+                    # 鍚戦噺鍖归厤
                     vector_matches = query_result.get("vector_matches", [])
                     if vector_matches:
                         vector_node = self._create_tree_item(query_node, "Vector Matches")
@@ -488,7 +537,7 @@ class RAGVisualizationDialog(QDialog):
                             self._create_tree_item(vector_node, str(term), score=score, full_text=term)
                         vector_node.setExpanded(True)
                     
-                    # 包含匹配
+                    # 鍖呭惈鍖归厤
                     containment_matches = query_result.get("containment_matches", [])
                     if containment_matches:
                         contain_node = self._create_tree_item(query_node, "Containment Matches")
@@ -498,31 +547,31 @@ class RAGVisualizationDialog(QDialog):
                     query_node.setExpanded(True)
             search_item.setExpanded(True)
             
-            # 3. 术语表匹配 - 最终选择的术语
+            # 3. Glossary matching - final selected terms
             matched_item = self._create_tree_item(None, i18n.t("step_glossary_matching"))
             if debug_info.get("matched_terms"):
                 for term, translation in debug_info["matched_terms"].items():
-                    self._create_tree_item(matched_item, f"{term} → {translation}", full_text=f"{term} → {translation}")
+                    self._create_tree_item(matched_item, f"{term} 鈫?{translation}", full_text=f"{term} 鈫?{translation}")
             else:
                 self._create_tree_item(matched_item, i18n.t("msg_no_valid_terms"))
             matched_item.setExpanded(True)
             
-            # 4. 提示词构建
+            # 4. 鎻愮ず璇嶆瀯寤?
             prompt_item = self._create_tree_item(None, i18n.t("step_prompt_construction"))
             
-            # 系统提示词
+            # 绯荤粺鎻愮ず璇?
             system_prompt = debug_info.get("system_prompt", "")
             if system_prompt:
                 system_node = self._create_tree_item(prompt_item, "System Prompt")
                 self._create_tree_item(system_node, system_prompt, full_text=system_prompt)
             
-            # 用户提示词
+            # 鐢ㄦ埛鎻愮ず璇?
             user_prompt = debug_info.get("user_prompt", "")
             if user_prompt:
                 user_node = self._create_tree_item(prompt_item, "User Prompt")
                 self._create_tree_item(user_node, user_prompt, full_text=user_prompt)
             
-            # 术语表上下文
+            # Glossary context
             glossary_context = debug_info.get("glossary_context", "")
             if glossary_context:
                 glossary_node = self._create_tree_item(prompt_item, "Glossary Context")
@@ -741,7 +790,7 @@ class MainWindow(QMainWindow):
         browse_btn = QPushButton(i18n.t("btn_browse"))
         browse_btn.clicked.connect(self.browse_file)
         
-        # "加载文件" button removed — file selection will auto-load via browse_file()
+        # "鍔犺浇鏂囦欢" button removed 鈥?file selection will auto-load via browse_file()
 
         save_btn = QPushButton(i18n.t("btn_save_file"))
         save_btn.clicked.connect(self.save_xml_file)
@@ -757,7 +806,7 @@ class MainWindow(QMainWindow):
 
         # Options & Actions
         action_layout = QHBoxLayout()
-        # Overwrite existing translations option removed — always overwrite now
+        # Overwrite existing translations option removed 鈥?always overwrite now
         
         self.start_btn = QPushButton(i18n.t("btn_translate_all"))
         self.start_btn.clicked.connect(self.start_translation)
@@ -1433,7 +1482,7 @@ class MainWindow(QMainWindow):
         self.visualize_rag_btn.setEnabled(can_visualize)
 
     def cache_rag_debug_info(self, original_text, debug_info):
-        """缓存RAG调试信息以供可视化使用"""
+        """Cache RAG debug info for visualization."""
         if original_text and debug_info:
             self.rag_debug_cache[original_text] = debug_info
 
@@ -1756,7 +1805,7 @@ class MainWindow(QMainWindow):
         log_emit(self.log, self.config_manager, 'INFO', i18n.t("msg_cleared_translations").format(count=len(selected_rows)), module='gui_main', func='clear_selected_translations')
 
     def visualize_rag_process(self):
-        """可视化显示选中行的RAG处理过程"""
+        """Visualize the RAG pipeline for the selected row."""
         selected_rows = set()
         for item in self.trans_table.selectedItems():
             selected_rows.add(item.row())
@@ -1783,7 +1832,7 @@ class MainWindow(QMainWindow):
         # Get cached RAG debug info if available
         cached_debug_info = self.rag_debug_cache.get(original_text)
         
-        # 显示RAG可视化对话框
+        # Show RAG visualization dialog
         dialog = RAGVisualizationDialog(self, original_text, translated_text, self.translator, cached_debug_info)
         dialog.exec()
 

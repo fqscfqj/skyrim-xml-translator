@@ -6,7 +6,7 @@ import numpy as np
 from typing import List, Optional, Dict, Any
 from src.logging_helper import emit as log_emit
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from src.llm_client import LLMClient
+from src.llm_client import LLMClient, RequestCancelledError
 from src.prompt_manager import PromptManager
 
 class RAGEngine:
@@ -122,6 +122,11 @@ class RAGEngine:
 
         self.load_data()
         self.load_stopwords()
+
+    @staticmethod
+    def _check_cancelled(cancel_event):
+        if cancel_event is not None and cancel_event.is_set():
+            raise RequestCancelledError("RAG task cancelled by user.")
 
     def _rebuild_glossary_lookup(self):
         """Build a normalized lookup map for instant exact hits (case/punct insensitive)."""
@@ -555,8 +560,9 @@ class RAGEngine:
         if log_callback:
             log_emit(log_callback, self.config, 'INFO', f"Index update completed. Total terms: {len(self.terms)}", module='rag_engine', func='build_index')
 
-    def extract_keywords(self, text, log_callback=None):
+    def extract_keywords(self, text, log_callback=None, cancel_event=None, pause_event=None):
         """使用 LLM 提取文本中的专有名词/实体"""
+        self._check_cancelled(cancel_event)
         # Log input text for RAG process
         try:
             log_emit(log_callback, self.config, 'DEBUG', f"[RAG] Input text for keyword extraction: {text}", module='rag_engine', func='extract_keywords')
@@ -597,12 +603,16 @@ class RAGEngine:
             except Exception:
                 max_tokens_override = 256
 
+            self._check_cancelled(cancel_event)
             response = self.llm_client.chat_completion_search(
                 messages,
                 temperature=0.1,
                 max_tokens=max_tokens_override,
                 log_callback=log_callback,
+                cancel_event=cancel_event,
+                pause_event=pause_event,
             )
+            self._check_cancelled(cancel_event)
             # 清理 markdown 代码块标记
             response = self._MARKDOWN_CODE_RE.sub('', response).strip()
             
@@ -683,14 +693,18 @@ class RAGEngine:
                 seen.add(key)
                 llm_keywords.append(kw)
             
+        except RequestCancelledError:
+            raise
         except Exception as e:
             log_emit(log_callback, self.config, 'ERROR', f"[RAG] Keyword extraction failed: {e}", exc=e, module='rag_engine', func='extract_keywords')
 
         # 后备机制：仅在 LLM 未返回结果时使用正则提取专有名词
         if not llm_keywords:
+            self._check_cancelled(cancel_event)
             regex_keywords = self._extract_proper_nouns_regex(text)
             seen_lower = set()
             for kw in regex_keywords:
+                self._check_cancelled(cancel_event)
                 k = kw.strip()
                 k = re.sub(r"^[^\w\u4e00-\u9fff]+|[^\w\u4e00-\u9fff]+$", "", k)
                 if not k:
@@ -705,6 +719,7 @@ class RAGEngine:
         seen = set()
         deduped = []
         for kw in llm_keywords:
+            self._check_cancelled(cancel_event)
             if not isinstance(kw, str):
                 continue
             k = kw.strip()
@@ -724,6 +739,7 @@ class RAGEngine:
         dropped = []
         present = []
         for kw in llm_keywords:
+            self._check_cancelled(cancel_event)
             if self._keyword_appears_in_text(kw, text):
                 present.append(kw)
             else:
@@ -810,7 +826,7 @@ class RAGEngine:
             i += 1
         return tokens
 
-    def search_terms(self, query_list, threshold=0.8, log_callback=None, top_k=3, return_debug=False, source_text=None):
+    def search_terms(self, query_list, threshold=0.8, log_callback=None, top_k=3, return_debug=False, source_text=None, cancel_event=None):
         """
         对提取出的关键词列表进行向量检索
         返回: {term: translation}
@@ -821,6 +837,7 @@ class RAGEngine:
                         例如：关键词"Dinya"在文本"...impregnate Dinya?"中，
                         不应该匹配"Dinya Balu"，而应该只匹配"Dinya"。
         """
+        self._check_cancelled(cancel_event)
         vector_ready = self.vectors is not None and len(self.terms) > 0
         if not vector_ready and not self._glossary_lookup:
             log_emit(log_callback, self.config, 'DEBUG', f"[RAG] Vector index not ready, skipping search", module='rag_engine', func='search_terms')
@@ -846,6 +863,7 @@ class RAGEngine:
                 # OpenAI typically supports up to 2048 in array, but safer to batch smaller
                 batch_size_embed = 100
                 for i in range(0, len(unique_queries), batch_size_embed):
+                    self._check_cancelled(cancel_event)
                     batch_qs = unique_queries[i : i + batch_size_embed]
                     batch_vecs = self.llm_client.get_embedding(batch_qs, log_callback=log_callback)
                     for q, v in zip(batch_qs, batch_vecs):
@@ -854,6 +872,7 @@ class RAGEngine:
                 log_emit(log_callback, self.config, 'WARNING', f"[RAG] Batch embedding failed, falling back to individual: {e}", exc=e, module='rag_engine', func='search_terms')
 
         for query in query_list:
+            self._check_cancelled(cancel_event)
             total_limit = max(0, short_limit) + max(0, long_limit)
             if total_limit <= 0:
                 continue
@@ -902,6 +921,7 @@ class RAGEngine:
                     similarities = np.zeros(num_vectors, dtype=np.float32)
                     
                     for start_idx in range(0, num_vectors, batch_size):
+                        self._check_cancelled(cancel_event)
                         end_idx = min(start_idx + batch_size, num_vectors)
                         # 仅加载这批向量到内存
                         batch_vectors = np.array(vectors[start_idx:end_idx], dtype=np.float32)
@@ -944,6 +964,7 @@ class RAGEngine:
                         if source_lower is not None:
                             filtered_containment = []
                             for term, score in containment_matches:
+                                self._check_cancelled(cancel_event)
                                 term_lower = term.lower()
                                 if term_lower == query_lower:
                                     filtered_containment.append((term, score))
@@ -967,6 +988,7 @@ class RAGEngine:
                     if source_lower is not None and vector_matches:
                         filtered = []
                         for term, score in vector_matches:
+                            self._check_cancelled(cancel_event)
                             term_lower = term.lower()
                             if term_lower == query_lower:
                                 filtered.append((term, score))
@@ -1011,10 +1033,12 @@ class RAGEngine:
 
                 # 1. Containment matches should have priority because they include the literal keyword
                 for term, score in containment_matches:
+                    self._check_cancelled(cancel_event)
                     add_candidate(term, score)
 
                 # 2. Fill the remaining slots with semantic vector matches
                 for term, score in vector_matches:
+                    self._check_cancelled(cancel_event)
                     if score >= threshold:
                         add_candidate(term, score)
 
@@ -1028,6 +1052,7 @@ class RAGEngine:
                     return self._estimate_tokens(term) <= short_token_threshold
 
                 for term, _score in ranked_candidates:
+                    self._check_cancelled(cancel_event)
                     if term in selected_set:
                         continue
                     if is_short(term):
@@ -1043,6 +1068,7 @@ class RAGEngine:
 
                 if len(query_selected_terms) < total_limit:
                     for term, _score in ranked_candidates:
+                        self._check_cancelled(cancel_event)
                         if term in selected_set:
                             continue
                         query_selected_terms.append(term)
@@ -1051,8 +1077,11 @@ class RAGEngine:
                             break
 
                 for term in query_selected_terms:
+                    self._check_cancelled(cancel_event)
                     results[term] = self.glossary[term]
 
+            except RequestCancelledError:
+                raise
             except Exception as e:
                 log_emit(None, self.config, 'ERROR', f"Search error for '{query}': {e}", exc=e, module='rag_engine', func='search_terms')
         
