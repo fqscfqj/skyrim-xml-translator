@@ -41,6 +41,15 @@ class PromptBuilder:
         "down", "up", "out", "off", "on", "back", "away",
         "around", "along", "over", "through", "in",
     })
+    _LEADING_QUOTED_SPAN_RE = re.compile(
+        r'^\s*["\'\u201c\u201d\u2018\u2019\u300c\u300d\u300e\u300f\u300a\u300b\u3010\u3011\(\[]\s*[^"\'\u201c\u201d\u2018\u2019\u300c\u300d\u300e\u300f\u300a\u300b\u3010\u3011\(\)\[\]]{1,30}\s*["\'\u201c\u201d\u2018\u2019\u300d\u300f\u300b\u3011\)\]]\s*'
+    )
+    _LEADING_PAREN_SPAN_RE = re.compile(
+        r"^\s*[\(\[\uFF08\u3010]\s*[^)\]\uFF09\u3011]{1,30}\s*[\)\]\uFF09\u3011]\s*"
+    )
+    _TRAILING_PAREN_SPAN_RE = re.compile(
+        r"\s*[\(\[\uFF08\u3010]\s*[^)\]\uFF09\u3011]{1,30}\s*[\)\]\uFF09\u3011]\s*$"
+    )
     _COMMON_WORD_RE = re.compile(
         r"^(?:the|a|an|and|or|but|in|on|at|to|for|of|with|by|from|is|are|was|were|"
         r"be|been|being|have|has|had|do|does|did|will|would|shall|should|may|might|"
@@ -191,7 +200,7 @@ class PromptBuilder:
 
         proper_noun_lines: List[str] = []
         stylistic_lines: List[str] = []
-        related_lines: List[str] = []
+        related_entries: List[tuple[str, str]] = []
 
         for k, v in matched_terms.items():
             if not isinstance(k, str) or not k.strip():
@@ -208,9 +217,14 @@ class PromptBuilder:
                 else:
                     stylistic_lines.append(f"- {display_term} : {v_str}")
             else:
-                related_lines.append(f"- {k} : {v_str}")
+                related_entries.append((k, v_str))
 
         alias_lines = self._derive_preferred_alias_lines(source_text, matched_terms)
+        related_lines = [
+            f"- {term} : {translation}"
+            for term, translation in related_entries
+            if not self._is_potential_alias_expansion(term, source_text)
+        ]
 
         if not proper_noun_lines and not stylistic_lines and not alias_lines and not related_lines:
             return ""
@@ -381,11 +395,34 @@ class PromptBuilder:
         if not text or not isinstance(text, str):
             return ""
         out = text.strip()
-        out = self._CJK_QUOTE_SPAN_RE.sub("", out)
-        out = self._PAREN_SPAN_RE.sub("", out)
-        out = out.strip()
-        out = self._STRIP_EDGES_RE.sub("", out)
+        for _ in range(3):
+            prev = out
+            out = self._LEADING_QUOTED_SPAN_RE.sub("", out)
+            out = self._LEADING_PAREN_SPAN_RE.sub("", out)
+            if out == prev:
+                break
+            out = out.strip()
+        out = self._TRAILING_PAREN_SPAN_RE.sub("", out).strip()
+        out = out.lstrip("-:\uFF1A ").strip()
+        if re.search("[\\u00B7\\u30FB\\u2022]", out):
+            first = re.split("[\\u00B7\\u30FB\\u2022]", out, maxsplit=1)[0].strip()
+            if first:
+                out = first
         return out
+
+    def _is_potential_alias_expansion(self, term: str, source_text: str) -> bool:
+        """Avoid leaking full-name expansions into related terms when source has short alias."""
+        if not term or not source_text:
+            return False
+        tokens = [t for t in self._ASCII_NAME_TOKEN_RE.findall(term) if t]
+        if len(tokens) < 2:
+            return False
+        first = tokens[0]
+        if not first or not first[0].isupper():
+            return False
+        if self._term_appears_in_source(term, source_text):
+            return False
+        return self._term_appears_in_source(first, source_text)
 
     def _derive_preferred_alias_lines(self, source_text: str, matched_terms: dict) -> List[str]:
         if not source_text or not matched_terms:

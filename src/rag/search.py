@@ -17,6 +17,18 @@ class RAGSearcher:
     _NAME_HONORIFICS = frozenset({
         "lady", "lord", "miss", "mrs", "ms", "mr", "mister", "sir", "dame",
     })
+    _ALIAS_CONNECTORS = frozenset({
+        "the", "of", "de", "da", "del", "di", "van", "von", "le", "la", "el",
+    })
+    _LEADING_QUOTED_SPAN_RE = re.compile(
+        r'^\s*["\'\u201c\u201d\u2018\u2019\u300c\u300d\u300e\u300f\u300a\u300b\u3010\u3011\(\[]\s*[^"\'\u201c\u201d\u2018\u2019\u300c\u300d\u300e\u300f\u300a\u300b\u3010\u3011\(\)\[\]]{1,30}\s*["\'\u201c\u201d\u2018\u2019\u300d\u300f\u300b\u3011\)\]]\s*'
+    )
+    _LEADING_PAREN_SPAN_RE = re.compile(
+        r"^\s*[\(\[\uFF08\u3010]\s*[^)\]\uFF09\u3011]{1,30}\s*[\)\]\uFF09\u3011]\s*"
+    )
+    _TRAILING_PAREN_SPAN_RE = re.compile(
+        r"\s*[\(\[\uFF08\u3010]\s*[^)\]\uFF09\u3011]{1,30}\s*[\)\]\uFF09\u3011]\s*$"
+    )
 
     def __init__(self, vector_store: VectorStore, glossary_manager: GlossaryManager,
                  config_manager, llm_client, embedding_cache: Optional[EmbeddingCache] = None):
@@ -147,7 +159,7 @@ class RAGSearcher:
         """Name-like full-term candidate that can be projected to short-name alias."""
         candidate_str = str(candidate or "")
         # Possessive/title constructions (e.g. "Skyrim's Rule") are not alias sources.
-        if "'s" in candidate_str or "’s" in candidate_str:
+        if "'s" in candidate_str or "\u2019s" in candidate_str:
             return False
 
         q_tokens = self._normalized_ascii_tokens(query)
@@ -161,7 +173,11 @@ class RAGSearcher:
             return False
         if not raw_tokens[0] or not raw_tokens[0][0].isupper():
             return False
-        if not all(t and t[0].isupper() for t in raw_tokens):
+        for t in raw_tokens[1:]:
+            if t and t[0].isupper():
+                continue
+            if t.lower() in self._ALIAS_CONNECTORS:
+                continue
             return False
         return True
 
@@ -173,19 +189,24 @@ class RAGSearcher:
         if not out:
             return ""
 
-        # Remove quoted epithets, e.g. “长盾”斯瓦纳 -> 斯瓦纳
-        out = re.sub(r"[\"“”‘’《》「」『』【】][^\"“”‘’《》「」『』【】]{1,24}[\"“”‘’《》「」『』【】]", "", out)
-        out = re.sub(r"\([^)]{1,24}\)|（[^）]{1,24}）", "", out)
-        out = out.strip()
+        for _ in range(3):
+            prev = out
+            out = RAGSearcher._LEADING_QUOTED_SPAN_RE.sub("", out)
+            out = RAGSearcher._LEADING_PAREN_SPAN_RE.sub("", out)
+            if out == prev:
+                break
+            out = out.strip()
 
-        # Handle transliteration-style full names, e.g. 西比·黑棘 -> 西比
-        if "·" in out or "•" in out or "・" in out:
-            first = re.split(r"[·•・]", out, maxsplit=1)[0].strip()
+        out = RAGSearcher._TRAILING_PAREN_SPAN_RE.sub("", out).strip()
+        out = out.lstrip("-:\uFF1A ").strip()
+
+        # Handle transliteration-style full names, e.g. XiBi·Heitan -> XiBi
+        if re.search("[\\u00B7\\u30FB\\u2022]", out):
+            first = re.split("[\\u00B7\\u30FB\\u2022]", out, maxsplit=1)[0].strip()
             if first:
                 out = first
 
-        out = out.strip(" \t\r\n-—:：,，;；\"'“”‘’")
-        return out
+        return out.strip(" \t\r\n-:\uFF1A")
 
     def _project_alias_translation(self, query: str, candidate_term: str, full_translation: str) -> Optional[str]:
         """Project a short-name translation from a matched full-name glossary term."""
@@ -498,6 +519,7 @@ class RAGSearcher:
                 "compatible_candidates": [],
                 "ai_selected": [],
                 "alias_projection": None,
+                "dropped_alias_expansions": [],
                 "selected_terms": query_selected_terms,
             }
             if debug_info is not None:
@@ -699,6 +721,17 @@ class RAGSearcher:
                                 "translation": alias_translation,
                             }
                     else:
+                        # Guardrail: when source has short alias only, do not leak
+                        # expanded full-name term (e.g., "X the Y") into prompts.
+                        if (
+                            source_text
+                            and self._raw_term_appears_in_source(query, source_text)
+                            and (query_details.get("direct_match") is None)
+                            and self._is_alias_candidate_term(query, term)
+                        ):
+                            if return_debug:
+                                query_details["dropped_alias_expansions"].append(term)
+                            continue
                         results[term] = translation
 
                 try:
