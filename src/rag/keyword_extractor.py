@@ -206,7 +206,20 @@ class KeywordExtractor:
                 messages, temperature=0.1, max_tokens=max_tokens_override,
                 log_callback=log_callback,
             )
+            if response is None:
+                log_emit(log_callback, self.config, "WARNING",
+                         "[RAG] Keyword extraction returned empty response",
+                         module="keyword_extractor", func="_extract_via_llm")
+                return []
+            if not isinstance(response, str):
+                response = str(response)
+
             response = self._MARKDOWN_CODE_RE.sub("", response).strip()
+            if not response:
+                log_emit(log_callback, self.config, "WARNING",
+                         "[RAG] Keyword extraction returned blank response",
+                         module="keyword_extractor", func="_extract_via_llm")
+                return []
             keywords = self._parse_keyword_response(response, log_callback)
             return self._process_keywords(keywords)
         except Exception as e:
