@@ -19,6 +19,7 @@ class LLMConfig:
         "frequency_penalty": None,
         "presence_penalty": None,
         "max_tokens": None,
+        "enable_thinking": None,
     })
 
 

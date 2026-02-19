@@ -998,7 +998,12 @@ class MainWindow(QMainWindow):
             stored_value = params.get(name)
             if stored_value is not None:
                 checkbox.setChecked(True)
-                widget.setValue(stored_value)
+                if isinstance(widget, QComboBox):
+                    idx = widget.findData(stored_value)
+                    if idx >= 0:
+                        widget.setCurrentIndex(idx)
+                else:
+                    widget.setValue(stored_value)
 
         temp_spin = NoWheelDoubleSpinBox()
         temp_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
@@ -1035,6 +1040,11 @@ class MainWindow(QMainWindow):
         token_spin.setValue(512)
         add_param_control("max_tokens", i18n.t("param_max_tokens"), token_spin)
 
+        thinking_combo = NoWheelComboBox()
+        thinking_combo.addItem(i18n.t("option_thinking_on"), True)
+        thinking_combo.addItem(i18n.t("option_thinking_off"), False)
+        add_param_control("enable_thinking", i18n.t("param_enable_thinking"), thinking_combo)
+
         # --- Search LLM Settings ---
         form_layout.addRow(QLabel(f"<b>{i18n.t('group_search_llm_settings')}</b>"))
         self.search_base = QLineEdit(self.config_manager.get("llm_search", "base_url"))
@@ -1067,7 +1077,12 @@ class MainWindow(QMainWindow):
             stored_value = search_params.get(name)
             if stored_value is not None:
                 checkbox.setChecked(True)
-                widget.setValue(stored_value)
+                if isinstance(widget, QComboBox):
+                    idx = widget.findData(stored_value)
+                    if idx >= 0:
+                        widget.setCurrentIndex(idx)
+                else:
+                    widget.setValue(stored_value)
 
         s_temp_spin = NoWheelDoubleSpinBox()
         s_temp_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
@@ -1103,6 +1118,11 @@ class MainWindow(QMainWindow):
         s_token_spin.setSingleStep(16)
         s_token_spin.setValue(512)
         add_search_param_control("max_tokens", i18n.t("param_max_tokens"), s_token_spin)
+
+        s_thinking_combo = NoWheelComboBox()
+        s_thinking_combo.addItem(i18n.t("option_thinking_on"), True)
+        s_thinking_combo.addItem(i18n.t("option_thinking_off"), False)
+        add_search_param_control("enable_thinking", i18n.t("param_enable_thinking"), s_thinking_combo)
         # ---------------------------
 
         form_layout.addRow(QLabel(f"<b>{i18n.t('group_embedding_settings')}</b>"))
@@ -1821,13 +1841,18 @@ class MainWindow(QMainWindow):
         ) if hasattr(self, "mcm_auto_export_checkbox") else True
         self.config_manager.set("general", "mcm_auto_export", mcm_auto_export)
 
+        def _param_widget_value(widget):
+            if isinstance(widget, QComboBox):
+                return widget.currentData()
+            return widget.value()
+
         params = self.config_manager.config.setdefault("llm", {}).setdefault("parameters", {})
         for name, (checkbox, widget) in self.model_param_controls.items():
-            params[name] = widget.value() if checkbox.isChecked() else None
+            params[name] = _param_widget_value(widget) if checkbox.isChecked() else None
             
         search_params = self.config_manager.config.setdefault("llm_search", {}).setdefault("parameters", {})
         for name, (checkbox, widget) in self.search_param_controls.items():
-            search_params[name] = widget.value() if checkbox.isChecked() else None
+            search_params[name] = _param_widget_value(widget) if checkbox.isChecked() else None
         
         self.config_manager.save_config()
         self.llm_client.reload_config()

@@ -98,7 +98,18 @@ class LLMClient:
                 final_params[key] = value
 
         request_args = {"model": model, "messages": messages}
+        # Some OpenAI-compatible providers support non-standard fields like
+        # `enable_thinking`, but the OpenAI Python SDK rejects unknown top-level
+        # kwargs. Route those through `extra_body` to avoid TypeError while still
+        # letting compatible backends receive the flag.
+        extra_body: dict[str, Any] = {}
+        enable_thinking = final_params.pop("enable_thinking", None)
+        if enable_thinking is not None:
+            extra_body["enable_thinking"] = bool(enable_thinking)
+
         request_args.update(final_params)
+        if extra_body:
+            request_args["extra_body"] = extra_body
 
         log_emit(callback, self.config, "DEBUG",
                  f"{operation} LLM call: model={model} messages_len={len(messages)}",

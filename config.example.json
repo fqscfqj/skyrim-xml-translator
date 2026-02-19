@@ -8,7 +8,8 @@
             "top_p": null,
             "frequency_penalty": null,
             "presence_penalty": null,
-            "max_tokens": null
+            "max_tokens": null,
+            "enable_thinking": null
         }
     },
     "llm_search": {
@@ -20,7 +21,8 @@
             "top_p": null,
             "frequency_penalty": null,
             "presence_penalty": null,
-            "max_tokens": null
+            "max_tokens": null,
+            "enable_thinking": null
         }
     },
     "embedding": {
