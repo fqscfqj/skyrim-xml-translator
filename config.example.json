@@ -32,8 +32,7 @@
     },
     "paths": {
         "glossary_file": "glossary.json",
-        "vector_index_file": "vector_index.npy",
-        "stopwords_file": "data/stopwords.json"
+        "vector_index_file": "vector_index.npy"
     },
     "threads": {
         "translation": 5,
@@ -46,12 +45,12 @@
         "long_term_max_results": 2,
         "keyword_max_queries": 8,
         "keyword_llm_max_tokens": 96,
-        "keyword_skip_llm_for_simple_text": true,
-        "keyword_simple_text_max_chars": 96,
-        "keyword_simple_text_max_words": 12,
-        "ai_disambiguate_short_name_candidates": true,
-        "ai_disambiguation_max_candidates": 8,
-        "ai_disambiguation_max_tokens": 96
+        "ai_candidate_selection_enabled": true,
+        "ai_candidate_pool_size": 12,
+        "ai_candidate_max_select": 6,
+        "ai_candidate_max_tokens": 96,
+        "ai_candidate_context_chars": 320,
+        "ai_candidate_min_vector_score": 0.45
     }
     ,
     "general": {

@@ -28,11 +28,10 @@ class RAGEngine:
             os.path.dirname(vector_path) if os.path.dirname(vector_path) else ".",
             "terms_index.json",
         )
-        stopwords_path = self.config.get("paths", "stopwords_file", "data/stopwords.json")
         embed_dim = self.config.get("embedding", "dimensions", 1536)
 
         # Initialize sub-modules
-        self._glossary_mgr = GlossaryManager(glossary_path, stopwords_path, config_manager)
+        self._glossary_mgr = GlossaryManager(glossary_path, config_manager)
         self._vector_store = VectorStore(vector_path, terms_path, embed_dim, config_manager)
 
         # Caches
@@ -106,18 +105,11 @@ class RAGEngine:
     def _token_df(self):
         return self._glossary_mgr._token_df
 
-    @property
-    def _stopwords_set(self):
-        return self._glossary_mgr._stopwords_set
-
     # --- Delegated public API ---
 
     def load_data(self):
         self._glossary_mgr.load()
         self._vector_store.load()
-
-    def load_stopwords(self):
-        self._glossary_mgr.load_stopwords()
 
     def save_glossary(self):
         self._glossary_mgr.save()

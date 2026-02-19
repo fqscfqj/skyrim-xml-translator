@@ -1,4 +1,4 @@
-"""RAG search orchestration: combines vector search, containment matching, direct lookup, and ranking."""
+"""RAG search orchestration with AI candidate selection."""
 
 import json
 import re
@@ -14,8 +14,6 @@ from src.llm.cost_tracker import estimate_tokens
 
 
 class RAGSearcher:
-    _WORD_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9'\-]*")
-
     def __init__(self, vector_store: VectorStore, glossary_manager: GlossaryManager,
                  config_manager, llm_client, embedding_cache: Optional[EmbeddingCache] = None):
         self.vector_store = vector_store
@@ -24,102 +22,22 @@ class RAGSearcher:
         self.llm_client = llm_client
         self.embedding_cache = embedding_cache
 
-    @staticmethod
-    def _raw_term_appears_in_source(term: str, source_text: Optional[str]) -> bool:
-        """Stricter surface-form check to avoid normalized punctuation collisions."""
-        if not term or not source_text:
-            return False
-        term_lower = term.lower()
-        src_lower = source_text.lower()
-
-        if re.search(r"[0-9a-z]", term_lower):
-            pattern = re.compile(r"(?<![0-9a-z]){}(?![0-9a-z])".format(re.escape(term_lower)))
-            return bool(pattern.search(src_lower))
-        return term_lower in src_lower
-
-    @classmethod
-    def _contains_token_boundary(cls, haystack: str, needle: str) -> bool:
-        if not haystack or not needle:
-            return False
-        hs = haystack.lower()
-        nd = needle.lower().strip()
-        if not nd:
-            return False
-        if re.search(r"[0-9a-z]", nd):
-            pattern = re.compile(r"(?<![0-9a-z]){}(?![0-9a-z])".format(re.escape(nd)))
-            return bool(pattern.search(hs))
-        return nd in hs
-
-    @classmethod
-    def _is_short_name_query(cls, query: str) -> bool:
-        if not query:
-            return False
-        q = query.strip()
-        if not q or len(q) > 32:
-            return False
-        tokens = cls._WORD_TOKEN_RE.findall(q)
-        if not tokens or len(tokens) > 2:
-            return False
-        return all(len(t) >= 3 for t in tokens)
-
-    @classmethod
-    def _is_sentence_like_term(cls, term: str) -> bool:
-        if not term:
-            return False
-        t = term.strip()
-        if len(t) > 100:
-            return True
-        tokens = cls._WORD_TOKEN_RE.findall(t)
-        if len(tokens) >= 10:
-            return True
-        if ("\n" in t) or (any(ch in t for ch in ".!?") and len(tokens) >= 7):
-            return True
-        return False
-
-    def _allow_candidate_for_query(self, query: str, candidate_term: str) -> bool:
-        if not candidate_term:
-            return False
-        if not self._is_short_name_query(query):
-            return True
-        # For short proper-name-like queries, skip sentence-level candidates and
-        # require lexical token alignment to avoid lookalike name mismatches.
-        if self._is_sentence_like_term(candidate_term):
-            return False
-        if candidate_term.strip().lower() == query.strip().lower():
-            return True
-        return self._contains_token_boundary(candidate_term, query)
-
-    def _resolve_direct_match_term(self, query: str, source_text: Optional[str]) -> Optional[str]:
-        """Resolve normalized direct match while filtering punctuation-only aliases."""
-        if not query:
-            return None
-
-        # 1) Exact key match first.
-        if query in self.glossary_manager.glossary:
-            return query
-
-        # 2) Normalized lookup.
-        normalized_query = self.glossary_manager.normalize_term_key(query)
-        if not normalized_query:
-            return None
-        candidate = self.glossary_manager.lookup_normalized(normalized_query)
-        if not candidate:
-            return None
-
-        # 3) Accept if same surface form ignoring case.
-        if candidate.strip().lower() == query.strip().lower():
-            return candidate
-
-        # 4) If source is available, require candidate to appear verbatim in source.
-        if source_text and self._raw_term_appears_in_source(candidate, source_text):
-            return candidate
-
-        # Otherwise skip to prevent false direct-hit bindings (e.g. "Vampires" -> "Vampires?").
-        return None
+    # --- Config helpers ---
 
     def _get_rag_int(self, key: str, default: int, min_value: int = 1, max_value: int = 10_000) -> int:
         try:
             value = int(self.config.get("rag", key, default))
+        except Exception:
+            value = default
+        if value < min_value:
+            return min_value
+        if value > max_value:
+            return max_value
+        return value
+
+    def _get_rag_float(self, key: str, default: float, min_value: float = 0.0, max_value: float = 1.0) -> float:
+        try:
+            value = float(self.config.get("rag", key, default))
         except Exception:
             value = default
         if value < min_value:
@@ -138,6 +56,214 @@ class RAGSearcher:
         if isinstance(value, str):
             return value.strip().lower() in ("1", "true", "yes", "on")
         return bool(value)
+
+    # --- Matching helpers ---
+
+    @staticmethod
+    def _build_query_context_window(source_text: Optional[str], query: str, max_chars: int) -> str:
+        """Trim source text to a focused window around query for lower token usage."""
+        if not source_text:
+            return ""
+        text = source_text.strip()
+        if not text:
+            return ""
+        if len(text) <= max_chars:
+            return text
+
+        query = (query or "").strip()
+        if not query:
+            return text[:max_chars].rstrip() + "..."
+
+        lower_text = text.lower()
+        lower_query = query.lower()
+        idx = lower_text.find(lower_query)
+        if idx < 0:
+            return text[:max_chars].rstrip() + "..."
+
+        half = max(20, max_chars // 2)
+        start = max(0, idx - half)
+        end = min(len(text), idx + len(query) + half)
+        snippet = text[start:end].strip()
+        if start > 0:
+            snippet = "..." + snippet
+        if end < len(text):
+            snippet = snippet + "..."
+        return snippet
+
+    @staticmethod
+    def _raw_term_appears_in_source(term: str, source_text: Optional[str]) -> bool:
+        if not term or not source_text:
+            return False
+        term_lower = term.lower()
+        src_lower = source_text.lower()
+        if re.search(r"[0-9a-z]", term_lower):
+            pattern = re.compile(r"(?<![0-9a-z]){}(?![0-9a-z])".format(re.escape(term_lower)))
+            return bool(pattern.search(src_lower))
+        return term_lower in src_lower
+
+    @staticmethod
+    def _has_latin_chars(text: str) -> bool:
+        return bool(text and re.search(r"[A-Za-z]", text))
+
+    @staticmethod
+    def _to_singular_basic(token: str) -> str:
+        if not token:
+            return token
+        if len(token) > 4 and token.endswith("ies"):
+            return token[:-3] + "y"
+        if len(token) > 3 and token.endswith("es"):
+            return token[:-2]
+        if len(token) > 2 and token.endswith("s"):
+            return token[:-1]
+        return token
+
+    def _normalized_ascii_tokens(self, text: str) -> list[str]:
+        norm = self.glossary_manager.normalize_term_key(text)
+        if not norm:
+            return []
+        return [t for t in norm.split() if t]
+
+    def _is_alias_candidate_term(self, query: str, candidate: str) -> bool:
+        """Name-like full-term candidate that can be projected to short-name alias."""
+        q_tokens = self._normalized_ascii_tokens(query)
+        c_tokens = self._normalized_ascii_tokens(candidate)
+        if len(q_tokens) != 1 or len(c_tokens) < 2 or len(c_tokens) > 4:
+            return False
+        if c_tokens[0] != q_tokens[0]:
+            return False
+        raw_tokens = re.findall(r"[A-Za-z][A-Za-z0-9'\-]*", candidate)
+        if len(raw_tokens) < 2 or len(raw_tokens) > 4:
+            return False
+        if not raw_tokens[0] or not raw_tokens[0][0].isupper():
+            return False
+        if not all(t and t[0].isupper() for t in raw_tokens):
+            return False
+        return True
+
+    @staticmethod
+    def _strip_alias_translation(full_translation: str) -> str:
+        if not isinstance(full_translation, str):
+            return ""
+        out = full_translation.strip()
+        if not out:
+            return ""
+
+        # Remove quoted epithets, e.g. “长盾”斯瓦纳 -> 斯瓦纳
+        out = re.sub(r"[\"“”‘’《》「」『』【】][^\"“”‘’《》「」『』【】]{1,24}[\"“”‘’《》「」『』【】]", "", out)
+        out = re.sub(r"\([^)]{1,24}\)|（[^）]{1,24}）", "", out)
+        out = out.strip()
+
+        # Handle transliteration-style full names, e.g. 西比·黑棘 -> 西比
+        if "·" in out or "•" in out or "・" in out:
+            first = re.split(r"[·•・]", out, maxsplit=1)[0].strip()
+            if first:
+                out = first
+
+        out = out.strip(" \t\r\n-—:：,，;；\"'“”‘’")
+        return out
+
+    def _project_alias_translation(self, query: str, candidate_term: str, full_translation: str) -> Optional[str]:
+        """Project a short-name translation from a matched full-name glossary term."""
+        if not self._is_alias_candidate_term(query, candidate_term):
+            return None
+        short = self._strip_alias_translation(full_translation)
+        if not short:
+            return None
+        if len(short) > 20:
+            return None
+        return short
+
+    def _lexical_evidence_score(self, query: str, candidate: str) -> float:
+        """Score lexical compatibility between query and candidate term."""
+        q = self.glossary_manager.normalize_term_key(query)
+        c = self.glossary_manager.normalize_term_key(candidate)
+        if not q or not c:
+            return 0.0
+        if q == c:
+            return 3.0
+
+        c_tokens = c.split()
+        q_tokens = q.split()
+        q_single = len(q_tokens) == 1
+
+        # Query token as leading token in short name-like candidate.
+        if q_single and c_tokens and c_tokens[0] == q:
+            if 2 <= len(c_tokens) <= 4:
+                return 2.9
+            return 2.7
+
+        # Exact token containment is strong evidence.
+        if q in c_tokens:
+            return 2.4
+        if c in q_tokens:
+            return 2.4
+
+        # Basic singular/plural compatibility (Vampires <-> Vampire).
+        q_sg = self._to_singular_basic(q)
+        c_sg = self._to_singular_basic(c)
+        if q_sg and (q_sg == c or q_sg in c_tokens):
+            return 2.2
+        if c_sg and (c_sg == q or c_sg in q_tokens):
+            return 2.1
+
+        # Prefix/substring is weak and only accepted for longer strings.
+        if q_single and len(q) >= 5:
+            if c.startswith(q):
+                return 1.6
+            if q in c:
+                return 1.3
+        if len(q) >= 6 and len(c) >= 6 and q.startswith(c):
+            return 1.2
+
+        return 0.0
+
+    def _is_candidate_compatible(self, query: str, candidate: str, source_text: Optional[str]) -> bool:
+        """Deterministic guard: reject clear lookalike mismatches for latin-name queries."""
+        if not self._has_latin_chars(query):
+            return True
+        score = self._lexical_evidence_score(query, candidate)
+        if score > 0:
+            return True
+
+        # If query literally appears in source, require lexical evidence.
+        if source_text and self._raw_term_appears_in_source(query, source_text):
+            return False
+        return True
+
+    def _rank_candidates(
+            self,
+            semantic_scores: Dict[str, float],
+            lexical_scores: Dict[str, float]) -> list[tuple[str, float]]:
+        """Rank candidates with lexical evidence as primary key, semantic as secondary."""
+        items = []
+        for term, sem in semantic_scores.items():
+            lex = lexical_scores.get(term, 0.0)
+            items.append((term, sem, lex))
+        items.sort(key=lambda x: (x[2], x[1]), reverse=True)
+        return [(term, sem) for term, sem, _lex in items]
+
+    def _resolve_direct_match_term(self, query: str, source_text: Optional[str]) -> Optional[str]:
+        if not query:
+            return None
+
+        # 1) Exact glossary key hit.
+        if query in self.glossary_manager.glossary:
+            return query
+
+        # 2) Normalized lookup.
+        normalized_query = self.glossary_manager.normalize_term_key(query)
+        if not normalized_query:
+            return None
+        candidate = self.glossary_manager.lookup_normalized(normalized_query)
+        if not candidate:
+            return None
+
+        # 3) Keep only if surface form matches or candidate appears in source.
+        if candidate.strip().lower() == query.strip().lower():
+            return candidate
+        if source_text and self._raw_term_appears_in_source(candidate, source_text):
+            return candidate
+        return None
 
     @staticmethod
     def _parse_string_array_response(response: str) -> list[str]:
@@ -168,54 +294,59 @@ class RAGSearcher:
                 pass
         return []
 
-    def _ai_disambiguate_short_name_candidates(
+    def _ai_select_candidates_for_query(
             self,
             query: str,
             source_text: Optional[str],
-            candidates: list[tuple[str, float]],
+            ranked_candidates: list[tuple[str, float]],
+            max_select: int,
             log_callback: Optional[Callable]) -> list[str]:
-        """Use search LLM to keep only candidates that truly refer to query entity."""
-        if not self._get_rag_bool("ai_disambiguate_short_name_candidates", True):
+        """Use search LLM to pick final glossary terms from candidate pool."""
+        if not self._get_rag_bool("ai_candidate_selection_enabled", True):
             return []
-        if not query or not source_text or not candidates:
+        if not query or not source_text or not ranked_candidates:
             return []
 
-        # Deduplicate while preserving score order from upstream ranking.
+        max_pool = self._get_rag_int("ai_candidate_pool_size", 12, min_value=2, max_value=40)
+        pool_terms: list[str] = []
         seen: set[str] = set()
-        ordered_terms: list[str] = []
-        for term, _score in candidates:
+        for term, _score in ranked_candidates:
             if not isinstance(term, str):
                 continue
             t = term.strip()
             if not t or t.lower() in seen:
                 continue
+            if len(t) > 220:
+                continue
             seen.add(t.lower())
-            ordered_terms.append(t)
+            pool_terms.append(t)
+            if len(pool_terms) >= max_pool:
+                break
 
-        if not ordered_terms:
+        if not pool_terms:
             return []
 
-        max_candidates = self._get_rag_int(
-            "ai_disambiguation_max_candidates", 8, min_value=2, max_value=20
-        )
-        selected_pool = ordered_terms[:max_candidates]
-        numbered = "\n".join(f"{i+1}. {t}" for i, t in enumerate(selected_pool))
-
+        numbered = "\n".join(f"{i+1}. {t}" for i, t in enumerate(pool_terms))
+        max_select = max(1, min(max_select, self._get_rag_int("ai_candidate_max_select", 6, 1, 20)))
+        context_chars = self._get_rag_int("ai_candidate_context_chars", 320, min_value=120, max_value=2000)
+        source_snippet = self._build_query_context_window(source_text, query, context_chars)
         prompt = (
-            "Resolve glossary candidates for a named entity in a game localization pipeline.\n\n"
-            f"Source text: \"{source_text}\"\n"
-            f"Query entity: \"{query}\"\n\n"
+            "You are selecting glossary terms for translation consistency.\n\n"
+            f"Source text snippet: \"{source_snippet}\"\n"
+            f"Query term: \"{query}\"\n\n"
             "Candidate glossary terms:\n"
             f"{numbered}\n\n"
             "Task:\n"
-            "Select ONLY candidates that refer to the same entity as the query in this source text.\n"
-            "Reject lookalike names (e.g., Wulf vs Wulfur) and unrelated lines.\n"
-            "If only sentence candidates contain the exact name, you may keep them.\n"
-            "Output ONLY a JSON array of candidate strings copied exactly from the list.\n"
+            "Select up to {max_select} candidates that are truly relevant to this query in this source text.\n"
+            "Prefer exact same entity/name spelling; reject lookalike names (example: Wulfur != Wulf).\n"
+            "If any candidate contains the exact query spelling, select from those first.\n"
+            "Do not select candidates without the query spelling when query-spelling candidates exist.\n"
+            "Prefer concise entity terms over full-sentence quest/dialog lines.\n"
+            "Return ONLY a JSON array of candidate strings copied exactly from the list.\n"
             "Return [] if none."
-        )
+        ).replace("{max_select}", str(max_select))
 
-        max_tokens = self._get_rag_int("ai_disambiguation_max_tokens", 96, min_value=32, max_value=256)
+        max_tokens = self._get_rag_int("ai_candidate_max_tokens", 96, min_value=32, max_value=256)
         try:
             response = self.llm_client.chat_completion_search(
                 [{"role": "user", "content": prompt}],
@@ -226,26 +357,54 @@ class RAGSearcher:
             picked = self._parse_string_array_response(response)
             if not picked:
                 return []
-
-            allowed = {t for t in selected_pool}
-            valid: list[str] = []
+            allowed = set(pool_terms)
+            result: list[str] = []
             for term in picked:
-                if term in allowed and term not in valid:
-                    valid.append(term)
+                if term in allowed and term not in result:
+                    result.append(term)
+                if len(result) >= max_select:
+                    break
 
-            if valid:
+            if result:
                 try:
                     log_emit(log_callback, self.config, "DEBUG",
-                             f"[RAG] AI disambiguation kept {len(valid)} candidate(s) for '{query}': {valid}",
-                             module="rag_search", func="_ai_disambiguate_short_name_candidates")
+                             f"[RAG] AI selected {len(result)} candidate(s) for '{query}': {result}",
+                             module="rag_search", func="_ai_select_candidates_for_query")
                 except Exception:
                     pass
-            return valid
+            return result
         except Exception as e:
             log_emit(log_callback, self.config, "WARNING",
-                     f"[RAG] AI disambiguation failed for '{query}': {e}",
-                     exc=e, module="rag_search", func="_ai_disambiguate_short_name_candidates")
+                     f"[RAG] AI candidate selection failed for '{query}': {e}",
+                     exc=e, module="rag_search", func="_ai_select_candidates_for_query")
             return []
+
+    def _should_use_ai_selection(
+            self,
+            query: str,
+            source_text: Optional[str],
+            ranked_candidates: list[tuple[str, float]]) -> bool:
+        """Gate AI selection to ambiguous cases to reduce token usage."""
+        if not source_text or not ranked_candidates or len(ranked_candidates) <= 1:
+            return False
+
+        query_norm = self.glossary_manager.normalize_term_key(query)
+        top_term, top_score = ranked_candidates[0]
+        top_norm = self.glossary_manager.normalize_term_key(top_term)
+        second_score = ranked_candidates[1][1] if len(ranked_candidates) > 1 else 0.0
+
+        # Clear exact win -> skip AI.
+        if query_norm and top_norm == query_norm and (top_score - second_score) >= 0.10:
+            return False
+
+        # Strong direct match with enough margin -> skip AI.
+        if top_score >= 1.0 and (top_score - second_score) >= 0.12:
+            return False
+
+        # Otherwise this is likely ambiguous; let AI choose.
+        return True
+
+    # --- Public API ---
 
     def search(self, keywords: list[str], source_text: Optional[str] = None,
                threshold: float = 0.8, top_k: int = 3,
@@ -278,12 +437,13 @@ class RAGSearcher:
         short_token_threshold = self.config.get("rag", "short_term_max_tokens", 6)
         short_limit = self.config.get("rag", "short_term_max_results", 5)
         long_limit = self.config.get("rag", "long_term_max_results", 2)
+        total_limit_default = max(0, short_limit) + max(0, long_limit)
+        min_vector_score = self._get_rag_float("ai_candidate_min_vector_score", 0.45, 0.0, 1.0)
 
-        # Pre-fetch embeddings in batch (with cache)
         query_embeddings = self._batch_embed_keywords(keywords, log_callback)
 
         for query in keywords:
-            total_limit = max(0, short_limit) + max(0, long_limit)
+            total_limit = total_limit_default
             if total_limit <= 0:
                 continue
 
@@ -291,14 +451,18 @@ class RAGSearcher:
             query_details: Dict[str, Any] = {
                 "query": query, "direct_match": None,
                 "vector_matches": [], "containment_matches": [],
+                "compatible_candidates": [],
+                "ai_selected": [],
+                "alias_projection": None,
                 "selected_terms": query_selected_terms,
             }
             if debug_info is not None:
                 debug_info.append(query_details)
 
             candidate_scores: Dict[str, float] = {}
+            candidate_lexical_scores: Dict[str, float] = {}
 
-            def add_candidate(term, score):
+            def add_candidate(term: str, score: float) -> bool:
                 if not term:
                     return False
                 normalized = self.glossary_manager.normalize_term_key(term)
@@ -310,6 +474,10 @@ class RAGSearcher:
                 prev_score = candidate_scores.get(canonical_term)
                 if prev_score is None or score > prev_score:
                     candidate_scores[canonical_term] = score
+                lex_score = self._lexical_evidence_score(query, canonical_term)
+                prev_lex = candidate_lexical_scores.get(canonical_term, 0.0)
+                if lex_score > prev_lex:
+                    candidate_lexical_scores[canonical_term] = lex_score
                 return True
 
             try:
@@ -317,103 +485,49 @@ class RAGSearcher:
                 containment_matches: list[tuple[str, float]] = []
                 vector_matches: list[tuple[str, float]] = []
 
-                if self.vector_store.vectors is not None and len(self.vector_store.terms) > 0:
+                # 0) Deterministic direct match
+                direct_term = self._resolve_direct_match_term(query, source_text)
+                if direct_term:
+                    add_candidate(direct_term, 1.2)
+                    if return_debug:
+                        query_details["direct_match"] = direct_term
+
+                if vector_ready:
                     raw_vec = query_embeddings.get(query)
                     if raw_vec is None:
                         raw_vec = self.llm_client.get_embedding(query, log_callback=log_callback)
                     query_vec = np.array(raw_vec, dtype=np.float32).flatten()
-
-                    # Get full similarity array for both vector and containment ranking
                     similarities = self.vector_store.search_cosine_full(query_vec)
 
-                    # Pre-compute source text info
-                    source_lower = None
-                    keyword_in_source = False
-                    if source_text:
-                        source_lower = source_text.lower()
-                        keyword_pattern = re.compile(r"\b{}\b".format(re.escape(query_lower)))
-                        keyword_in_source = bool(keyword_pattern.search(source_lower))
-
-                    # Containment matches
-                    containment_indices = [i for i, t in enumerate(self.vector_store.terms)
-                                           if query_lower in t.lower()]
+                    # Containment recall (query substring in term)
+                    containment_indices = [
+                        i for i, t in enumerate(self.vector_store.terms)
+                        if query_lower in t.lower()
+                    ]
                     if containment_indices:
                         containment_indices.sort(
-                            key=lambda i: similarities[i] if i < len(similarities) else 0,
-                            reverse=True)
-                        top_containment = containment_indices[:5]
-                        containment_matches = [(self.vector_store.terms[i], float(similarities[i]))
-                                               for i in top_containment]
+                            key=lambda i: similarities[i] if i < len(similarities) else 0.0,
+                            reverse=True,
+                        )
+                        top_containment = containment_indices[: max(5, top_k)]
+                        containment_matches = [
+                            (self.vector_store.terms[i], float(similarities[i]))
+                            for i in top_containment
+                            if i < len(self.vector_store.terms)
+                        ]
 
-                        if source_lower is not None:
-                            filtered = []
-                            for term, score in containment_matches:
-                                term_lower = term.lower()
-                                if term_lower == query_lower:
-                                    filtered.append((term, score))
-                                elif keyword_in_source and query_lower in term_lower:
-                                    filtered.append((term, score))
-                                elif self._raw_term_appears_in_source(term, source_text):
-                                    filtered.append((term, score))
-                            containment_matches = filtered
-
-                    # Vector matches
+                    # Vector recall
+                    desired_top_k = max(
+                        top_k,
+                        total_limit * 2,
+                        self._get_rag_int("ai_candidate_pool_size", 12, min_value=2, max_value=40) * 2,
+                    )
                     ranked_idx = np.argsort(similarities)[::-1]
-                    desired_top_k = max(top_k, total_limit)
                     for idx in ranked_idx[:desired_top_k]:
                         if idx < len(self.vector_store.terms):
-                            vector_matches.append(
-                                (self.vector_store.terms[idx], float(similarities[idx])))
-
-                    if source_lower is not None and vector_matches:
-                        filtered = []
-                        for term, score in vector_matches:
-                            term_lower = term.lower()
-                            if term_lower == query_lower:
-                                filtered.append((term, score))
-                                continue
-                            if keyword_in_source and query_lower in term_lower:
-                                filtered.append((term, score))
-                                continue
-                            if self._raw_term_appears_in_source(term, source_text):
-                                filtered.append((term, score))
-                        vector_matches = filtered
-
-                    pre_short_filter_containment = list(containment_matches)
-                    pre_short_filter_vector = list(vector_matches)
-
-                    if containment_matches:
-                        containment_matches = [
-                            (term, score) for term, score in containment_matches
-                            if self._allow_candidate_for_query(query, term)
-                        ]
-                    if vector_matches:
-                        vector_matches = [
-                            (term, score) for term, score in vector_matches
-                            if self._allow_candidate_for_query(query, term)
-                        ]
-
-                    # AI fallback for short-name queries when rule-based filtering is too strict
-                    # and removed all candidates. This keeps vector+AI as the main path.
-                    if (self._is_short_name_query(query)
-                            and not containment_matches
-                            and not vector_matches):
-                        ai_terms = self._ai_disambiguate_short_name_candidates(
-                            query=query,
-                            source_text=source_text,
-                            candidates=pre_short_filter_containment + pre_short_filter_vector,
-                            log_callback=log_callback,
-                        )
-                        if ai_terms:
-                            keep = set(ai_terms)
-                            containment_matches = [
-                                (term, score) for term, score in pre_short_filter_containment
-                                if term in keep
-                            ]
-                            vector_matches = [
-                                (term, score) for term, score in pre_short_filter_vector
-                                if term in keep
-                            ]
+                            score = float(similarities[idx])
+                            if score >= min_vector_score:
+                                vector_matches.append((self.vector_store.terms[idx], score))
 
                     del similarities
                     del ranked_idx
@@ -422,65 +536,104 @@ class RAGSearcher:
                     query_details["vector_matches"] = vector_matches
                     query_details["containment_matches"] = containment_matches
 
-                try:
-                    log_emit(log_callback, self.config, "DEBUG",
-                             f"[RAG] Keyword '{query}' -> Vector: {vector_matches[:3] if vector_matches else []} | Containment: {containment_matches[:3] if containment_matches else []}",
-                             module="rag_search", func="search",
-                             extra={"query": query})
-                except Exception:
-                    pass
-
-                # 0. Exact glossary hit
-                direct_term = self._resolve_direct_match_term(query, source_text)
-                if direct_term:
-                    if add_candidate(direct_term, 1.1) and return_debug:
-                        query_details["direct_match"] = direct_term
-
-                # 1. Containment matches
                 for term, score in containment_matches:
                     add_candidate(term, score)
-
-                # 2. Vector matches above threshold
                 for term, score in vector_matches:
-                    if score >= threshold:
-                        add_candidate(term, score)
+                    add_candidate(term, score)
 
-                # 3. Rank and apply short/long limits
-                ranked_candidates = sorted(candidate_scores.items(),
-                                           key=lambda x: x[1], reverse=True)
-                short_selected = 0
-                long_selected = 0
-                selected_set: set[str] = set()
+                ranked_candidates = self._rank_candidates(candidate_scores, candidate_lexical_scores)
+                compatible_ranked = [
+                    (term, score)
+                    for term, score in ranked_candidates
+                    if self._is_candidate_compatible(query, term, source_text)
+                ]
+                if source_text and self._raw_term_appears_in_source(query, source_text):
+                    # For literal query occurrences, do not fall back to lookalike names.
+                    working_ranked = compatible_ranked
+                else:
+                    working_ranked = compatible_ranked or ranked_candidates
+                if return_debug:
+                    query_details["compatible_candidates"] = working_ranked[:20]
 
-                def is_short(term: str) -> bool:
-                    return estimate_tokens(term) <= short_token_threshold
+                ai_selected_terms: list[str] = []
+                if self._should_use_ai_selection(query, source_text, working_ranked):
+                    ai_selected_terms = self._ai_select_candidates_for_query(
+                        query=query,
+                        source_text=source_text,
+                        ranked_candidates=working_ranked,
+                        max_select=total_limit,
+                        log_callback=log_callback,
+                    )
+                    if return_debug:
+                        query_details["ai_selected"] = ai_selected_terms
 
-                for term, _score in ranked_candidates:
-                    if term in selected_set:
-                        continue
-                    if is_short(term):
-                        if short_selected < short_limit:
+                if ai_selected_terms:
+                    for term in ai_selected_terms:
+                        if term in self.glossary_manager.glossary and term not in query_selected_terms:
                             query_selected_terms.append(term)
-                            selected_set.add(term)
-                            short_selected += 1
-                    else:
-                        if long_selected < long_limit:
-                            query_selected_terms.append(term)
-                            selected_set.add(term)
-                            long_selected += 1
+                            if len(query_selected_terms) >= total_limit:
+                                break
+                else:
+                    # Fallback ranking policy if AI selection is unavailable.
+                    short_selected = 0
+                    long_selected = 0
+                    selected_set: set[str] = set()
+                    fallback_ranked = [
+                        (term, score) for term, score in working_ranked
+                        if score >= threshold or score >= 1.0
+                    ]
+                    if not fallback_ranked:
+                        fallback_ranked = working_ranked
 
-                # Fill remaining slots
-                if len(query_selected_terms) < total_limit:
-                    for term, _score in ranked_candidates:
+                    def is_short(term: str) -> bool:
+                        return estimate_tokens(term) <= short_token_threshold
+
+                    for term, _score in fallback_ranked:
                         if term in selected_set:
                             continue
-                        query_selected_terms.append(term)
-                        selected_set.add(term)
-                        if len(query_selected_terms) >= total_limit:
-                            break
+                        if is_short(term):
+                            if short_selected < short_limit:
+                                query_selected_terms.append(term)
+                                selected_set.add(term)
+                                short_selected += 1
+                        else:
+                            if long_selected < long_limit:
+                                query_selected_terms.append(term)
+                                selected_set.add(term)
+                                long_selected += 1
+
+                    if len(query_selected_terms) < total_limit:
+                        for term, _score in fallback_ranked:
+                            if term in selected_set:
+                                continue
+                            query_selected_terms.append(term)
+                            selected_set.add(term)
+                            if len(query_selected_terms) >= total_limit:
+                                break
 
                 for term in query_selected_terms:
-                    results[term] = self.glossary_manager.glossary[term]
+                    translation = self.glossary_manager.glossary[term]
+                    alias_translation = None
+                    if source_text and self._raw_term_appears_in_source(query, source_text):
+                        alias_translation = self._project_alias_translation(query, term, translation)
+                    if alias_translation:
+                        results[query] = alias_translation
+                        if return_debug:
+                            query_details["alias_projection"] = {
+                                "from_term": term,
+                                "query": query,
+                                "translation": alias_translation,
+                            }
+                    else:
+                        results[term] = translation
+
+                try:
+                    log_emit(log_callback, self.config, "DEBUG",
+                             f"[RAG] Keyword '{query}' -> selected {query_selected_terms}",
+                             module="rag_search", func="search",
+                             extra={"query": query, "selected_terms": query_selected_terms})
+                except Exception:
+                    pass
 
             except Exception as e:
                 log_emit(None, self.config, "ERROR",
@@ -513,7 +666,6 @@ class RAGSearcher:
         if not unique_queries or self.vector_store.vectors is None:
             return query_embeddings
 
-        # Check embedding cache first
         uncached = unique_queries
         if self.embedding_cache is not None:
             model = self.config.get("embedding", "model", "text-embedding-ada-002")
@@ -530,7 +682,6 @@ class RAGSearcher:
                 batch_vecs = self.llm_client.get_embedding(batch_qs, log_callback=log_callback)
                 for q, v in zip(batch_qs, batch_vecs):
                     query_embeddings[q] = v
-                    # Store in embedding cache
                     if self.embedding_cache is not None:
                         model = self.config.get("embedding", "model", "text-embedding-ada-002")
                         self.embedding_cache.put(q, model, v)

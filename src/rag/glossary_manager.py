@@ -66,17 +66,14 @@ class GlossaryManager:
         'of', 'the', 'and', 'or', 'to', 'for', 'in', 'on', 'at', 'from', 'with',
     })
 
-    def __init__(self, glossary_path: str, stopwords_path: str, config_manager):
+    def __init__(self, glossary_path: str, config_manager):
         self.config = config_manager
         self.glossary_path = glossary_path
-        self.stopwords_path = stopwords_path
         self.glossary: dict[str, str] = {}
         self._glossary_lookup: dict[str, str] = {}
         self._token_df: Dict[str, int] = {}
-        self._stopwords_set: frozenset = frozenset()
 
         self.load()
-        self.load_stopwords()
 
     # --- Normalization ---
 
@@ -175,39 +172,6 @@ class GlossaryManager:
         """Save glossary to disk."""
         with open(self.glossary_path, "w", encoding="utf-8") as f:
             json.dump(self.glossary, f, indent=4, ensure_ascii=False)
-
-    def load_stopwords(self) -> None:
-        """Load external stopwords configuration."""
-        stopwords: set[str] = set()
-        stopwords_path = self.stopwords_path
-
-        if not os.path.exists(stopwords_path) and os.path.normpath(stopwords_path) == os.path.normpath("stopwords.json"):
-            candidate = os.path.join("data", "stopwords.json")
-            if os.path.exists(candidate):
-                stopwords_path = candidate
-
-        if os.path.exists(stopwords_path):
-            try:
-                with open(stopwords_path, "r", encoding="utf-8") as f:
-                    stopwords_config = json.load(f)
-                for category in stopwords_config.values():
-                    if isinstance(category, dict) and "terms" in category:
-                        terms = category["terms"]
-                        if isinstance(terms, list):
-                            stopwords.update(term.lower() for term in terms if isinstance(term, str))
-                log_emit(None, self.config, "INFO",
-                         f"Loaded {len(stopwords)} stopwords from {stopwords_path}",
-                         module="glossary_manager", func="load_stopwords")
-            except Exception as e:
-                log_emit(None, self.config, "WARNING",
-                         f"Failed to load stopwords from {stopwords_path}: {e}",
-                         exc=e, module="glossary_manager", func="load_stopwords")
-        else:
-            log_emit(None, self.config, "INFO",
-                     f"Stopwords file not found at {stopwords_path}, using default filtering only",
-                     module="glossary_manager", func="load_stopwords")
-
-        self._stopwords_set = frozenset(stopwords)
 
     # --- CRUD ---
 

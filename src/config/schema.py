@@ -39,12 +39,12 @@ class RAGConfig:
     long_term_max_results: int = 2
     keyword_max_queries: int = 8
     keyword_llm_max_tokens: int = 96
-    keyword_skip_llm_for_simple_text: bool = True
-    keyword_simple_text_max_chars: int = 96
-    keyword_simple_text_max_words: int = 12
-    ai_disambiguate_short_name_candidates: bool = True
-    ai_disambiguation_max_candidates: int = 8
-    ai_disambiguation_max_tokens: int = 96
+    ai_candidate_selection_enabled: bool = True
+    ai_candidate_pool_size: int = 12
+    ai_candidate_max_select: int = 6
+    ai_candidate_max_tokens: int = 96
+    ai_candidate_context_chars: int = 320
+    ai_candidate_min_vector_score: float = 0.45
 
 
 @dataclass
@@ -63,7 +63,6 @@ class GeneralConfig:
 class PathsConfig:
     glossary_file: str = "glossary.json"
     vector_index_file: str = "vector_index.npy"
-    stopwords_file: str = "data/stopwords.json"
 
 
 @dataclass
