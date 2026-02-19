@@ -20,6 +20,13 @@ class RAGSearcher:
     _ALIAS_CONNECTORS = frozenset({
         "the", "of", "de", "da", "del", "di", "van", "von", "le", "la", "el",
     })
+    _NEGATION_CONTRACTION_STEMS = frozenset({
+        "isn", "aren", "wasn", "weren",
+        "hasn", "haven", "hadn",
+        "don", "doesn", "didn",
+        "won", "wouldn", "couldn", "shouldn",
+        "mustn", "mightn", "needn", "shan", "ain",
+    })
     _LEADING_QUOTED_SPAN_RE = re.compile(
         r'^\s*["\'\u201c\u201d\u2018\u2019\u300c\u300d\u300e\u300f\u300a\u300b\u3010\u3011\(\[]\s*[^"\'\u201c\u201d\u2018\u2019\u300c\u300d\u300e\u300f\u300a\u300b\u3010\u3011\(\)\[\]]{1,30}\s*["\'\u201c\u201d\u2018\u2019\u300d\u300f\u300b\u3011\)\]]\s*'
     )
@@ -72,6 +79,25 @@ class RAGSearcher:
         if isinstance(value, str):
             return value.strip().lower() in ("1", "true", "yes", "on")
         return bool(value)
+
+    def _is_low_signal_query(self, query: str) -> bool:
+        normalized = self.glossary_manager.normalize_term_key(query)
+        if not normalized:
+            return True
+        tokens = [t for t in normalized.split() if t]
+        if not tokens:
+            return True
+        if all(t in self.glossary_manager._COMMON_WORDS for t in tokens):
+            return True
+        if len(tokens) == 1:
+            token = tokens[0]
+            if len(token) < 3:
+                return True
+            if token in self.glossary_manager._COMMON_WORDS:
+                return True
+            if token in self._NEGATION_CONTRACTION_STEMS:
+                return True
+        return False
 
     # --- Matching helpers ---
 
@@ -510,6 +536,7 @@ class RAGSearcher:
             total_limit = total_limit_default
             if total_limit <= 0:
                 continue
+            skip_semantic_recall = self._is_low_signal_query(query)
 
             query_selected_terms: list[str] = []
             query_details: Dict[str, Any] = {
@@ -520,6 +547,7 @@ class RAGSearcher:
                 "ai_selected": [],
                 "alias_projection": None,
                 "dropped_alias_expansions": [],
+                "low_signal_skipped": skip_semantic_recall,
                 "selected_terms": query_selected_terms,
             }
             if debug_info is not None:
@@ -552,6 +580,11 @@ class RAGSearcher:
                 vector_matches: list[tuple[str, float]] = []
                 direct_mode_term: Optional[str] = None
 
+                if skip_semantic_recall:
+                    log_emit(log_callback, self.config, "DEBUG",
+                             f"[RAG] Query '{query}' marked low-signal; skipping semantic/containment recall",
+                             module="rag_search", func="search")
+
                 # 0) Deterministic direct match
                 direct_term = self._resolve_direct_match_term(query, source_text)
                 if direct_term:
@@ -575,7 +608,7 @@ class RAGSearcher:
                         if source_text and self._raw_term_appears_in_source(direct_alias_term, source_text):
                             direct_mode_term = direct_alias_term
 
-                if vector_ready and direct_mode_term is None:
+                if vector_ready and direct_mode_term is None and not skip_semantic_recall:
                     raw_vec = query_embeddings.get(query)
                     if raw_vec is None:
                         raw_vec = self.llm_client.get_embedding(query, log_callback=log_callback)

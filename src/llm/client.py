@@ -82,6 +82,18 @@ class LLMClient:
                           self.config.get("llm", "max_retries", 3)))
         backoff_base = float(self.config.get(config_section, "backoff_base",
                              self.config.get("llm", "backoff_base", 0.5)))
+        timeout_base = float(self.config.get(config_section, "request_timeout",
+                             self.config.get("llm", "request_timeout", 30)))
+        timeout_step = float(self.config.get(config_section, "request_timeout_step",
+                             self.config.get("llm", "request_timeout_step", 15)))
+        timeout_max = float(self.config.get(config_section, "request_timeout_max",
+                            self.config.get("llm", "request_timeout_max", 180)))
+        if timeout_base <= 0:
+            timeout_base = 30.0
+        if timeout_step < 0:
+            timeout_step = 0.0
+        if timeout_max < timeout_base:
+            timeout_max = timeout_base
 
         # Build final parameters
         final_params: dict[str, Any] = {}
@@ -113,8 +125,22 @@ class LLMClient:
                  f"{operation} LLM call: model={model} messages_len={len(messages)}",
                  module="llm_client", func="_call")
 
+        attempt_counter = {"count": 0}
+
         def do_call():
-            response = client.chat.completions.create(**request_args)
+            attempt_counter["count"] += 1
+            call_timeout = min(
+                timeout_base + timeout_step * (attempt_counter["count"] - 1),
+                timeout_max,
+            )
+            if attempt_counter["count"] > 1:
+                log_emit(callback, self.config, "DEBUG",
+                         f"{operation} retry request timeout={call_timeout:.1f}s attempt={attempt_counter['count']}",
+                         module="llm_client", func="_call")
+
+            call_args = dict(request_args)
+            call_args["timeout"] = call_timeout
+            response = client.chat.completions.create(**call_args)
             # Track cost if tracker available
             if self.cost_tracker and hasattr(response, "usage") and response.usage:
                 self.cost_tracker.record(

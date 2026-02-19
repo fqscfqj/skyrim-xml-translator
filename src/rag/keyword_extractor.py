@@ -18,7 +18,14 @@ class KeywordExtractor:
     _WHITESPACE_RE = re.compile(r"\s+")
     _WORD_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9'\-]*")
     _STRIP_PUNCT_RE = re.compile(r"^[^\w\u4e00-\u9fff]+|[^\w\u4e00-\u9fff]+$")
-    _KW_CACHE_VERSION = "kw_v4"
+    _KW_CACHE_VERSION = "kw_v5"
+    _NEGATION_CONTRACTION_STEMS = frozenset({
+        "isn", "aren", "wasn", "weren",
+        "hasn", "haven", "hadn",
+        "don", "doesn", "didn",
+        "won", "wouldn", "couldn", "shouldn",
+        "mustn", "mightn", "needn", "shan", "ain",
+    })
 
     # Lowercase connectors in title-cased proper nouns.
     _TITLE_CONNECTORS = frozenset({
@@ -349,9 +356,56 @@ class KeywordExtractor:
             pass
         return limited
 
+    def _is_low_signal_keyword(self, keyword: str) -> bool:
+        normalized = self.glossary_manager.normalize_term_key(keyword)
+        if not normalized:
+            return True
+
+        tokens = [t for t in normalized.split() if t]
+        if not tokens:
+            return True
+
+        if all(t in self.glossary_manager._COMMON_WORDS for t in tokens):
+            return True
+
+        if len(tokens) == 1:
+            token = tokens[0]
+            if len(token) < 3:
+                return True
+            if token in self.glossary_manager._COMMON_WORDS:
+                return True
+            if token in self._NEGATION_CONTRACTION_STEMS:
+                return True
+
+        return False
+
+    def _filter_low_signal_keywords(self, keywords: list[str], log_callback) -> list[str]:
+        if not keywords:
+            return []
+
+        kept = []
+        dropped = []
+        for kw in keywords:
+            if self._is_low_signal_keyword(kw):
+                dropped.append(kw)
+                continue
+            kept.append(kw)
+
+        if dropped:
+            try:
+                preview = dropped[:10]
+                suffix = "..." if len(dropped) > 10 else ""
+                log_emit(log_callback, self.config, "DEBUG",
+                         f"[RAG] Dropped {len(dropped)} low-signal keyword(s): {preview}{suffix}",
+                         module="keyword_extractor", func="_filter_low_signal_keywords")
+            except Exception:
+                pass
+        return kept
+
     def _finalize_keywords(self, keywords: list[str], text: str, log_callback) -> list[str]:
         keywords = self._deduplicate(keywords)
         keywords = self._filter_present_in_text(keywords, text, log_callback)
+        keywords = self._filter_low_signal_keywords(keywords, log_callback)
         keywords = self._limit_keywords(keywords, log_callback)
         return keywords
 

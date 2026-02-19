@@ -13,6 +13,8 @@ class LLMConfig:
     backoff_base: float = 0.5
     stream: bool = False
     request_timeout: int = 30
+    request_timeout_step: int = 15
+    request_timeout_max: int = 180
     parameters: dict = field(default_factory=lambda: {
         "temperature": None,
         "top_p": None,

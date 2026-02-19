@@ -3,6 +3,9 @@
         "api_key": "<YOUR_LLM_API_KEY>",
         "base_url": "https://api.example.com/v1",
         "model": "gpt-3.5-turbo",
+        "request_timeout": 30,
+        "request_timeout_step": 15,
+        "request_timeout_max": 180,
         "parameters": {
             "temperature": null,
             "top_p": null,
@@ -16,6 +19,9 @@
         "api_key": "<YOUR_SEARCH_LLM_API_KEY>",
         "base_url": "https://api.example.com/v1",
         "model": "gpt-3.5-turbo",
+        "request_timeout": 30,
+        "request_timeout_step": 15,
+        "request_timeout_max": 180,
         "parameters": {
             "temperature": null,
             "top_p": null,
