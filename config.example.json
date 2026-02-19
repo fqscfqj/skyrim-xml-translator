@@ -43,7 +43,15 @@
         "similarity_threshold": 0.75,
         "short_term_max_tokens": 6,
         "short_term_max_results": 5,
-        "long_term_max_results": 2
+        "long_term_max_results": 2,
+        "keyword_max_queries": 8,
+        "keyword_llm_max_tokens": 96,
+        "keyword_skip_llm_for_simple_text": true,
+        "keyword_simple_text_max_chars": 96,
+        "keyword_simple_text_max_words": 12,
+        "ai_disambiguate_short_name_candidates": true,
+        "ai_disambiguation_max_candidates": 8,
+        "ai_disambiguation_max_tokens": 96
     }
     ,
     "general": {

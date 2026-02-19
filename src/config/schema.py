@@ -37,6 +37,14 @@ class RAGConfig:
     short_term_max_tokens: int = 6
     short_term_max_results: int = 5
     long_term_max_results: int = 2
+    keyword_max_queries: int = 8
+    keyword_llm_max_tokens: int = 96
+    keyword_skip_llm_for_simple_text: bool = True
+    keyword_simple_text_max_chars: int = 96
+    keyword_simple_text_max_words: int = 12
+    ai_disambiguate_short_name_candidates: bool = True
+    ai_disambiguation_max_candidates: int = 8
+    ai_disambiguation_max_tokens: int = 96
 
 
 @dataclass
