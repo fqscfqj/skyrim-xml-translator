@@ -24,6 +24,19 @@ class PromptBuilder:
     _ALNUM_END_RE = re.compile(r"[a-z0-9_]$")
     _CAPITALIZED_TOKEN_RE = re.compile(r"^[A-Z][a-zA-Z]")
     _ALL_UPPER_RE = re.compile(r"^[A-Z][A-Z\s\-']+$")
+    _SENTENCE_INITIAL_TWO_WORDS_RE = re.compile(
+        r"^\s*([A-Za-z][A-Za-z0-9'\-]*)\s+([A-Za-z][A-Za-z0-9'\-]*)"
+    )
+    _ADDITIONAL_COMMON_WORDS = frozenset({
+        "choose", "chose", "chosen", "select", "selected",
+    })
+    _IMPERATIVE_SECOND_TOKEN_HINTS = frozenset({
+        "a", "an", "the",
+        "my", "your", "his", "her", "its", "our", "their",
+        "this", "that", "these", "those",
+        "me", "him", "her", "us", "them", "it",
+        "all", "any", "some", "each", "every",
+    })
     _COMMON_WORD_RE = re.compile(
         r"^(?:the|a|an|and|or|but|in|on|at|to|for|of|with|by|from|is|are|was|were|"
         r"be|been|being|have|has|had|do|does|did|will|would|shall|should|may|might|"
@@ -185,7 +198,7 @@ class PromptBuilder:
             v_str = "" if v is None else str(v)
             if self._term_appears_in_source(k, source_text):
                 display_term = self._strip_term_edge_punct(k) or k
-                term_type = self.classify_term_type(display_term)
+                term_type = self.classify_term_type(display_term, source_text=source_text)
                 if term_type == "proper_noun":
                     proper_noun_lines.append(f"- {display_term} : {v_str}")
                 else:
@@ -225,7 +238,7 @@ class PromptBuilder:
 
         return glossary_header + "\n\n" + "\n\n".join(sections)
 
-    def classify_term_type(self, term: Optional[str]) -> str:
+    def classify_term_type(self, term: Optional[str], source_text: Optional[str] = None) -> str:
         """Classify a glossary term as 'proper_noun' or 'stylistic'."""
         if not term or not isinstance(term, str):
             return "stylistic"
@@ -238,9 +251,14 @@ class PromptBuilder:
 
         tokens = term.split()
         if len(tokens) == 1:
-            if self._COMMON_WORD_RE.match(term):
+            token_lower = term.lower()
+            if self._COMMON_WORD_RE.match(token_lower):
+                return "stylistic"
+            if token_lower in self._ADDITIONAL_COMMON_WORDS:
                 return "stylistic"
             if self._CAPITALIZED_TOKEN_RE.match(term):
+                if self._is_sentence_initial_imperative_like(term, source_text):
+                    return "stylistic"
                 return "proper_noun"
             if term == term.lower():
                 return "stylistic"
@@ -267,6 +285,24 @@ class PromptBuilder:
             return "proper_noun"
 
         return "stylistic"
+
+    def _is_sentence_initial_imperative_like(
+            self,
+            term: str,
+            source_text: Optional[str]) -> bool:
+        """Detect sentence-initial command verbs like 'Choose your ...'."""
+        if not term or not source_text:
+            return False
+
+        first_two = self._SENTENCE_INITIAL_TWO_WORDS_RE.search(str(source_text))
+        if not first_two:
+            return False
+
+        first_token = first_two.group(1)
+        second_token = first_two.group(2).lower()
+        if first_token.lower() != term.lower():
+            return False
+        return second_token in self._IMPERATIVE_SECOND_TOKEN_HINTS
 
     @staticmethod
     def apply_prompt_vars(template: str, variables: dict) -> str:

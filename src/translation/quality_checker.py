@@ -61,7 +61,7 @@ class QualityChecker:
 
         # Layer 3: Proper noun compliance
         if matched_terms:
-            noun_issues = self._check_proper_noun_compliance(translation, matched_terms)
+            noun_issues = self._check_proper_noun_compliance(source, translation, matched_terms)
             issues.extend(noun_issues)
 
         # Layer 4: Format preservation
@@ -77,7 +77,14 @@ class QualityChecker:
 
     def should_retry(self, issues: list[QualityIssue]) -> bool:
         """Determine if the translation should be retried based on issues."""
-        return any(i.severity == "error" for i in issues)
+        if any(i.severity == "error" for i in issues):
+            return True
+
+        retry_warning_types = {
+            QualityIssueType.UNTRANSLATED_FRAGMENTS,
+            QualityIssueType.PROPER_NOUN_MISMATCH,
+        }
+        return any(i.issue_type in retry_warning_types for i in issues)
 
     def get_retry_context(self, issues: list[QualityIssue]) -> dict:
         """Build context for retry prompt based on detected issues."""
@@ -167,7 +174,7 @@ class QualityChecker:
 
     # --- Layer 3: Proper noun compliance ---
 
-    def _check_proper_noun_compliance(self, translation: str,
+    def _check_proper_noun_compliance(self, source: str, translation: str,
                                       matched_terms: dict) -> list[QualityIssue]:
         """Check if mandatory glossary terms are used in the translation."""
         issues = []
@@ -180,7 +187,8 @@ class QualityChecker:
             if not expected_translation.strip():
                 continue
 
-            term_type = PromptBuilder.classify_term_type(builder, term)
+            term_type = PromptBuilder.classify_term_type(
+                builder, term, source_text=source)
             if term_type != "proper_noun":
                 continue
 

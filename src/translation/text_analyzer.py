@@ -8,7 +8,8 @@ class TextAnalyzer:
     # Compile regex patterns once
     _XML_TAG_RE = re.compile(r'<[^>]+>')
     _PLACEHOLDER_RE = re.compile(r'%\w+|\{\d+\}|\[[^\]]*\]')
-    _ENGLISH_WORD_RE = re.compile(r'\b[a-zA-Z]{2,}\b')
+    # Match latin words even when adjacent to CJK (e.g. "Choose你的").
+    _ENGLISH_WORD_RE = re.compile(r'(?<![A-Za-z])[A-Za-z]{2,}(?![A-Za-z])')
     _CJK_CHAR_RE = re.compile(r'[\u4e00-\u9fff]')
     _ALPHA_CHAR_RE = re.compile(r'[a-zA-Z]')
     _WHITESPACE_RE = re.compile(r'\s+')

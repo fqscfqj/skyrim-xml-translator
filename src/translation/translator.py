@@ -128,9 +128,12 @@ class Translator:
         cached = self._translation_cache.get(
             str(text), prompt_style, target_lang, context_key=runtime_context_key)
         if cached is not None and str(cached).strip():
-            if self._is_suspicious_identity_translation(str(text), str(cached)):
+            if self._should_reject_cached_translation(
+                    source=str(text),
+                    translation=str(cached),
+                    target_lang=str(target_lang)):
                 log_emit(log_callback, self.rag_engine.config, "DEBUG",
-                         "Ignoring suspicious identity cache entry (possible missed translation)",
+                         "Ignoring suspicious cache entry (possible missed translation/fragment)",
                          module="translator", func="translate_text")
             else:
                 log_emit(log_callback, self.rag_engine.config, "DEBUG",
@@ -400,6 +403,29 @@ class Translator:
                 "Preserve ALL tags and placeholders exactly. Translate to {target_language} now:",
                 prompt_vars)
 
+        # Check for glossary mandatory-term misses
+        noun_issues = [i for i in issues
+                      if i.issue_type == QualityIssueType.PROPER_NOUN_MISMATCH]
+        if noun_issues:
+            terms = []
+            for issue in noun_issues:
+                terms.extend(issue.fragments[:3])
+            deduped = []
+            seen = set()
+            for term in terms:
+                key = str(term).strip().lower()
+                if key and key not in seen:
+                    seen.add(key)
+                    deduped.append(str(term).strip())
+            terms_str = ", ".join(deduped[:5]) if deduped else "N/A"
+            retry_template = self.prompt_manager.get(
+                "translator.retry.proper_noun_mismatch",
+                "CRITICAL: You missed mandatory glossary terms: [{terms}]. "
+                "Apply the exact dictionary translations and translate to {target_language} now:",
+            )
+            return PromptBuilder.apply_prompt_vars(
+                retry_template, {**prompt_vars, "terms": terms_str})
+
         # Generic retry
         retry_template = self.prompt_manager.get(
             "translator.retry.generic",
@@ -454,6 +480,26 @@ class Translator:
         words = self._text_analyzer.extract_english_words(source)
         return len(words) >= 2
 
+    def _should_reject_cached_translation(
+            self,
+            source: str,
+            translation: str,
+            target_lang: str) -> bool:
+        """Guard cache hits against stale low-quality outputs."""
+        lang = (target_lang or "").strip().lower()
+        if lang.startswith("en"):
+            return False
+
+        if self._is_suspicious_identity_translation(source, translation):
+            return True
+
+        untranslated_issue = self._quality_checker._check_untranslated(source, translation)
+        if untranslated_issue is not None:
+            return True
+
+        fragment_issues = self._quality_checker._check_untranslated_fragments(source, translation)
+        return bool(fragment_issues)
+
     # --- Backward-compatible private methods (used by old code paths) ---
 
     def _extract_english_words(self, text: str) -> set:
@@ -468,8 +514,8 @@ class Translator:
     def _apply_prompt_vars(self, template: str, variables: dict) -> str:
         return PromptBuilder.apply_prompt_vars(template, variables)
 
-    def _classify_term_type(self, term) -> str:
-        return self._prompt_builder.classify_term_type(term)
+    def _classify_term_type(self, term, source_text: Optional[str] = None) -> str:
+        return self._prompt_builder.classify_term_type(term, source_text=source_text)
 
     def _build_glossary_context(self, source_text: str, matched_terms: dict) -> str:
         return self._prompt_builder.build_glossary_context(source_text, matched_terms)
