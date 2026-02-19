@@ -171,5 +171,5 @@ def execute_with_retry(
             delay = compute_delay(strategy, attempt, min_delay=retry_after)
             log_emit(log_callback, config_manager, "WARNING",
                      f"{log_prefix} transient error ({error_type.value}, attempt {attempt}/{strategy.max_retries}, wait={delay:.2f}s): {exc}",
-                     exc=exc, module="llm.retry", func="execute_with_retry")
+                     module="llm.retry", func="execute_with_retry")
             time.sleep(delay)

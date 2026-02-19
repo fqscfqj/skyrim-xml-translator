@@ -14,7 +14,6 @@ __pycache__/
 *.egg-info/
 env/
 .venv/
-SkyrimXMLTranslator.spec
 
 # VS Code
 .vscode/
@@ -29,3 +28,5 @@ test_performance.py
 
 # Claude Code temporary files
 tmpclaude-*
+
+SkyrimXMLTranslator.spec
