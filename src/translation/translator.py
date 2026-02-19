@@ -36,13 +36,21 @@ class Translator:
 
         # Best-effort cache for visualization; NOT thread-safe.
         self._last_rag_debug_info = None
+        self._runtime_flags = {"mcm_ui_mode": False}
 
     # --- Public API (backward-compatible) ---
 
     def get_last_rag_debug_info(self):
         return self._last_rag_debug_info
 
-    def get_rag_debug_info(self, text, use_rag=True, log_callback=None):
+    def set_runtime_flags(self, flags: Optional[dict] = None) -> None:
+        mcm_ui_mode = False
+        if isinstance(flags, dict):
+            mcm_ui_mode = bool(flags.get("mcm_ui_mode", False))
+        self._runtime_flags = {"mcm_ui_mode": mcm_ui_mode}
+
+    def get_rag_debug_info(self, text, use_rag=True, log_callback=None,
+                           context_hint: Optional[dict] = None):
         """获取RAG处理过程的详细调试信息，用于可视化"""
         debug_info = {
             "original_text": text,
@@ -82,8 +90,10 @@ class Translator:
                     text, debug_info["matched_terms"])
 
         prompt_style = self.rag_engine.config.get("general", "prompt_style", "default")
+        mcm_ui_mode = bool(self._runtime_flags.get("mcm_ui_mode", False))
         system_prompt, user_prompt = self._prompt_builder.build(
-            text, debug_info.get("matched_terms", {}), prompt_style)
+            text, debug_info.get("matched_terms", {}), prompt_style,
+            mcm_ui_mode=mcm_ui_mode, context_hint=context_hint)
 
         debug_info["system_prompt"] = system_prompt
         debug_info["user_prompt"] = user_prompt
@@ -91,7 +101,8 @@ class Translator:
         return debug_info
 
     def translate_text(self, text, use_rag=True, log_callback=None,
-                       max_retries=2, return_debug_info: bool = False):
+                       max_retries=2, return_debug_info: bool = False,
+                       context_hint: Optional[dict] = None):
         if not text or not str(text).strip():
             if return_debug_info:
                 return "", self._empty_debug_info(text)
@@ -109,14 +120,20 @@ class Translator:
         # Check translation cache
         prompt_style = self.rag_engine.config.get("general", "prompt_style", "default")
         target_lang = self.rag_engine.config.get("general", "target_language", "zh")
-        cached = self._translation_cache.get(str(text), prompt_style, target_lang)
-        if cached is not None:
+        runtime_context_key = "mcm_ui" if self._runtime_flags.get("mcm_ui_mode", False) else ""
+        cached = self._translation_cache.get(
+            str(text), prompt_style, target_lang, context_key=runtime_context_key)
+        if cached is not None and str(cached).strip():
             log_emit(log_callback, self.rag_engine.config, "DEBUG",
                      f"Translation cache hit for text (len={len(text)})",
                      module="translator", func="translate_text")
             if return_debug_info:
                 return cached, self._empty_debug_info(text)
             return cached
+        if cached is not None and not str(cached).strip():
+            log_emit(log_callback, self.rag_engine.config, "DEBUG",
+                     "Ignoring empty cached translation (treat as cache miss)",
+                     module="translator", func="translate_text")
 
         # Reload prompts if changed
         try:
@@ -177,8 +194,10 @@ class Translator:
                 glossary_context = self._prompt_builder.build_glossary_context(text, matched_terms)
 
         # Build prompt
+        mcm_ui_mode = bool(self._runtime_flags.get("mcm_ui_mode", False))
         system_prompt, user_content = self._prompt_builder.build(
-            text, matched_terms, prompt_style)
+            text, matched_terms, prompt_style,
+            mcm_ui_mode=mcm_ui_mode, context_hint=context_hint)
 
         debug_info = None
         if return_debug_info:
@@ -230,7 +249,10 @@ class Translator:
 
                 if not issues or not self._quality_checker.should_retry(issues):
                     # Good enough - cache and return
-                    self._translation_cache.put(str(text), prompt_style, target_lang, translation)
+                    if str(translation).strip():
+                        self._translation_cache.put(
+                            str(text), prompt_style, target_lang, translation,
+                            context_key=runtime_context_key)
                     if return_debug_info:
                         return translation, debug_info
                     return translation
@@ -248,7 +270,10 @@ class Translator:
                         log_emit(log_callback, self.rag_engine.config, "INFO",
                                  f"Accepting translation with minor issues after {max_retries} retries",
                                  module="translator", func="translate_text")
-                        self._translation_cache.put(str(text), prompt_style, target_lang, translation)
+                        if str(translation).strip():
+                            self._translation_cache.put(
+                                str(text), prompt_style, target_lang, translation,
+                                context_key=runtime_context_key)
                         if return_debug_info:
                             return translation, debug_info
                         return translation

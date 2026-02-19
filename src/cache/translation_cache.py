@@ -9,13 +9,14 @@ class TranslationCache:
     def __init__(self, max_size: int = 50000, persist_path: Optional[str] = None):
         self._cache = LRUCache(max_size=max_size, persist_path=persist_path)
 
-    def get(self, source_text: str, prompt_style: str, target_lang: str) -> Optional[str]:
-        key = self._make_key(source_text, prompt_style, target_lang)
+    def get(self, source_text: str, prompt_style: str, target_lang: str,
+            context_key: str = "") -> Optional[str]:
+        key = self._make_key(source_text, prompt_style, target_lang, context_key)
         return self._cache.get(key)
 
     def put(self, source_text: str, prompt_style: str, target_lang: str,
-            translation: str) -> None:
-        key = self._make_key(source_text, prompt_style, target_lang)
+            translation: str, context_key: str = "") -> None:
+        key = self._make_key(source_text, prompt_style, target_lang, context_key)
         self._cache.put(key, translation)
 
     def invalidate_by_style(self, prompt_style: str) -> None:
@@ -39,5 +40,5 @@ class TranslationCache:
         return self._cache.size()
 
     @staticmethod
-    def _make_key(source: str, style: str, lang: str) -> str:
-        return LRUCache.make_key(source, style, lang)
+    def _make_key(source: str, style: str, lang: str, context_key: str = "") -> str:
+        return LRUCache.make_key(source, style, lang, context_key)

@@ -59,7 +59,9 @@ class PromptBuilder:
     # --- Public API ---
 
     def build(self, source_text: str, matched_terms: dict,
-              prompt_style: str = "default") -> tuple[str, str]:
+              prompt_style: str = "default",
+              mcm_ui_mode: bool = False,
+              context_hint: Optional[dict] = None) -> tuple[str, str]:
         """Build complete (system_prompt, user_content) for a translation request."""
         source_lang_setting = self.config.get("general", "source_language", "auto")
         target_lang_setting = self.config.get("general", "target_language", "zh")
@@ -85,10 +87,85 @@ class PromptBuilder:
             glossary_append = self.apply_prompt_vars(glossary_append, prompt_vars)
             system_prompt += f"\n\n{glossary_context}{glossary_append}"
 
+        if mcm_ui_mode:
+            system_prompt += self._build_mcm_ui_rules(
+                target_lang_code=target_lang_code,
+                source_text=source_text,
+                context_hint=context_hint,
+            )
+
         user_template = self.prompt_manager.get("translator.user_template", "Input: {text}")
         user_content = self.apply_prompt_vars(user_template, {**prompt_vars, "text": source_text})
 
         return system_prompt, user_content
+
+    def _build_mcm_ui_rules(self, target_lang_code: str, source_text: str,
+                            context_hint: Optional[dict]) -> str:
+        entry_id = ""
+        entry_type_hint = ""
+        if isinstance(context_hint, dict):
+            entry_id = str(context_hint.get("entry_id", "") or "")
+            entry_type_hint = str(context_hint.get("entry_type", "") or "")
+
+        entry_type = entry_type_hint or self._infer_mcm_entry_type(entry_id)
+        base_rules = [
+            "MCM UI MODE (MANDATORY): treat this as game UI copy, not prose.",
+            "Keep wording stable across all similar UI entries in this file; do not alternate synonyms.",
+            "Buttons/options must stay short and command-like; do not add subjects or extra punctuation.",
+            "Do not turn short labels into full sentences.",
+            "Keep placeholders, tags, tokens, braces, and escaped sequences unchanged.",
+        ]
+
+        if target_lang_code.lower().startswith("zh"):
+            base_rules.append(
+                "For Chinese UI consistency, lock core terms: "
+                "Enable=启用, Disable=禁用, Apply=应用, Reset=重置, Confirm=确认, "
+                "Cancel=取消, On=开, Off=关, Yes=是, No=否."
+            )
+
+        if entry_type == "tooltip":
+            base_rules.append(
+                "Tooltip style: concise explanatory statement style only; "
+                "do not mix '是否…' and '将会…' patterns for similar tips."
+            )
+        elif entry_type == "title":
+            base_rules.append(
+                "Title/header style: noun phrase only, no sentence-ending punctuation."
+            )
+        elif entry_type == "option":
+            base_rules.append(
+                "Option label style: keep it as a compact setting label, not a full clause."
+            )
+        else:
+            if self._looks_like_short_ui_label(source_text):
+                base_rules.append(
+                    "This input is a short label/button: keep translation very short and UI-like."
+                )
+
+        joined = "\n".join(f"- {r}" for r in base_rules)
+        return f"\n\n### MCM UI Copy Rules (MANDATORY)\n{joined}"
+
+    @staticmethod
+    def _infer_mcm_entry_type(entry_id: str) -> str:
+        key = (entry_id or "").upper()
+        if "_TT_" in key:
+            return "tooltip"
+        if "HEADER" in key or "PAGE" in key:
+            return "title"
+        if "FILTER" in key or "OPTION" in key or "CONFIRM" in key:
+            return "option"
+        return "generic"
+
+    @staticmethod
+    def _looks_like_short_ui_label(text: str) -> bool:
+        if not text:
+            return False
+        stripped = str(text).strip()
+        if not stripped:
+            return False
+        if len(stripped) <= 24 and "\n" not in stripped and "." not in stripped and "?" not in stripped:
+            return True
+        return len(stripped.split()) <= 4
 
     def build_glossary_context(self, source_text: str, matched_terms: dict) -> str:
         """Build structured glossary context with proper/stylistic/alias/related sections."""

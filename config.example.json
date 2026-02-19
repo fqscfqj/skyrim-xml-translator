@@ -47,6 +47,10 @@
     "general": {
         "log_level": "INFO",
         "prompt_style": "default",
-        "language": "auto"
+        "language": "auto",
+        "source_language": "auto",
+        "target_language": "zh",
+        "mcm_output_language_suffix": "source",
+        "mcm_auto_export": true
     }
 }

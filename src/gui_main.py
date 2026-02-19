@@ -1,6 +1,7 @@
 import sys
 import os
 import threading
+import shutil
 from typing import Optional, cast
 import csv
 from concurrent.futures import ThreadPoolExecutor
@@ -17,6 +18,7 @@ from src.config_manager import ConfigManager
 from src.llm_client import LLMClient
 from src.rag_engine import RAGEngine
 from src.xml_processor import XMLProcessor
+from src.mcm_processor import MCMProcessor
 from src.translator import Translator
 from src.logging_helper import emit as log_emit
 from src.i18n import i18n
@@ -112,13 +114,21 @@ class Worker(QThread):
             # 优化：检测重复内容，相同内容只翻译一次
             # 构建源文本到行索引列表的映射
             source_to_rows = {}  # source_text -> [row_idx1, row_idx2, ...]
-            for row_idx, source in self.items_to_process:
+            source_to_context = {}  # source_text -> first context hint
+            for item in self.items_to_process:
+                row_idx = item[0]
+                source = item[1]
+                context_hint = item[2] if len(item) > 2 else None
                 if source not in source_to_rows:
                     source_to_rows[source] = []
+                    source_to_context[source] = context_hint
                 source_to_rows[source].append(row_idx)
             
             # 只需要翻译的唯一文本列表
-            unique_items = [(rows[0], source) for source, rows in source_to_rows.items()]
+            unique_items = [
+                (rows[0], source, source_to_context.get(source))
+                for source, rows in source_to_rows.items()
+            ]
             unique_count = len(unique_items)
             duplicates_saved = total - unique_count
             
@@ -134,7 +144,9 @@ class Worker(QThread):
             translation_cache = {}  # source_text -> translation
 
             def translate_task(item):
-                row_idx, source = item
+                row_idx = item[0]
+                source = item[1]
+                context_hint = item[2] if len(item) > 2 else None
                 if not self.is_running or self.stop_receiving:
                     return None
                 # Wait while paused using threading.Event for efficient blocking.
@@ -148,6 +160,7 @@ class Worker(QThread):
                         source,
                         log_callback=self.log.emit,
                         return_debug_info=True,
+                        context_hint=context_hint,
                     )
                     return (row_idx, source, translation, debug_info)
                 except Exception as e:
@@ -294,12 +307,14 @@ class NoWheelComboBox(QComboBox):
 
 class RAGVisualizationDialog(QDialog):
     """对话框用于可视化展示RAG处理过程"""
-    def __init__(self, parent, original_text, translated_text, translator, cached_debug_info=None):
+    def __init__(self, parent, original_text, translated_text, translator,
+                 cached_debug_info=None, context_hint=None):
         super().__init__(parent)
         self.original_text = original_text
         self.translated_text = translated_text
         self.translator = translator
         self.cached_debug_info = cached_debug_info
+        self.context_hint = context_hint
         self.debug_info = None
         
         self.setWindowTitle(i18n.t("title_rag_visualization"))
@@ -455,7 +470,8 @@ class RAGVisualizationDialog(QDialog):
                 debug_info = self.cached_debug_info
             else:
                 # 如果没有缓存，才重新获取RAG调试信息
-                debug_info = self.translator.get_rag_debug_info(self.original_text, use_rag=True)
+                debug_info = self.translator.get_rag_debug_info(
+                    self.original_text, use_rag=True, context_hint=self.context_hint)
 
             self.debug_info = debug_info
             
@@ -652,7 +668,11 @@ class MainWindow(QMainWindow):
         self.llm_client = LLMClient(self.config_manager, log_callback=self.log)
         self.rag_engine = RAGEngine(self.config_manager, self.llm_client)
         self.xml_processor = XMLProcessor()
+        self.mcm_processor = MCMProcessor()
+        self.current_processor = self.xml_processor
+        self.current_file_type = "xml"
         self.translator = Translator(self.llm_client, self.rag_engine)
+        self.translator.set_runtime_flags({"mcm_ui_mode": False})
         self.model_param_controls = {}
         self.search_param_controls = {}
         self.worker = None  # Translation worker reference
@@ -758,7 +778,9 @@ class MainWindow(QMainWindow):
         top_layout = QHBoxLayout()
         
         self.file_path_input = QLineEdit()
-        self.file_path_input.setPlaceholderText(i18n.t("placeholder_select_xml"))
+        self.file_path_input.setPlaceholderText(
+            i18n.t("placeholder_select_translation_file", i18n.t("placeholder_select_xml"))
+        )
         browse_btn = QPushButton(i18n.t("btn_browse"))
         browse_btn.clicked.connect(self.browse_file)
         
@@ -1196,6 +1218,34 @@ class MainWindow(QMainWindow):
         self.target_language_combo.setCurrentIndex(idx)
         form_layout.addRow(i18n.t("label_target_language"), self.target_language_combo)
 
+        self.mcm_suffix_combo = NoWheelComboBox()
+        suffix_options = [
+            ("mcm_suffix_source", "source"),
+            ("mcm_suffix_english", "ENGLISH"),
+            ("mcm_suffix_chinese", "CHINESE"),
+            ("mcm_suffix_japanese", "JAPANESE"),
+            ("mcm_suffix_korean", "KOREAN"),
+            ("mcm_suffix_french", "FRENCH"),
+            ("mcm_suffix_german", "GERMAN"),
+            ("mcm_suffix_spanish", "SPANISH"),
+            ("mcm_suffix_russian", "RUSSIAN"),
+        ]
+        for label_key, value in suffix_options:
+            self.mcm_suffix_combo.addItem(i18n.t(label_key), value)
+        current_mcm_suffix = self.config_manager.get(
+            "general", "mcm_output_language_suffix", "source") or "source"
+        idx = self.mcm_suffix_combo.findData(current_mcm_suffix)
+        if idx == -1:
+            idx = 0
+        self.mcm_suffix_combo.setCurrentIndex(idx)
+        form_layout.addRow(i18n.t("label_mcm_output_suffix"), self.mcm_suffix_combo)
+
+        self.mcm_auto_export_checkbox = QCheckBox(i18n.t("label_mcm_auto_export"))
+        self.mcm_auto_export_checkbox.setChecked(
+            bool(self.config_manager.get("general", "mcm_auto_export", True))
+        )
+        form_layout.addRow(self.mcm_auto_export_checkbox)
+
         self.language_combo = NoWheelComboBox()
         self.language_combo.addItem(i18n.t("language_option_auto"), "auto")
         self.language_combo.addItem(i18n.t("language_option_en"), "en")
@@ -1255,7 +1305,13 @@ class MainWindow(QMainWindow):
     # Note: prompts are intentionally not localized; language changes only affect UI (i18n).
 
     def browse_file(self):
-        fname, _ = QFileDialog.getOpenFileName(self, i18n.t("title_open_xml"), '', "XML files (*.xml)")
+        file_filter = i18n.t("filter_translation_files", "Translation files (*.xml *.txt);;XML files (*.xml);;MCM text files (*.txt)")
+        fname, _ = QFileDialog.getOpenFileName(
+            self,
+            i18n.t("title_open_translation_file", i18n.t("title_open_xml")),
+            "",
+            file_filter,
+        )
         if fname:
             self.file_path_input.setText(fname)
             self.load_xml_to_table()
@@ -1300,17 +1356,15 @@ class MainWindow(QMainWindow):
         
         for row in range(self.trans_table.rowCount()):
             source_item = self.trans_table.item(row, 1)
-            dest_item = self.trans_table.item(row, 2)
             
             if not source_item or not source_item.text():
                 continue
                 
             source_text = source_item.text()
-            dest_text = dest_item.text() if dest_item else ""
             
             # Always overwrite the Dest column contents, so do not skip items
-                
-            items_to_process.append((row, source_text))
+            context_hint = self._build_translation_context(row)
+            items_to_process.append((row, source_text, context_hint))
 
         if not items_to_process:
             log_emit(self.log, self.config_manager, 'WARNING', i18n.t("msg_nothing_to_translate"), module='gui_main', func='start_translation')
@@ -1326,21 +1380,80 @@ class MainWindow(QMainWindow):
         self.worker.finished.connect(self.on_translation_finished)
         self.worker.start()
 
+    def _detect_file_type(self, file_path: str) -> str:
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext == ".xml":
+            return "xml"
+        if ext == ".txt":
+            return "mcm"
+        return "xml"
+
+    def _set_active_file_type(self, file_type: str) -> None:
+        self.current_file_type = file_type
+        if file_type == "mcm":
+            self.current_processor = self.mcm_processor
+            self.translator.set_runtime_flags({"mcm_ui_mode": True})
+        else:
+            self.current_processor = self.xml_processor
+            self.translator.set_runtime_flags({"mcm_ui_mode": False})
+
+    def _save_mcm_with_configured_suffix(self) -> str:
+        suffix_setting = self.config_manager.get(
+            "general", "mcm_output_language_suffix", "source")
+        output_path = self.mcm_processor.build_output_path(str(suffix_setting))
+        if not output_path:
+            raise RuntimeError(i18n.t("msg_file_not_found"))
+
+        source_path = self.mcm_processor.file_path or ""
+        if source_path:
+            try:
+                same_target = os.path.abspath(output_path) == os.path.abspath(source_path)
+            except Exception:
+                same_target = output_path == source_path
+            if same_target and os.path.exists(source_path):
+                backup_path = self._create_backup_for_overwrite(source_path)
+                self.log(f"Backup created: {backup_path}")
+
+        if not self.mcm_processor.save_file(output_path):
+            raise RuntimeError(i18n.t("msg_failed_save").format(error="save failed"))
+        return output_path
+
+    @staticmethod
+    def _create_backup_for_overwrite(source_path: str) -> str:
+        base_backup = source_path + ".bak"
+        backup_path = base_backup
+        index = 1
+        while os.path.exists(backup_path):
+            backup_path = f"{base_backup}.{index}"
+            index += 1
+        shutil.copy2(source_path, backup_path)
+        return backup_path
+
     def load_xml_to_table(self):
         file_path = self.file_path_input.text()
         if not os.path.exists(file_path):
             QMessageBox.warning(self, i18n.t("title_error"), i18n.t("msg_file_not_found"))
             return False
 
+        file_type = self._detect_file_type(file_path)
+        self._set_active_file_type(file_type)
         self.log(i18n.t("msg_loading_file").format(path=file_path))
-        if not self.xml_processor.load_file(file_path):
-            self.log(i18n.t("msg_failed_load_xml"))
+        if file_type == "mcm":
+            loaded = self.mcm_processor.load_file(file_path)
+        else:
+            loaded = self.xml_processor.load_file(file_path)
+
+        if not loaded:
+            if file_type == "mcm":
+                self.log(i18n.t("msg_failed_load_mcm"))
+            else:
+                self.log(i18n.t("msg_failed_load_xml"))
             return False
 
         self.trans_table.setRowCount(0)
         self.trans_table.blockSignals(True) # Prevent itemChanged signals during load
 
-        strings = list(self.xml_processor.get_strings())
+        strings = list(self.current_processor.get_strings())
         self.trans_table.setRowCount(len(strings))
         
         for i, (node, id_text, source, dest) in enumerate(strings):
@@ -1373,7 +1486,11 @@ class MainWindow(QMainWindow):
     def save_xml_file(self):
         self.log(i18n.t("msg_saving_file"))
         try:
-            self.xml_processor.save_file()
+            if self.current_file_type == "mcm":
+                output_path = self._save_mcm_with_configured_suffix()
+                self.log(i18n.t("msg_mcm_saved_path").format(path=output_path))
+            else:
+                self.xml_processor.save_file()
             self.log(i18n.t("msg_file_saved"))
             QMessageBox.information(self, i18n.t("title_success"), i18n.t("msg_file_saved_short"))
         except Exception as e:
@@ -1381,11 +1498,19 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, i18n.t("title_error"), i18n.t("msg_failed_save").format(error=e))
 
     def save_as_xml_file(self):
-        fname, _ = QFileDialog.getSaveFileName(self, i18n.t("title_save_xml"), '', "XML files (*.xml)")
+        if self.current_file_type == "mcm":
+            save_filter = i18n.t("filter_mcm_files", "MCM text files (*.txt)")
+            title = i18n.t("title_save_mcm", i18n.t("title_save_xml"))
+            fname, _ = QFileDialog.getSaveFileName(self, title, '', save_filter)
+        else:
+            fname, _ = QFileDialog.getSaveFileName(self, i18n.t("title_save_xml"), '', "XML files (*.xml)")
         if fname:
             self.log(i18n.t("msg_saving_as").format(path=fname))
             try:
-                self.xml_processor.save_file(fname)
+                if self.current_file_type == "mcm":
+                    self.mcm_processor.save_file(fname)
+                else:
+                    self.xml_processor.save_file(fname)
                 self.log(i18n.t("msg_file_saved"))
                 QMessageBox.information(self, i18n.t("title_success"), i18n.t("msg_file_saved_short"))
             except Exception as e:
@@ -1408,14 +1533,14 @@ class MainWindow(QMainWindow):
                 dest_item.setText(str(translation) if translation is not None else "")
             self.trans_table.blockSignals(False)
             
-            # Update XML Node
+            # Update current file node
             node = dest_item.data(Qt.ItemDataRole.UserRole)
             if node is not None:
                 try:
-                    # Ensure XML node text is a string
-                    self.xml_processor.update_dest(node, str(translation) if translation is not None else "", overwrite=True)
+                    self.current_processor.update_dest(
+                        node, str(translation) if translation is not None else "", overwrite=True)
                 except Exception as e:
-                    self.log(f"Error updating XML node for row {row}: {e}")
+                    self.log(f"Error updating row {row}: {e}")
 
     def on_table_item_changed(self, item):
         # Only care about Dest column (index 2)
@@ -1423,7 +1548,7 @@ class MainWindow(QMainWindow):
             node = item.data(Qt.ItemDataRole.UserRole)
             if node is not None:
                 new_text = item.text()
-                self.xml_processor.update_dest(node, new_text, overwrite=True)
+                self.current_processor.update_dest(node, new_text, overwrite=True)
                 # self.log(f"Updated translation manually for row {item.row()}")
         # Update button enabled state (in case manual edit changed content)
         self.update_translate_buttons_enabled()
@@ -1452,6 +1577,26 @@ class MainWindow(QMainWindow):
                 can_visualize = True
         
         self.visualize_rag_btn.setEnabled(can_visualize)
+
+    def _build_translation_context(self, row: int) -> dict:
+        entry_id = ""
+        id_item = self.trans_table.item(row, 0)
+        if id_item is not None:
+            entry_id = id_item.text()
+
+        context = {"entry_id": entry_id}
+        if self.current_file_type == "mcm":
+            context["domain"] = "mcm_ui"
+            key_upper = entry_id.upper()
+            if "_TT_" in key_upper:
+                context["entry_type"] = "tooltip"
+            elif "HEADER" in key_upper or "PAGE" in key_upper:
+                context["entry_type"] = "title"
+            elif "FILTER" in key_upper or "OPTION" in key_upper or "CONFIRM" in key_upper:
+                context["entry_type"] = "option"
+            else:
+                context["entry_type"] = "generic"
+        return context
 
     def cache_rag_debug_info(self, original_text, debug_info):
         """缓存RAG调试信息以供可视化使用"""
@@ -1488,6 +1633,20 @@ class MainWindow(QMainWindow):
         self.trans_pause_btn.setEnabled(False)
         self.trans_resume_btn.setEnabled(False)
         self.log(i18n.t("msg_task_finished"))
+
+        if (
+            self.current_file_type == "mcm"
+            and self.trans_table.rowCount() > 0
+            and not self.stop_receiving_results
+            and bool(self.config_manager.get("general", "mcm_auto_export", True))
+        ):
+            try:
+                output_path = self._save_mcm_with_configured_suffix()
+                if output_path:
+                    self.log(i18n.t("msg_mcm_auto_export_done").format(path=output_path))
+            except Exception as e:
+                self.log(i18n.t("msg_error_saving").format(error=e))
+
         # Clean up worker thread after translation finishes
         if self.worker:
             self.worker.deleteLater()
@@ -1655,6 +1814,12 @@ class MainWindow(QMainWindow):
             target_lang = "zh"
         self.config_manager.set("general", "source_language", source_lang)
         self.config_manager.set("general", "target_language", target_lang)
+        mcm_suffix = self.mcm_suffix_combo.currentData() if hasattr(self, "mcm_suffix_combo") else "source"
+        self.config_manager.set("general", "mcm_output_language_suffix", mcm_suffix)
+        mcm_auto_export = bool(
+            self.mcm_auto_export_checkbox.isChecked()
+        ) if hasattr(self, "mcm_auto_export_checkbox") else True
+        self.config_manager.set("general", "mcm_auto_export", mcm_auto_export)
 
         params = self.config_manager.config.setdefault("llm", {}).setdefault("parameters", {})
         for name, (checkbox, widget) in self.model_param_controls.items():
@@ -1710,7 +1875,8 @@ class MainWindow(QMainWindow):
         for row in selected_rows:
             source_item = self.trans_table.item(row, 1)
             if source_item and source_item.text():
-                items_to_process.append((row, source_item.text()))
+                context_hint = self._build_translation_context(row)
+                items_to_process.append((row, source_item.text(), context_hint))
 
         num_threads = self.config_manager.get("threads", "translation", 5)
         self.worker = Worker(items_to_process, self.translator, num_threads)
@@ -1740,11 +1906,11 @@ class MainWindow(QMainWindow):
                 self.trans_table.setItem(row, 2, dest_item)
             else:
                 dest_item.setText("")
-            # Update XML Node
+            # Update current file node
             node = dest_item.data(Qt.ItemDataRole.UserRole)
             if node is not None:
                 try:
-                    self.xml_processor.update_dest(node, "", overwrite=True)
+                    self.current_processor.update_dest(node, "", overwrite=True)
                 except Exception as e:
                     self.log(f"Error clearing translation for row {row}: {e}")
         self.trans_table.blockSignals(False)
@@ -1772,9 +1938,16 @@ class MainWindow(QMainWindow):
                 dest_item.setText("")
                 node = dest_item.data(Qt.ItemDataRole.UserRole)
                 if node is not None:
-                    node.text = ""
+                    self.current_processor.update_dest(node, "", overwrite=True)
         self.trans_table.blockSignals(False)
-        log_emit(self.log, self.config_manager, 'INFO', i18n.t("msg_cleared_translations").format(count=len(selected_rows)), module='gui_main', func='clear_selected_translations')
+        log_emit(
+            self.log,
+            self.config_manager,
+            'INFO',
+            i18n.t("msg_cleared_selected_translations").format(count=len(selected_rows)),
+            module='gui_main',
+            func='clear_selected_translations'
+        )
 
     def visualize_rag_process(self):
         """可视化显示选中行的RAG处理过程"""
@@ -1805,6 +1978,8 @@ class MainWindow(QMainWindow):
         cached_debug_info = self.rag_debug_cache.get(original_text)
         
         # 显示RAG可视化对话框
-        dialog = RAGVisualizationDialog(self, original_text, translated_text, self.translator, cached_debug_info)
+        dialog = RAGVisualizationDialog(
+            self, original_text, translated_text, self.translator,
+            cached_debug_info, context_hint=self._build_translation_context(row))
         dialog.exec()
 

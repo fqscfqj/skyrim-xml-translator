@@ -45,6 +45,8 @@ class GeneralConfig:
     language: str = "auto"
     source_language: str = "auto"
     target_language: str = "zh"
+    mcm_output_language_suffix: str = "source"
+    mcm_auto_export: bool = True
     log_file: str = "logs/app.log"
 
 
