@@ -124,12 +124,17 @@ class Translator:
         cached = self._translation_cache.get(
             str(text), prompt_style, target_lang, context_key=runtime_context_key)
         if cached is not None and str(cached).strip():
-            log_emit(log_callback, self.rag_engine.config, "DEBUG",
-                     f"Translation cache hit for text (len={len(text)})",
-                     module="translator", func="translate_text")
-            if return_debug_info:
-                return cached, self._empty_debug_info(text)
-            return cached
+            if self._is_suspicious_identity_translation(str(text), str(cached)):
+                log_emit(log_callback, self.rag_engine.config, "DEBUG",
+                         "Ignoring suspicious identity cache entry (possible missed translation)",
+                         module="translator", func="translate_text")
+            else:
+                log_emit(log_callback, self.rag_engine.config, "DEBUG",
+                         f"Translation cache hit for text (len={len(text)})",
+                         module="translator", func="translate_text")
+                if return_debug_info:
+                    return cached, self._empty_debug_info(text)
+                return cached
         if cached is not None and not str(cached).strip():
             log_emit(log_callback, self.rag_engine.config, "DEBUG",
                      "Ignoring empty cached translation (treat as cache miss)",
@@ -249,7 +254,9 @@ class Translator:
 
                 if not issues or not self._quality_checker.should_retry(issues):
                     # Good enough - cache and return
-                    if str(translation).strip():
+                    if str(translation).strip() and not self._is_suspicious_identity_translation(
+                        str(text), str(translation)
+                    ):
                         self._translation_cache.put(
                             str(text), prompt_style, target_lang, translation,
                             context_key=runtime_context_key)
@@ -265,12 +272,55 @@ class Translator:
 
                 # Accept on last retry if issues are minor
                 if retry_count == max_retries:
+                    has_blocking_error = any(
+                        i.severity == "error" and i.issue_type in {
+                            QualityIssueType.UNTRANSLATED,
+                            QualityIssueType.FORMAT_VIOLATION,
+                            QualityIssueType.PLACEHOLDER_MISMATCH,
+                        }
+                        for i in issues
+                    )
+
+                    # Final guardrail for missed translations:
+                    # if output is still untranslated, run one extra targeted pass.
+                    if has_blocking_error and any(
+                        i.issue_type == QualityIssueType.UNTRANSLATED for i in issues
+                    ):
+                        forced = self._force_translate_non_name_segments(
+                            source_text=str(text),
+                            base_messages=messages,
+                            target_lang=target_lang,
+                            log_callback=log_callback,
+                        )
+                        if forced and str(forced).strip():
+                            forced_issues = self._quality_checker.check(text, forced, matched_terms)
+                            forced_has_untranslated = any(
+                                i.issue_type == QualityIssueType.UNTRANSLATED for i in forced_issues
+                            )
+                            if not forced_has_untranslated:
+                                log_emit(log_callback, self.rag_engine.config, "INFO",
+                                         "Accepted forced non-name translation fallback",
+                                         module="translator", func="translate_text")
+                                if str(forced).strip() and not self._is_suspicious_identity_translation(
+                                    str(text), str(forced)
+                                ):
+                                    self._translation_cache.put(
+                                        str(text), prompt_style, target_lang, forced,
+                                        context_key=runtime_context_key)
+                                if return_debug_info:
+                                    return forced, debug_info
+                                return forced
+
                     minor_only = all(i.severity != "error" for i in issues)
-                    if minor_only or len([i for i in issues if i.severity == "error"]) <= 1:
+                    if (not has_blocking_error) and (
+                        minor_only or len([i for i in issues if i.severity == "error"]) <= 1
+                    ):
                         log_emit(log_callback, self.rag_engine.config, "INFO",
                                  f"Accepting translation with minor issues after {max_retries} retries",
                                  module="translator", func="translate_text")
-                        if str(translation).strip():
+                        if str(translation).strip() and not self._is_suspicious_identity_translation(
+                            str(text), str(translation)
+                        ):
                             self._translation_cache.put(
                                 str(text), prompt_style, target_lang, translation,
                                 context_key=runtime_context_key)
@@ -353,6 +403,52 @@ class Translator:
             "Do NOT return the original text. Translate now:",
         )
         return PromptBuilder.apply_prompt_vars(retry_template, prompt_vars)
+
+    def _force_translate_non_name_segments(self, source_text: str, base_messages: list,
+                                           target_lang: str, log_callback=None) -> str:
+        """One-shot fallback for cases where model keeps returning source text.
+
+        Goal: keep obvious proper names, but translate the generic/common words.
+        """
+        fallback_template = self.prompt_manager.get(
+            "translator.retry.force_translate_non_name",
+            (
+                "CRITICAL: Your previous outputs were untranslated.\n"
+                "Translate this text to {target_language} now.\n"
+                "Rules:\n"
+                "1) DO NOT return the original text unchanged.\n"
+                "2) Keep obvious proper names (person/place/faction names) unchanged.\n"
+                "3) Translate generic/common words around those names.\n"
+                "4) Preserve all tags/placeholders/whitespace exactly.\n"
+                "5) Output strict JSON only: {\"translation\":\"...\"}."
+            ),
+        )
+        force_prompt = PromptBuilder.apply_prompt_vars(
+            fallback_template,
+            {"target_language": self._text_analyzer.language_display_name(target_lang)},
+        )
+        forced_messages = base_messages + [{"role": "user", "content": force_prompt}]
+        try:
+            response = self.llm_client.chat_completion(
+                forced_messages, log_callback=log_callback)
+            return self._response_parser.parse(
+                response, source_text, forced_messages,
+                llm_client=self.llm_client, log_callback=log_callback)
+        except Exception as e:
+            log_emit(log_callback, self.rag_engine.config, "WARNING",
+                     f"Forced non-name translation fallback failed: {e}",
+                     exc=e, module="translator",
+                     func="_force_translate_non_name_segments")
+            return ""
+
+    def _is_suspicious_identity_translation(self, source: str, translation: str) -> bool:
+        """Heuristic: unchanged multi-word English output is likely a missed translation."""
+        if not source or not translation:
+            return False
+        if source.strip().lower() != translation.strip().lower():
+            return False
+        words = self._text_analyzer.extract_english_words(source)
+        return len(words) >= 2
 
     # --- Backward-compatible private methods (used by old code paths) ---
 
