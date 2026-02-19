@@ -37,6 +37,10 @@ class QualityChecker:
     })
 
     _CJK_CHAR_RE = re.compile(r'[\u4e00-\u9fff]')
+    _ASCII_WORD_RE = re.compile(r"[A-Za-z]{2,}")
+    _SKIP_CONTEXT_CHAR_RE = re.compile(
+        r"""[\s,.;:!?\-_"'`~(){}\[\]<>/\\|@#$%^&*+=，。！？；：、（）【】《》“”‘’…]+"""
+    )
 
     def __init__(self):
         self._text_analyzer = TextAnalyzer()
@@ -56,7 +60,8 @@ class QualityChecker:
             return issues  # No point checking further
 
         # Layer 2: Untranslated fragment detection
-        fragment_issues = self._check_untranslated_fragments(source, translation)
+        fragment_issues = self._check_untranslated_fragments(
+            source, translation, matched_terms=matched_terms)
         issues.extend(fragment_issues)
 
         # Layer 3: Proper noun compliance
@@ -134,13 +139,24 @@ class QualityChecker:
 
     # --- Layer 2: Untranslated fragments ---
 
-    def _check_untranslated_fragments(self, source: str, translation: str) -> list[QualityIssue]:
+    def _check_untranslated_fragments(
+            self,
+            source: str,
+            translation: str,
+            matched_terms: Optional[dict] = None) -> list[QualityIssue]:
         source_words = self._text_analyzer.extract_english_words(source)
         translation_words = self._text_analyzer.extract_english_words(translation)
+        likely_proper_noun_words = self._collect_likely_proper_noun_words(
+            source, matched_terms)
 
         untranslated = []
         for word in translation_words:
-            if word in source_words and word not in self._COMMON_PRESERVED and len(word) > 2:
+            if (
+                word in source_words
+                and word not in self._COMMON_PRESERVED
+                and word not in likely_proper_noun_words
+                and len(word) > 2
+            ):
                 untranslated.append(word)
 
         if not untranslated:
@@ -154,9 +170,7 @@ class QualityChecker:
                 rf'(?<![a-zA-Z]){escaped}(?![a-zA-Z])', translation, re.IGNORECASE))
             for match in matches:
                 start, end = match.start(), match.end()
-                before = translation[max(0, start - 1):start] if start > 0 else ''
-                after = translation[end:end + 1] if end < len(translation) else ''
-                if bool(self._CJK_CHAR_RE.match(before)) or bool(self._CJK_CHAR_RE.match(after)):
+                if self._has_nearby_cjk_context(translation, start, end):
                     suspicious.append(word)
                     break
 
@@ -171,6 +185,59 @@ class QualityChecker:
             ))
 
         return issues
+
+    def _collect_likely_proper_noun_words(
+            self,
+            source: str,
+            matched_terms: Optional[dict]) -> set[str]:
+        """Collect lowercase english words that are likely proper nouns in source context."""
+        from src.translation.prompt_builder import PromptBuilder
+        builder = PromptBuilder.__new__(PromptBuilder)
+
+        source_forms: dict[str, set[str]] = {}
+        for m in self._ASCII_WORD_RE.finditer(source or ""):
+            form = m.group(0)
+            key = form.lower()
+            if key not in source_forms:
+                source_forms[key] = set()
+            source_forms[key].add(form)
+
+        likely: set[str] = set()
+        for lower_word, forms in source_forms.items():
+            for form in forms:
+                term_type = PromptBuilder.classify_term_type(
+                    builder, form, source_text=source)
+                if term_type == "proper_noun":
+                    likely.add(lower_word)
+                    break
+
+        if isinstance(matched_terms, dict):
+            for term in matched_terms.keys():
+                if not isinstance(term, str):
+                    continue
+                term_type = PromptBuilder.classify_term_type(
+                    builder, term, source_text=source)
+                if term_type != "proper_noun":
+                    continue
+                for m in self._ASCII_WORD_RE.finditer(term):
+                    likely.add(m.group(0).lower())
+
+        return likely
+
+    def _nearest_non_skip_char(self, text: str, idx: int, step: int) -> str:
+        i = idx
+        while 0 <= i < len(text):
+            ch = text[i]
+            if self._SKIP_CONTEXT_CHAR_RE.match(ch):
+                i += step
+                continue
+            return ch
+        return ""
+
+    def _has_nearby_cjk_context(self, text: str, start: int, end: int) -> bool:
+        before = self._nearest_non_skip_char(text, start - 1, -1)
+        after = self._nearest_non_skip_char(text, end, 1)
+        return bool(self._CJK_CHAR_RE.match(before) or self._CJK_CHAR_RE.match(after))
 
     # --- Layer 3: Proper noun compliance ---
 

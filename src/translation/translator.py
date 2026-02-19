@@ -287,6 +287,32 @@ class Translator:
                         }
                         for i in issues
                     )
+                    has_blocking_issue = self._has_blocking_translation_issues(issues)
+
+                    # Final issue-driven rescue pass using CURRENT issues (not previous attempt issues).
+                    if has_blocking_issue and not has_blocking_error:
+                        rescued, rescued_issues = self._retry_with_current_issues(
+                            source_text=str(text),
+                            base_messages=messages,
+                            prompt_style=prompt_style,
+                            target_lang=target_lang,
+                            matched_terms=matched_terms,
+                            issues=issues,
+                            log_callback=log_callback,
+                        )
+                        if rescued and not self._has_blocking_translation_issues(rescued_issues):
+                            log_emit(log_callback, self.rag_engine.config, "INFO",
+                                     "Accepted final rescue retry result",
+                                     module="translator", func="translate_text")
+                            if str(rescued).strip() and not self._is_suspicious_identity_translation(
+                                str(text), str(rescued)
+                            ):
+                                self._translation_cache.put(
+                                    str(text), prompt_style, target_lang, rescued,
+                                    context_key=runtime_context_key)
+                            if return_debug_info:
+                                return rescued, debug_info
+                            return rescued
 
                     # Final guardrail for missed translations:
                     # if output is still untranslated, run one extra targeted pass.
@@ -319,7 +345,7 @@ class Translator:
                                 return forced
 
                     minor_only = all(i.severity != "error" for i in issues)
-                    if (not has_blocking_error) and (
+                    if (not has_blocking_issue) and (
                         minor_only or len([i for i in issues if i.severity == "error"]) <= 1
                     ):
                         log_emit(log_callback, self.rag_engine.config, "INFO",
@@ -499,6 +525,42 @@ class Translator:
 
         fragment_issues = self._quality_checker._check_untranslated_fragments(source, translation)
         return bool(fragment_issues)
+
+    def _has_blocking_translation_issues(self, issues: list) -> bool:
+        blocking_types = {
+            QualityIssueType.UNTRANSLATED,
+            QualityIssueType.UNTRANSLATED_FRAGMENTS,
+            QualityIssueType.PROPER_NOUN_MISMATCH,
+            QualityIssueType.FORMAT_VIOLATION,
+            QualityIssueType.PLACEHOLDER_MISMATCH,
+        }
+        return any(i.issue_type in blocking_types for i in issues)
+
+    def _retry_with_current_issues(
+            self,
+            source_text: str,
+            base_messages: list,
+            prompt_style: str,
+            target_lang: str,
+            matched_terms: dict,
+            issues: list,
+            log_callback=None) -> tuple[str, list]:
+        try:
+            retry_prompt = self._build_retry_prompt(issues, prompt_style, target_lang)
+            retry_messages = base_messages + [{"role": "user", "content": retry_prompt}]
+            response = self.llm_client.chat_completion(
+                retry_messages, log_callback=log_callback)
+            candidate = self._response_parser.parse(
+                response, source_text, retry_messages,
+                llm_client=self.llm_client, log_callback=log_callback)
+            candidate_issues = self._quality_checker.check(
+                source_text, candidate, matched_terms)
+            return candidate, candidate_issues
+        except Exception as e:
+            log_emit(log_callback, self.rag_engine.config, "WARNING",
+                     f"Final rescue retry failed: {e}",
+                     exc=e, module="translator", func="_retry_with_current_issues")
+            return "", issues
 
     # --- Backward-compatible private methods (used by old code paths) ---
 

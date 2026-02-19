@@ -37,6 +37,10 @@ class PromptBuilder:
         "me", "him", "her", "us", "them", "it",
         "all", "any", "some", "each", "every",
     })
+    _IMPERATIVE_PARTICLE_HINTS = frozenset({
+        "down", "up", "out", "off", "on", "back", "away",
+        "around", "along", "over", "through", "in",
+    })
     _COMMON_WORD_RE = re.compile(
         r"^(?:the|a|an|and|or|but|in|on|at|to|for|of|with|by|from|is|are|was|were|"
         r"be|been|being|have|has|had|do|does|did|will|would|shall|should|may|might|"
@@ -302,7 +306,10 @@ class PromptBuilder:
         second_token = first_two.group(2).lower()
         if first_token.lower() != term.lower():
             return False
-        return second_token in self._IMPERATIVE_SECOND_TOKEN_HINTS
+        return (
+            second_token in self._IMPERATIVE_SECOND_TOKEN_HINTS
+            or second_token in self._IMPERATIVE_PARTICLE_HINTS
+        )
 
     @staticmethod
     def apply_prompt_vars(template: str, variables: dict) -> str:
