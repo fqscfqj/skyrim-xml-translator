@@ -20,25 +20,23 @@ class LLMClient:
         self._init_clients()
 
     def _init_clients(self) -> None:
+        def build_client(section: str) -> Optional[OpenAI]:
+            api_key = self.config.get(section, "api_key")
+            base_url = self.config.get(section, "base_url")
+            if not api_key:
+                return None
+            timeout = int(self.config.get(section, "request_timeout", 30))
+            # Use one retry strategy path only (src.llm.retry) to avoid retry amplification.
+            return OpenAI(api_key=api_key, base_url=base_url, timeout=timeout, max_retries=0)
+
         # Initialize LLM Client
-        llm_key = self.config.get("llm", "api_key")
-        llm_base = self.config.get("llm", "base_url")
-        if llm_key:
-            self.llm_client = OpenAI(api_key=llm_key, base_url=llm_base)
+        self.llm_client = build_client("llm")
 
         # Initialize Search LLM Client (Optional)
-        search_key = self.config.get("llm_search", "api_key")
-        search_base = self.config.get("llm_search", "base_url")
-        if search_key:
-            self.search_llm_client = OpenAI(api_key=search_key, base_url=search_base)
-        else:
-            self.search_llm_client = None
+        self.search_llm_client = build_client("llm_search")
 
         # Initialize Embedding Client
-        embed_key = self.config.get("embedding", "api_key")
-        embed_base = self.config.get("embedding", "base_url")
-        if embed_key:
-            self.embed_client = OpenAI(api_key=embed_key, base_url=embed_base)
+        self.embed_client = build_client("embedding")
 
     def reload_config(self) -> None:
         self._init_clients()

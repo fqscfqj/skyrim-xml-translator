@@ -5,6 +5,7 @@ from enum import Enum
 from typing import Any, Callable, Optional
 import time
 import random
+from email.utils import parsedate_to_datetime
 
 import openai
 
@@ -66,20 +67,62 @@ def get_strategy(error_type: ErrorType, config_overrides: Optional[dict] = None)
     base = _DEFAULT_STRATEGIES.get(error_type, _DEFAULT_STRATEGIES[ErrorType.UNKNOWN])
     if not config_overrides:
         return base
+    override_retries = config_overrides.get("max_retries")
+    override_backoff = config_overrides.get("backoff_base")
+    max_retries = base.max_retries if override_retries is None else int(override_retries)
+    backoff_base = base.backoff_base if override_backoff is None else float(override_backoff)
+
+    # For 429s, never be more aggressive than the default strategy.
+    if error_type == ErrorType.RATE_LIMIT:
+        max_retries = max(max_retries, base.max_retries)
+        backoff_base = max(backoff_base, base.backoff_base)
+
     return RetryStrategy(
-        max_retries=config_overrides.get("max_retries", base.max_retries),
-        backoff_base=config_overrides.get("backoff_base", base.backoff_base),
+        max_retries=max_retries,
+        backoff_base=backoff_base,
         backoff_max=base.backoff_max,
         jitter_factor=base.jitter_factor,
     )
 
 
-def compute_delay(strategy: RetryStrategy, attempt: int) -> float:
+def compute_delay(strategy: RetryStrategy, attempt: int, min_delay: float = 0.0) -> float:
     """Compute delay with exponential backoff + jitter."""
     delay = strategy.backoff_base * (2 ** (attempt - 1))
     delay = min(delay, strategy.backoff_max)
     jitter = random.random() * strategy.jitter_factor * delay
-    return delay + jitter
+    return max(delay + jitter, min_delay)
+
+
+def _extract_retry_after_seconds(exc: Exception) -> float:
+    """Best-effort parse Retry-After from provider responses."""
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if not headers:
+        return 0.0
+
+    raw = headers.get("retry-after") or headers.get("Retry-After")
+    if not raw:
+        return 0.0
+
+    value = str(raw).strip()
+    if not value:
+        return 0.0
+
+    # Delta-seconds form.
+    try:
+        return max(float(value), 0.0)
+    except Exception:
+        pass
+
+    # HTTP-date form.
+    try:
+        dt = parsedate_to_datetime(value)
+        if dt is None:
+            return 0.0
+        # Use wall clock here because Retry-After is wall-clock based.
+        return max(dt.timestamp() - time.time(), 0.0)
+    except Exception:
+        return 0.0
 
 
 def execute_with_retry(
@@ -124,8 +167,9 @@ def execute_with_retry(
                          exc=exc, module="llm.retry", func="execute_with_retry")
                 raise
 
-            delay = compute_delay(strategy, attempt)
+            retry_after = _extract_retry_after_seconds(exc) if error_type == ErrorType.RATE_LIMIT else 0.0
+            delay = compute_delay(strategy, attempt, min_delay=retry_after)
             log_emit(log_callback, config_manager, "WARNING",
-                     f"{log_prefix} transient error ({error_type.value}, attempt {attempt}/{strategy.max_retries}): {exc}",
+                     f"{log_prefix} transient error ({error_type.value}, attempt {attempt}/{strategy.max_retries}, wait={delay:.2f}s): {exc}",
                      exc=exc, module="llm.retry", func="execute_with_retry")
             time.sleep(delay)
