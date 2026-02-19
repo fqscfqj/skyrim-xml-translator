@@ -409,7 +409,7 @@ class RAGSearcher:
     def search(self, keywords: list[str], source_text: Optional[str] = None,
                threshold: float = 0.8, top_k: int = 3,
                return_debug: bool = False,
-               log_callback: Optional[Callable] = None) -> dict | tuple[dict, list]:
+               log_callback: Optional[Callable] = None) -> dict[str, str] | tuple[dict[str, str], list[Dict[str, Any]]]:
         """Orchestrate search across all strategies.
 
         Returns {term: translation} or ({term: translation}, debug_info).
@@ -654,7 +654,7 @@ class RAGSearcher:
             pass
 
         if return_debug:
-            return results, debug_info
+            return results, debug_info or []
         return results
 
     def _batch_embed_keywords(self, keywords: list[str],

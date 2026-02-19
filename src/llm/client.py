@@ -67,7 +67,7 @@ class LLMClient:
                      exc=e, module="llm_client", func="get_embedding")
             raise
 
-    def _call(self, client: OpenAI, config_section: str, messages: list,
+    def _call(self, client: Optional[OpenAI], config_section: str, messages: list,
               overrides: dict, log_callback: Optional[Callable],
               operation: str = "translate") -> str:
         """Unified LLM call with retry logic and cost tracking.

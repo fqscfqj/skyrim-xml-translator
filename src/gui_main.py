@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QTableWidget, QTableWidgetItem, QHeaderView, QSplitter, QDoubleSpinBox,
                              QComboBox, QAbstractSpinBox, QScrollArea, QDialog, QTreeWidget, QTreeWidgetItem)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QWheelEvent, QGuiApplication
+from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QWheelEvent, QGuiApplication, QCloseEvent
 
 from src.config_manager import ConfigManager
 from src.llm_client import LLMClient
@@ -689,7 +689,7 @@ class MainWindow(QMainWindow):
 
         self.init_ui()
 
-    def closeEvent(self, event):
+    def closeEvent(self, a0: Optional[QCloseEvent]) -> None:
         """Handle window close event to properly cleanup threads"""
         # Stop and wait for translation worker
         if self.worker and self.worker.isRunning():
@@ -707,7 +707,8 @@ class MainWindow(QMainWindow):
                 self.glossary_worker.terminate()
                 self.glossary_worker.wait(1000)
 
-        event.accept()
+        if a0 is not None:
+            a0.accept()
 
     def dragEnterEvent(self, a0: Optional[QDragEnterEvent]) -> None:
         # Parameter name and Optional handling match the PyQt6 stub signature to satisfy static type checkers
@@ -1867,13 +1868,13 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, i18n.t("title_success"), message)
 
     def pause_glossary_task(self):
-        if hasattr(self, 'glossary_worker') and self.glossary_worker.isRunning():
+        if self.glossary_worker and self.glossary_worker.isRunning():
             self.glossary_worker.pause()
             self.pause_btn.setEnabled(False)
             self.resume_btn.setEnabled(True)
 
     def resume_glossary_task(self):
-        if hasattr(self, 'glossary_worker') and self.glossary_worker.isRunning():
+        if self.glossary_worker and self.glossary_worker.isRunning():
             self.glossary_worker.resume()
             self.pause_btn.setEnabled(True)
             self.resume_btn.setEnabled(False)
