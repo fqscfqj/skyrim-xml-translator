@@ -14,6 +14,10 @@ from src.llm.cost_tracker import estimate_tokens
 
 
 class RAGSearcher:
+    _NAME_HONORIFICS = frozenset({
+        "lady", "lord", "miss", "mrs", "ms", "mr", "mister", "sir", "dame",
+    })
+
     def __init__(self, vector_store: VectorStore, glossary_manager: GlossaryManager,
                  config_manager, llm_client, embedding_cache: Optional[EmbeddingCache] = None):
         self.vector_store = vector_store
@@ -123,8 +127,29 @@ class RAGSearcher:
             return []
         return [t for t in norm.split() if t]
 
+    def _query_honorific_core(self, query: str) -> Optional[str]:
+        """Return core name for honorific-prefixed query, e.g. 'Lady Maven' -> 'maven'."""
+        tokens = self._normalized_ascii_tokens(query)
+        if len(tokens) < 2:
+            return None
+        if tokens[0] not in self._NAME_HONORIFICS:
+            return None
+        core = " ".join(tokens[1:]).strip()
+        return core or None
+
+    def _resolve_honorific_alias_term(self, query: str, source_text: Optional[str]) -> Optional[str]:
+        core = self._query_honorific_core(query)
+        if not core:
+            return None
+        return self._resolve_direct_match_term(core, source_text)
+
     def _is_alias_candidate_term(self, query: str, candidate: str) -> bool:
         """Name-like full-term candidate that can be projected to short-name alias."""
+        candidate_str = str(candidate or "")
+        # Possessive/title constructions (e.g. "Skyrim's Rule") are not alias sources.
+        if "'s" in candidate_str or "’s" in candidate_str:
+            return False
+
         q_tokens = self._normalized_ascii_tokens(query)
         c_tokens = self._normalized_ascii_tokens(candidate)
         if len(q_tokens) != 1 or len(c_tokens) < 2 or len(c_tokens) > 4:
@@ -169,6 +194,10 @@ class RAGSearcher:
         short = self._strip_alias_translation(full_translation)
         if not short:
             return None
+        full_clean = str(full_translation).strip()
+        # Projection is only valid when we truly reduced a full form to a short alias.
+        if short == full_clean:
+            return None
         if len(short) > 20:
             return None
         return short
@@ -185,6 +214,20 @@ class RAGSearcher:
         c_tokens = c.split()
         q_tokens = q.split()
         q_single = len(q_tokens) == 1
+        q_multi = len(q_tokens) >= 2
+
+        # Honorific-prefixed query should strongly align to its core name.
+        if q_multi and q_tokens[0] in self._NAME_HONORIFICS:
+            core = " ".join(q_tokens[1:]).strip()
+            if core and c == core:
+                return 2.95
+            if core and core in c_tokens:
+                return 2.55
+
+        if q_multi:
+            # Multi-token phrase appears contiguously in candidate text.
+            if f" {q} " in f" {c} ":
+                return 2.8
 
         # Query token as leading token in short name-like candidate.
         if q_single and c_tokens and c_tokens[0] == q:
@@ -450,6 +493,7 @@ class RAGSearcher:
             query_selected_terms: list[str] = []
             query_details: Dict[str, Any] = {
                 "query": query, "direct_match": None,
+                "direct_alias": None,
                 "vector_matches": [], "containment_matches": [],
                 "compatible_candidates": [],
                 "ai_selected": [],
@@ -484,6 +528,7 @@ class RAGSearcher:
                 query_lower = query.lower()
                 containment_matches: list[tuple[str, float]] = []
                 vector_matches: list[tuple[str, float]] = []
+                direct_mode_term: Optional[str] = None
 
                 # 0) Deterministic direct match
                 direct_term = self._resolve_direct_match_term(query, source_text)
@@ -491,8 +536,24 @@ class RAGSearcher:
                     add_candidate(direct_term, 1.2)
                     if return_debug:
                         query_details["direct_match"] = direct_term
+                    # Exact/normalized-equal direct hit: keep this query deterministic.
+                    if (
+                        self.glossary_manager.normalize_term_key(direct_term)
+                        == self.glossary_manager.normalize_term_key(query)
+                    ):
+                        direct_mode_term = direct_term
+                else:
+                    # Honorific aliases (e.g. "Lady Maven") fallback to core name ("Maven").
+                    direct_alias_term = self._resolve_honorific_alias_term(query, source_text)
+                    if direct_alias_term:
+                        add_candidate(direct_alias_term, 1.18)
+                        if return_debug:
+                            query_details["direct_alias"] = direct_alias_term
+                        # If core name appears in source, keep deterministic to avoid noisy drift.
+                        if source_text and self._raw_term_appears_in_source(direct_alias_term, source_text):
+                            direct_mode_term = direct_alias_term
 
-                if vector_ready:
+                if vector_ready and direct_mode_term is None:
                     raw_vec = query_embeddings.get(query)
                     if raw_vec is None:
                         raw_vec = self.llm_client.get_embedding(query, log_callback=log_callback)
@@ -542,21 +603,26 @@ class RAGSearcher:
                     add_candidate(term, score)
 
                 ranked_candidates = self._rank_candidates(candidate_scores, candidate_lexical_scores)
-                compatible_ranked = [
-                    (term, score)
-                    for term, score in ranked_candidates
-                    if self._is_candidate_compatible(query, term, source_text)
-                ]
-                if source_text and self._raw_term_appears_in_source(query, source_text):
-                    # For literal query occurrences, do not fall back to lookalike names.
-                    working_ranked = compatible_ranked
+                if direct_mode_term is not None:
+                    working_ranked = [
+                        (direct_mode_term, candidate_scores.get(direct_mode_term, 1.2))
+                    ]
                 else:
-                    working_ranked = compatible_ranked or ranked_candidates
+                    compatible_ranked = [
+                        (term, score)
+                        for term, score in ranked_candidates
+                        if self._is_candidate_compatible(query, term, source_text)
+                    ]
+                    if source_text and self._raw_term_appears_in_source(query, source_text):
+                        # For literal query occurrences, do not fall back to lookalike names.
+                        working_ranked = compatible_ranked
+                    else:
+                        working_ranked = compatible_ranked or ranked_candidates
                 if return_debug:
                     query_details["compatible_candidates"] = working_ranked[:20]
 
                 ai_selected_terms: list[str] = []
-                if self._should_use_ai_selection(query, source_text, working_ranked):
+                if direct_mode_term is None and self._should_use_ai_selection(query, source_text, working_ranked):
                     ai_selected_terms = self._ai_select_candidates_for_query(
                         query=query,
                         source_text=source_text,
@@ -573,6 +639,8 @@ class RAGSearcher:
                             query_selected_terms.append(term)
                             if len(query_selected_terms) >= total_limit:
                                 break
+                elif direct_mode_term is not None:
+                    query_selected_terms.append(direct_mode_term)
                 else:
                     # Fallback ranking policy if AI selection is unavailable.
                     short_selected = 0
@@ -614,7 +682,13 @@ class RAGSearcher:
                 for term in query_selected_terms:
                     translation = self.glossary_manager.glossary[term]
                     alias_translation = None
-                    if source_text and self._raw_term_appears_in_source(query, source_text):
+                    # Never let alias projection override an exact/direct query term match.
+                    if (
+                        source_text
+                        and self._raw_term_appears_in_source(query, source_text)
+                        and (query_details.get("direct_match") is None)
+                        and (query not in results)
+                    ):
                         alias_translation = self._project_alias_translation(query, term, translation)
                     if alias_translation:
                         results[query] = alias_translation
