@@ -43,6 +43,10 @@ class Translator:
     def get_last_rag_debug_info(self):
         return self._last_rag_debug_info
 
+    def clear_translation_cache(self) -> None:
+        self._translation_cache.invalidate_all()
+        self._translation_cache.save()
+
     def set_runtime_flags(self, flags: Optional[dict] = None) -> None:
         mcm_ui_mode = False
         if isinstance(flags, dict):

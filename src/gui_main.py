@@ -10,7 +10,8 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QTabWidget, QFileDialog, QCheckBox, QProgressBar, 
                              QListWidget, QMessageBox, QGroupBox, QFormLayout, QSpinBox,
                              QTableWidget, QTableWidgetItem, QHeaderView, QSplitter, QDoubleSpinBox,
-                             QComboBox, QAbstractSpinBox, QScrollArea, QDialog, QTreeWidget, QTreeWidgetItem)
+                             QComboBox, QAbstractSpinBox, QScrollArea, QDialog, QTreeWidget, QTreeWidgetItem,
+                             QAbstractItemView)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QWheelEvent, QGuiApplication, QCloseEvent
 
@@ -850,6 +851,8 @@ class MainWindow(QMainWindow):
         self.trans_table = QTableWidget()
         self.trans_table.setColumnCount(3)
         self.trans_table.setHorizontalHeaderLabels([i18n.t("header_id"), i18n.t("header_source"), i18n.t("header_dest")])
+        self.trans_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.trans_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         header: Optional[QHeaderView] = self.trans_table.horizontalHeader()
         # horizontalHeader() can return None according to type stubs; guard for None to satisfy Pylance
         if header is not None:
@@ -1940,6 +1943,7 @@ class MainWindow(QMainWindow):
                 except Exception as e:
                     self.log(f"Error clearing translation for row {row}: {e}")
         self.trans_table.blockSignals(False)
+        self._clear_translation_caches()
         self.log(i18n.t("msg_cleared_all_translations"))
 
     def clear_selected_translations(self):
@@ -1957,6 +1961,12 @@ class MainWindow(QMainWindow):
         if confirm != QMessageBox.StandardButton.Yes:
             return
 
+        selected_source_texts = set()
+        for row in selected_rows:
+            source_item = self.trans_table.item(row, 1)
+            if source_item and source_item.text():
+                selected_source_texts.add(source_item.text())
+
         self.trans_table.blockSignals(True)
         for row in selected_rows:
             dest_item = self.trans_table.item(row, 2)
@@ -1966,6 +1976,7 @@ class MainWindow(QMainWindow):
                 if node is not None:
                     self.current_processor.update_dest(node, "", overwrite=True)
         self.trans_table.blockSignals(False)
+        self._clear_translation_caches(selected_source_texts if selected_source_texts else None)
         log_emit(
             self.log,
             self.config_manager,
@@ -1974,6 +1985,19 @@ class MainWindow(QMainWindow):
             module='gui_main',
             func='clear_selected_translations'
         )
+
+    def _clear_translation_caches(self, selected_sources: Optional[set[str]] = None) -> None:
+        try:
+            self.translator.clear_translation_cache()
+        except Exception as e:
+            self.log(f"Error clearing translation cache: {e}")
+
+        if selected_sources is None:
+            self.rag_debug_cache.clear()
+            return
+
+        for source in selected_sources:
+            self.rag_debug_cache.pop(source, None)
 
     def visualize_rag_process(self):
         """可视化显示选中行的RAG处理过程"""
