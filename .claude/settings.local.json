@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(python -c:*)",
-      "Bash(python -m pytest tests/test_style_pipeline.py -v)",
-      "Bash(python -m unittest:*)"
-    ]
-  }
-}
