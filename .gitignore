@@ -3,10 +3,12 @@ vector_index.npy
 glossary.json
 config.json
 terms_index.json
+SkyrimXMLTranslator.spec
 *.xml
 logs/
 build/
 dist/
+cache1/
 
 # Python artifact ignores
 __pycache__/
@@ -28,5 +30,3 @@ test_performance.py
 
 # Claude Code temporary files
 tmpclaude-*
-
-SkyrimXMLTranslator.spec
