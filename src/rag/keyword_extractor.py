@@ -402,10 +402,61 @@ class KeywordExtractor:
                 pass
         return kept
 
+    def _filter_parenthetical_fragments(self, keywords: list[str], text: str, log_callback) -> list[str]:
+        """Filter out single-word fragments from parenthetical phrases when full phrase exists in text."""
+        if not keywords or not text:
+            return keywords
+
+        # Detect parenthetical phrases in source text
+        paren_pattern = re.compile(r'[\(\[\（][^\)\]\）]{1,50}[\)\]\）]')
+        parenthetical_phrases = set()
+        for match in paren_pattern.finditer(text):
+            phrase = match.group(0)
+            # Extract content without parens
+            content = re.sub(r'^[\(\[\（]+|[\)\]\）]+$', '', phrase).strip()
+            if content and len(content.split()) >= 2:
+                parenthetical_phrases.add(content.lower())
+
+        if not parenthetical_phrases:
+            return keywords
+
+        kept = []
+        dropped = []
+        for kw in keywords:
+            # Check if this keyword is a single word that appears in a parenthetical phrase
+            if len(kw.split()) == 1:
+                kw_lower = kw.lower()
+                # Check if this single word appears in any parenthetical phrase
+                is_fragment = False
+                for phrase in parenthetical_phrases:
+                    # If the single word is part of a multi-word parenthetical phrase
+                    phrase_words = phrase.split()
+                    if kw_lower in phrase_words and len(phrase_words) >= 2:
+                        is_fragment = True
+                        break
+
+                if is_fragment:
+                    dropped.append(kw)
+                    continue
+
+            kept.append(kw)
+
+        if dropped:
+            try:
+                preview = dropped[:10]
+                suffix = "..." if len(dropped) > 10 else ""
+                log_emit(log_callback, self.config, "DEBUG",
+                         f"[RAG] Dropped {len(dropped)} parenthetical fragment(s): {preview}{suffix}",
+                         module="keyword_extractor", func="_filter_parenthetical_fragments")
+            except Exception:
+                pass
+        return kept
+
     def _finalize_keywords(self, keywords: list[str], text: str, log_callback) -> list[str]:
         keywords = self._deduplicate(keywords)
         keywords = self._filter_present_in_text(keywords, text, log_callback)
         keywords = self._filter_low_signal_keywords(keywords, log_callback)
+        keywords = self._filter_parenthetical_fragments(keywords, text, log_callback)
         keywords = self._limit_keywords(keywords, log_callback)
         return keywords
 

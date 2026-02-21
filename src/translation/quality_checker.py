@@ -259,6 +259,10 @@ class QualityChecker:
             if term_type != "proper_noun":
                 continue
 
+            # Validate that the term is actually relevant to the source
+            if not self._term_appears_relevant_to_source(term, source):
+                continue
+
             # Check if the expected translation appears in the output
             if expected_translation not in translation:
                 issues.append(QualityIssue(
@@ -269,6 +273,71 @@ class QualityChecker:
                 ))
 
         return issues
+
+    def _term_appears_relevant_to_source(self, term: str, source: str) -> bool:
+        """Check if a glossary term is actually relevant to the source text."""
+        if not term or not source:
+            return False
+
+        term = str(term).strip()
+        source = str(source).strip()
+
+        if not term or not source:
+            return False
+
+        # Check if the term appears literally in the source
+        term_lower = term.lower()
+        source_lower = source.lower()
+
+        # Direct appearance check with word boundaries
+        if self._term_appears_in_text_with_boundaries(term_lower, source_lower):
+            return True
+
+        # Check if individual words from the term appear in the source
+        # For multi-word proper nouns (like "Maven Black-Briar"), check if key parts appear
+        term_words = [w for w in self._ASCII_WORD_RE.findall(term) if len(w) > 2]
+        if len(term_words) >= 2:
+            source_words_lower = set(w.lower() for w in self._ASCII_WORD_RE.findall(source))
+            matches = sum(1 for w in term_words if w.lower() in source_words_lower)
+
+            # Skip common filler words when counting meaningful matches
+            common_words = {'the', 'of', 'in', 'on', 'at', 'to', 'for', 'and', 'or', 'a', 'an'}
+            meaningful_term_words = [w for w in term_words if w.lower() not in common_words]
+            meaningful_matches = sum(1 for w in meaningful_term_words if w.lower() in source_words_lower)
+
+            # For proper noun names, if the first meaningful word appears, check relevance
+            # This handles cases like "Maven Black-Briar" when source has "Maven"
+            if meaningful_term_words and meaningful_term_words[0].lower() in source_words_lower:
+                # For 2-3 word terms, first word match is strong signal
+                if len(term_words) <= 3:
+                    return True
+                # For longer terms, require at least 50% meaningful match
+                if len(meaningful_term_words) > 0 and meaningful_matches / len(meaningful_term_words) >= 0.5:
+                    return True
+
+            # Otherwise require most meaningful words to appear
+            if len(meaningful_term_words) > 0:
+                if meaningful_matches / len(meaningful_term_words) < 0.7:
+                    return False
+
+        return True
+
+    def _term_appears_in_text_with_boundaries(self, term_lower: str, text_lower: str) -> bool:
+        """Check if term appears in text with word boundaries."""
+        if not term_lower or not text_lower:
+            return False
+
+        # Check for exact substring match first
+        if term_lower not in text_lower:
+            return False
+
+        # For alphanumeric terms, verify word boundaries
+        if re.search(r'[a-z0-9]', term_lower):
+            # Build pattern with word boundaries
+            pattern = r'(?<![a-z0-9])' + re.escape(term_lower) + r'(?![a-z0-9])'
+            return bool(re.search(pattern, text_lower))
+
+        return True
 
     # --- Layer 4: Format preservation ---
 
