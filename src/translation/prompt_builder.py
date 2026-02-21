@@ -9,73 +9,13 @@ from src.translation.text_analyzer import TextAnalyzer
 
 class PromptBuilder:
     # Compile regex patterns once
-    _POSSESSIVE_RE = re.compile(r"['']\s*s\s+")
-    _CJK_CHAR_RE = re.compile(r'[\u4e00-\u9fff]')
     _ALNUM_UNDERSCORE_RE = re.compile(r"[a-z0-9_]", flags=re.IGNORECASE)
-    _ASCII_NAME_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9'\-]*")
-    _CJK_QUOTE_SPAN_RE = re.compile(r"[\"""''「」『』].*?[\"""''「」『』]")
-    _PAREN_SPAN_RE = re.compile(r"\(.*?\)|（.*?）")
     _TERM_EDGE_PUNCT_RE = re.compile(
         "^[\\s\"'\u201c\u201d\u2018\u2019`\u00b4(){}<>\\[\\]【】《》「」『』。，！？、；：.!?,;:]+|"
         "[\\s\"'\u201c\u201d\u2018\u2019`\u00b4(){}<>\\[\\]【】《》「」『』。，！？、；：.!?,;:]+$"
     )
-    _STRIP_EDGES_RE = re.compile(r"^[\s\-·•]+|[\s\-·•]+$")
     _ALNUM_START_RE = re.compile(r"^[a-z0-9_]")
     _ALNUM_END_RE = re.compile(r"[a-z0-9_]$")
-    _CAPITALIZED_TOKEN_RE = re.compile(r"^[A-Z][a-zA-Z]")
-    _ALL_UPPER_RE = re.compile(r"^[A-Z][A-Z\s\-']+$")
-    _SENTENCE_INITIAL_TWO_WORDS_RE = re.compile(
-        r"^\s*([A-Za-z][A-Za-z0-9'\-]*)\s+([A-Za-z][A-Za-z0-9'\-]*)"
-    )
-    _ADDITIONAL_COMMON_WORDS = frozenset({
-        "choose", "chose", "chosen", "select", "selected",
-    })
-    _IMPERATIVE_SECOND_TOKEN_HINTS = frozenset({
-        "a", "an", "the",
-        "my", "your", "his", "her", "its", "our", "their",
-        "this", "that", "these", "those",
-        "me", "him", "her", "us", "them", "it",
-        "all", "any", "some", "each", "every",
-    })
-    _IMPERATIVE_PARTICLE_HINTS = frozenset({
-        "down", "up", "out", "off", "on", "back", "away",
-        "around", "along", "over", "through", "in",
-    })
-    _LEADING_QUOTED_SPAN_RE = re.compile(
-        r'^\s*["\'\u201c\u201d\u2018\u2019\u300c\u300d\u300e\u300f\u300a\u300b\u3010\u3011\(\[]\s*[^"\'\u201c\u201d\u2018\u2019\u300c\u300d\u300e\u300f\u300a\u300b\u3010\u3011\(\)\[\]]{1,30}\s*["\'\u201c\u201d\u2018\u2019\u300d\u300f\u300b\u3011\)\]]\s*'
-    )
-    _LEADING_PAREN_SPAN_RE = re.compile(
-        r"^\s*[\(\[\uFF08\u3010]\s*[^)\]\uFF09\u3011]{1,30}\s*[\)\]\uFF09\u3011]\s*"
-    )
-    _TRAILING_PAREN_SPAN_RE = re.compile(
-        r"\s*[\(\[\uFF08\u3010]\s*[^)\]\uFF09\u3011]{1,30}\s*[\)\]\uFF09\u3011]\s*$"
-    )
-    _COMMON_WORD_RE = re.compile(
-        r"^(?:the|a|an|and|or|but|in|on|at|to|for|of|with|by|from|is|are|was|were|"
-        r"be|been|being|have|has|had|do|does|did|will|would|shall|should|may|might|"
-        r"can|could|must|not|no|yes|up|out|off|over|under|again|further|then|once|"
-        r"here|there|when|where|why|how|all|each|every|both|few|more|most|other|"
-        r"some|such|than|too|very|just|about|after|before|between|through|during|"
-        r"above|below|into|your|my|his|her|its|our|their|me|him|them|us|she|he|it|"
-        r"we|they|you|i|what|which|who|whom|this|that|these|those|am|if|so|go|get|"
-        r"got|take|took|make|made|come|came|give|gave|say|said|tell|told|think|"
-        r"know|knew|see|saw|want|need|use|find|found|put|set|run|let|keep|begin|"
-        r"show|try|ask|work|seem|feel|leave|call|good|new|old|big|small|long|"
-        r"great|little|right|left|high|low|own|same|last|next|hard|soft|hot|cold|"
-        r"full|empty|young|dark|light|white|black|red|blue|green|strong|weak|"
-        r"large|open|close|still|also|back|well|much|even|now|only|just|already|"
-        r"fill|muscular|tight|inside|deep|rough|wet|thick|heavy|raw|warm|body|"
-        r"hand|head|face|eye|mouth|skin|chest|arm|leg|finger|hair|heart|blood|"
-        r"flesh|bone|ass|breast|cock|dick|pussy|hole|tongue|lip|throat|neck|"
-        r"shoulder|waist|hip|thigh|belly|muscle|wolf|bear|dragon|sword|shield|"
-        r"bow|arrow|axe|dagger|mace|staff|armor|helmet|boot|glove|ring|amulet|"
-        r"potion|scroll|gem|gold|iron|steel|silver|leather|cloth|wood|stone|fire|"
-        r"ice|frost|lightning|storm|wind|rain|snow|sun|moon|star|night|day|dawn|"
-        r"dusk|morning|evening|north|south|east|west|mountain|river|lake|sea|"
-        r"forest|cave|mine|road|bridge|gate|wall|tower|door|floor|room|bed|"
-        r"table|chair|food|drink|wine|ale|mead|bread|meat|fish|water)$",
-        re.IGNORECASE,
-    )
 
     def __init__(self, prompt_manager, config_manager):
         self.prompt_manager = prompt_manager
@@ -108,7 +48,7 @@ class PromptBuilder:
         if glossary_context:
             glossary_append = self.prompt_manager.get(
                 "translator.glossary_instruction_append",
-                "\n\nInstruction: Translate the text to {target_language}, strictly adhering to the Mandatory Dictionary above for any matching terms.",
+                "\n\n说明：将源文本翻译为{target_language}。源文本中出现的术语必须严格按照词典翻译。参考术语仅供一致性参考，不要强制使用。",
             )
             glossary_append = self.apply_prompt_vars(glossary_append, prompt_vars)
             system_prompt += f"\n\n{glossary_context}{glossary_append}"
@@ -194,136 +134,48 @@ class PromptBuilder:
         return len(stripped.split()) <= 4
 
     def build_glossary_context(self, source_text: str, matched_terms: dict) -> str:
-        """Build structured glossary context with proper/stylistic/alias/related sections."""
+        """Build flat glossary context with in-source vs reference grouping."""
         if not matched_terms:
             return ""
 
-        proper_noun_lines: List[str] = []
-        stylistic_lines: List[str] = []
-        related_entries: List[tuple[str, str]] = []
+        in_source_lines: list[str] = []
+        reference_lines: list[str] = []
 
-        for k, v in matched_terms.items():
-            if not isinstance(k, str) or not k.strip():
+        for term, translation in matched_terms.items():
+            if not isinstance(term, str) or not term.strip():
                 continue
-            if len(k) >= 100:
+            if len(term) >= 100:
                 continue
 
-            v_str = "" if v is None else str(v)
-            if self._term_appears_in_source(k, source_text):
-                display_term = self._strip_term_edge_punct(k) or k
-                term_type = self.classify_term_type(display_term, source_text=source_text)
-                if term_type == "proper_noun":
-                    proper_noun_lines.append(f"- {display_term} : {v_str}")
-                else:
-                    stylistic_lines.append(f"- {display_term} : {v_str}")
+            v_str = "" if translation is None else str(translation)
+            display_term = self._strip_term_edge_punct(term) or term
+
+            if self._term_appears_in_source(display_term, source_text):
+                in_source_lines.append(f"- {display_term} -> {v_str}")
             else:
-                related_entries.append((k, v_str))
+                reference_lines.append(f"- {display_term} -> {v_str}")
 
-        alias_lines = self._derive_preferred_alias_lines(source_text, matched_terms)
-        related_lines = [
-            f"- {term} : {translation}"
-            for term, translation in related_entries
-            if not self._is_potential_alias_expansion(term, source_text)
-        ]
-
-        if not proper_noun_lines and not stylistic_lines and not alias_lines and not related_lines:
+        if not in_source_lines and not reference_lines:
             return ""
 
         glossary_header = self.prompt_manager.get(
             "translator.glossary_header",
-            "## Dictionary\nUse these entries to keep translations consistent:",
+            "## 术语词典\n以下术语用于保持翻译一致性：",
         )
 
-        sections: List[str] = []
-        if proper_noun_lines:
+        sections: list[str] = []
+        if in_source_lines:
             sections.append(
-                "### Non-Negotiable Terms (mandatory)\n"
-                "These are proper nouns (names, places, factions). "
-                "You MUST use the exact translations below.\n"
-                + "\n".join(proper_noun_lines)
+                "### 源文本中出现的术语（必须使用）\n"
+                + "\n".join(in_source_lines)
             )
-        if stylistic_lines:
+        if reference_lines:
             sections.append(
-                "### Stylistic Vocabulary (adapt to target tone)\n"
-                "These are common words/phrases. Use the translations as a baseline "
-                "but you MAY adapt wording to match the target style and tone.\n"
-                + "\n".join(stylistic_lines)
+                "### 参考术语（仅供一致性参考）\n"
+                + "\n".join(reference_lines)
             )
-        if alias_lines:
-            sections.append("### Derived Aliases (preferred)\n" + "\n".join(alias_lines))
-        if related_lines:
-            sections.append("### Related Terms (reference only)\n" + "\n".join(related_lines))
 
         return glossary_header + "\n\n" + "\n\n".join(sections)
-
-    def classify_term_type(self, term: Optional[str], source_text: Optional[str] = None) -> str:
-        """Classify a glossary term as 'proper_noun' or 'stylistic'."""
-        if not term or not isinstance(term, str):
-            return "stylistic"
-        term = term.strip()
-        if not term:
-            return "stylistic"
-
-        if self._CJK_CHAR_RE.search(term):
-            return "proper_noun"
-
-        tokens = term.split()
-        if len(tokens) == 1:
-            token_lower = term.lower()
-            if self._COMMON_WORD_RE.match(token_lower):
-                return "stylistic"
-            if token_lower in self._ADDITIONAL_COMMON_WORDS:
-                return "stylistic"
-            if self._CAPITALIZED_TOKEN_RE.match(term):
-                if self._is_sentence_initial_imperative_like(term, source_text):
-                    return "stylistic"
-                return "proper_noun"
-            if term == term.lower():
-                return "stylistic"
-            return "proper_noun"
-
-        if self._ALL_UPPER_RE.match(term):
-            return "proper_noun"
-
-        skip_words = {"the", "a", "an", "of", "in", "on", "at", "to", "for", "and", "or"}
-        first_significant = None
-        for t in tokens:
-            if t.lower() not in skip_words:
-                first_significant = t
-                break
-
-        if first_significant and self._CAPITALIZED_TOKEN_RE.match(first_significant):
-            significant_tokens = [t for t in tokens if t.lower() not in skip_words]
-            if significant_tokens and all(
-                self._CAPITALIZED_TOKEN_RE.match(t) for t in significant_tokens
-            ):
-                return "proper_noun"
-
-        if any(self._CAPITALIZED_TOKEN_RE.match(t) for t in tokens):
-            return "proper_noun"
-
-        return "stylistic"
-
-    def _is_sentence_initial_imperative_like(
-            self,
-            term: str,
-            source_text: Optional[str]) -> bool:
-        """Detect sentence-initial command verbs like 'Choose your ...'."""
-        if not term or not source_text:
-            return False
-
-        first_two = self._SENTENCE_INITIAL_TWO_WORDS_RE.search(str(source_text))
-        if not first_two:
-            return False
-
-        first_token = first_two.group(1)
-        second_token = first_two.group(2).lower()
-        if first_token.lower() != term.lower():
-            return False
-        return (
-            second_token in self._IMPERATIVE_SECOND_TOKEN_HINTS
-            or second_token in self._IMPERATIVE_PARTICLE_HINTS
-        )
 
     @staticmethod
     def apply_prompt_vars(template: str, variables: dict) -> str:
@@ -390,90 +242,6 @@ class PromptBuilder:
         stripped = term.strip()
         stripped = self._TERM_EDGE_PUNCT_RE.sub("", stripped)
         return stripped
-
-    def _strip_epithet_for_short_name(self, text: str) -> str:
-        if not text or not isinstance(text, str):
-            return ""
-        out = text.strip()
-        for _ in range(3):
-            prev = out
-            out = self._LEADING_QUOTED_SPAN_RE.sub("", out)
-            out = self._LEADING_PAREN_SPAN_RE.sub("", out)
-            if out == prev:
-                break
-            out = out.strip()
-        out = self._TRAILING_PAREN_SPAN_RE.sub("", out).strip()
-        out = out.lstrip("-:\uFF1A ").strip()
-        if re.search("[\\u00B7\\u30FB\\u2022]", out):
-            first = re.split("[\\u00B7\\u30FB\\u2022]", out, maxsplit=1)[0].strip()
-            if first:
-                out = first
-        return out
-
-    def _is_potential_alias_expansion(self, term: str, source_text: str) -> bool:
-        """Avoid leaking full-name expansions into related terms when source has short alias."""
-        if not term or not source_text:
-            return False
-        tokens = [t for t in self._ASCII_NAME_TOKEN_RE.findall(term) if t]
-        if len(tokens) < 2:
-            return False
-        first = tokens[0]
-        if not first or not first[0].isupper():
-            return False
-        if self._term_appears_in_source(term, source_text):
-            return False
-        return self._term_appears_in_source(first, source_text)
-
-    def _derive_preferred_alias_lines(self, source_text: str, matched_terms: dict) -> List[str]:
-        if not source_text or not matched_terms:
-            return []
-
-        try:
-            from src.rag.glossary_manager import GlossaryManager
-            normalize = GlossaryManager._NORMALIZE_TERM_RE
-            def do_normalize(s):
-                cleaned = str(s).strip().lower()
-                cleaned = normalize.sub(" ", cleaned)
-                return re.sub(r"\s+", " ", cleaned).strip()
-        except Exception:
-            do_normalize = lambda s: str(s).strip().lower()
-
-        matched_norm = {do_normalize(k) for k in matched_terms.keys() if isinstance(k, str)}
-        alias_lines: List[str] = []
-        seen_alias_norm: set[str] = set()
-
-        for term, translation in matched_terms.items():
-            if not isinstance(term, str) or not term.strip():
-                continue
-            if len(term) >= 100:
-                continue
-
-            tokens = [t for t in self._ASCII_NAME_TOKEN_RE.findall(term) if t]
-            if len(tokens) < 2:
-                continue
-
-            first = tokens[0]
-            if not first or len(first) < 3 or not first[0].isupper():
-                continue
-
-            if not self._term_appears_in_source(first, source_text):
-                continue
-
-            if do_normalize(first) in matched_norm:
-                continue
-
-            v_str = "" if translation is None else str(translation)
-            short_v = self._strip_epithet_for_short_name(v_str) or v_str
-            if not short_v or short_v == v_str:
-                continue
-
-            alias_norm = do_normalize(first)
-            if alias_norm in seen_alias_norm:
-                continue
-            seen_alias_norm.add(alias_norm)
-            alias_lines.append(f"- {first} : {short_v}")
-
-        return alias_lines
 
     # --- RAG token span utilities (used for truncation) ---
 

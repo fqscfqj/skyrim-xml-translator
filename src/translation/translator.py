@@ -1,8 +1,6 @@
-"""Translator facade - backward-compatible API with enhanced pipeline."""
+"""Translator facade with simplified pipeline."""
 
-import json
-import re
-from typing import Optional, Callable, List
+from typing import Optional
 
 from src.llm.client import LLMClient
 from src.rag.engine import RAGEngine
@@ -10,7 +8,7 @@ from src.prompt.prompt_manager import PromptManager
 from src.translation.text_analyzer import TextAnalyzer
 from src.translation.prompt_builder import PromptBuilder
 from src.translation.response_parser import ResponseParser
-from src.translation.quality_checker import QualityChecker, QualityIssueType
+from src.translation.quality_checker import QualityChecker
 from src.cache.translation_cache import TranslationCache
 from src.logging_helper import emit as log_emit
 
@@ -38,7 +36,7 @@ class Translator:
         self._last_rag_debug_info = None
         self._runtime_flags = {"mcm_ui_mode": False}
 
-    # --- Public API (backward-compatible) ---
+    # --- Public API ---
 
     def get_last_rag_debug_info(self):
         return self._last_rag_debug_info
@@ -105,7 +103,7 @@ class Translator:
         return debug_info
 
     def translate_text(self, text, use_rag=True, log_callback=None,
-                       max_retries=2, return_debug_info: bool = False,
+                       max_retries=1, return_debug_info: bool = False,
                        context_hint: Optional[dict] = None):
         if not text or not str(text).strip():
             if return_debug_info:
@@ -133,7 +131,7 @@ class Translator:
                     translation=str(cached),
                     target_lang=str(target_lang)):
                 log_emit(log_callback, self.rag_engine.config, "DEBUG",
-                         "Ignoring suspicious cache entry (possible missed translation/fragment)",
+                         "Ignoring suspicious cache entry (possible missed translation)",
                          module="translator", func="translate_text")
             else:
                 log_emit(log_callback, self.rag_engine.config, "DEBUG",
@@ -228,16 +226,15 @@ class Translator:
             {"role": "user", "content": user_content},
         ]
 
-        # LLM call with quality-aware retry
+        # LLM call with simple retry
         last_translation = None
-        last_issues = []
 
         for retry_count in range(max_retries + 1):
             try:
                 if retry_count > 0:
-                    retry_prompt = self._build_retry_prompt(last_issues, prompt_style, target_lang)
+                    retry_prompt = self._build_retry_prompt(target_lang)
                     log_emit(log_callback, self.rag_engine.config, "WARNING",
-                             f"Retry {retry_count}/{max_retries}: issues={[i.issue_type.value for i in last_issues]}",
+                             f"Retry {retry_count}/{max_retries}",
                              module="translator", func="translate_text")
                     current_messages = messages + [{"role": "user", "content": retry_prompt}]
                 else:
@@ -257,7 +254,6 @@ class Translator:
 
                 # Quality check
                 issues = self._quality_checker.check(text, translation, matched_terms)
-                last_issues = issues
 
                 if not issues or not self._quality_checker.should_retry(issues):
                     # Good enough - cache and return
@@ -277,93 +273,17 @@ class Translator:
                              f"Quality issue: {issue.issue_type.value} ({issue.severity}): {issue.details}",
                              module="translator", func="translate_text")
 
-                # Accept on last retry if issues are minor
+                # Accept on last retry regardless
                 if retry_count == max_retries:
-                    has_blocking_error = any(
-                        i.severity == "error" and i.issue_type in {
-                            QualityIssueType.UNTRANSLATED,
-                            QualityIssueType.FORMAT_VIOLATION,
-                            QualityIssueType.PLACEHOLDER_MISMATCH,
-                        }
-                        for i in issues
-                    )
-                    has_blocking_issue = self._has_blocking_translation_issues(issues)
-
-                    # Final issue-driven rescue pass using CURRENT issues (not previous attempt issues).
-                    if has_blocking_issue and not has_blocking_error:
-                        rescued, rescued_issues = self._retry_with_current_issues(
-                            source_text=str(text),
-                            base_messages=messages,
-                            prompt_style=prompt_style,
-                            target_lang=target_lang,
-                            matched_terms=matched_terms,
-                            issues=issues,
-                            log_callback=log_callback,
-                        )
-                        if rescued and not self._has_blocking_translation_issues(rescued_issues):
-                            log_emit(log_callback, self.rag_engine.config, "INFO",
-                                     "Accepted final rescue retry result",
-                                     module="translator", func="translate_text")
-                            if str(rescued).strip() and not self._is_suspicious_identity_translation(
-                                str(text), str(rescued)
-                            ):
-                                self._translation_cache.put(
-                                    str(text), prompt_style, target_lang, rescued,
-                                    context_key=runtime_context_key)
-                            if return_debug_info:
-                                return rescued, debug_info
-                            return rescued
-
-                    # Final guardrail for missed translations:
-                    # if output is still untranslated, run one extra targeted pass.
-                    if has_blocking_error and any(
-                        i.issue_type == QualityIssueType.UNTRANSLATED for i in issues
-                    ):
-                        forced = self._force_translate_non_name_segments(
-                            source_text=str(text),
-                            base_messages=messages,
-                            target_lang=target_lang,
-                            log_callback=log_callback,
-                        )
-                        if forced and str(forced).strip():
-                            forced_issues = self._quality_checker.check(text, forced, matched_terms)
-                            forced_has_untranslated = any(
-                                i.issue_type == QualityIssueType.UNTRANSLATED for i in forced_issues
-                            )
-                            if not forced_has_untranslated:
-                                log_emit(log_callback, self.rag_engine.config, "INFO",
-                                         "Accepted forced non-name translation fallback",
-                                         module="translator", func="translate_text")
-                                if str(forced).strip() and not self._is_suspicious_identity_translation(
-                                    str(text), str(forced)
-                                ):
-                                    self._translation_cache.put(
-                                        str(text), prompt_style, target_lang, forced,
-                                        context_key=runtime_context_key)
-                                if return_debug_info:
-                                    return forced, debug_info
-                                return forced
-
-                    minor_only = all(i.severity != "error" for i in issues)
-                    if (not has_blocking_issue) and (
-                        minor_only or len([i for i in issues if i.severity == "error"]) <= 1
-                    ):
-                        log_emit(log_callback, self.rag_engine.config, "INFO",
-                                 f"Accepting translation with minor issues after {max_retries} retries",
-                                 module="translator", func="translate_text")
-                        if str(translation).strip() and not self._is_suspicious_identity_translation(
-                            str(text), str(translation)
-                        ):
-                            self._translation_cache.put(
-                                str(text), prompt_style, target_lang, translation,
-                                context_key=runtime_context_key)
-                        if return_debug_info:
-                            return translation, debug_info
-                        return translation
-
                     log_emit(log_callback, self.rag_engine.config, "WARNING",
-                             f"Translation still has issues after {max_retries} retries",
+                             f"Accepting translation with issues after {max_retries} retries",
                              module="translator", func="translate_text")
+                    if str(translation).strip() and not self._is_suspicious_identity_translation(
+                        str(text), str(translation)
+                    ):
+                        self._translation_cache.put(
+                            str(text), prompt_style, target_lang, translation,
+                            context_key=runtime_context_key)
                     if return_debug_info:
                         return translation, debug_info
                     return translation
@@ -396,106 +316,18 @@ class Translator:
             "user_prompt": "",
         }
 
-    def _build_retry_prompt(self, issues: list, prompt_style: str,
-                            target_lang: str) -> str:
-        """Build a targeted retry prompt based on quality issues."""
+    def _build_retry_prompt(self, target_lang: str) -> str:
+        """Build a generic retry prompt."""
         prompt_vars = {
             "target_language": self._text_analyzer.language_display_name(target_lang),
         }
-
-        # Check for untranslated fragments specifically
-        fragment_issues = [i for i in issues
-                          if i.issue_type == QualityIssueType.UNTRANSLATED_FRAGMENTS]
-        if fragment_issues:
-            all_fragments = []
-            for issue in fragment_issues:
-                all_fragments.extend(issue.fragments[:5])
-            fragments_str = ", ".join(all_fragments[:5])
-            retry_template = self.prompt_manager.get(
-                "translator.retry.untranslated_fragments",
-                "CRITICAL: Your previous translation contains untranslated English words: [{fragments}]. "
-                "Translate the entire text to {target_language} now:",
-            )
-            return PromptBuilder.apply_prompt_vars(
-                retry_template, {**prompt_vars, "fragments": fragments_str})
-
-        # Check for format violations
-        format_issues = [i for i in issues
-                        if i.issue_type in (QualityIssueType.FORMAT_VIOLATION,
-                                           QualityIssueType.PLACEHOLDER_MISMATCH)]
-        if format_issues:
-            return PromptBuilder.apply_prompt_vars(
-                "CRITICAL: Your previous translation damaged XML tags or placeholders. "
-                "Preserve ALL tags and placeholders exactly. Translate to {target_language} now:",
-                prompt_vars)
-
-        # Check for glossary mandatory-term misses
-        noun_issues = [i for i in issues
-                      if i.issue_type == QualityIssueType.PROPER_NOUN_MISMATCH]
-        if noun_issues:
-            terms = []
-            for issue in noun_issues:
-                terms.extend(issue.fragments[:3])
-            deduped = []
-            seen = set()
-            for term in terms:
-                key = str(term).strip().lower()
-                if key and key not in seen:
-                    seen.add(key)
-                    deduped.append(str(term).strip())
-            terms_str = ", ".join(deduped[:5]) if deduped else "N/A"
-            retry_template = self.prompt_manager.get(
-                "translator.retry.proper_noun_mismatch",
-                "CRITICAL: You missed mandatory glossary terms: [{terms}]. "
-                "Apply the exact dictionary translations and translate to {target_language} now:",
-            )
-            return PromptBuilder.apply_prompt_vars(
-                retry_template, {**prompt_vars, "terms": terms_str})
-
-        # Generic retry
         retry_template = self.prompt_manager.get(
             "translator.retry.generic",
-            "IMPORTANT: You MUST translate the text to {target_language}. "
-            "Do NOT return the original text. Translate now:",
+            "重要提示：你的上一次翻译存在质量问题。请将文本重新翻译成{target_language}。"
+            "确保：1) 完整翻译所有内容，不要在目标语言中混入源语言词汇 "
+            "2) 保留所有XML标签和占位符 3) 严格按照词典翻译术语。立即重新翻译：",
         )
         return PromptBuilder.apply_prompt_vars(retry_template, prompt_vars)
-
-    def _force_translate_non_name_segments(self, source_text: str, base_messages: list,
-                                           target_lang: str, log_callback=None) -> str:
-        """One-shot fallback for cases where model keeps returning source text.
-
-        Goal: keep obvious proper names, but translate the generic/common words.
-        """
-        fallback_template = self.prompt_manager.get(
-            "translator.retry.force_translate_non_name",
-            (
-                "CRITICAL: Your previous outputs were untranslated.\n"
-                "Translate this text to {target_language} now.\n"
-                "Rules:\n"
-                "1) DO NOT return the original text unchanged.\n"
-                "2) Keep obvious proper names (person/place/faction names) unchanged.\n"
-                "3) Translate generic/common words around those names.\n"
-                "4) Preserve all tags/placeholders/whitespace exactly.\n"
-                "5) Output strict JSON only: {\"translation\":\"...\"}."
-            ),
-        )
-        force_prompt = PromptBuilder.apply_prompt_vars(
-            fallback_template,
-            {"target_language": self._text_analyzer.language_display_name(target_lang)},
-        )
-        forced_messages = base_messages + [{"role": "user", "content": force_prompt}]
-        try:
-            response = self.llm_client.chat_completion(
-                forced_messages, log_callback=log_callback)
-            return self._response_parser.parse(
-                response, source_text, forced_messages,
-                llm_client=self.llm_client, log_callback=log_callback)
-        except Exception as e:
-            log_emit(log_callback, self.rag_engine.config, "WARNING",
-                     f"Forced non-name translation fallback failed: {e}",
-                     exc=e, module="translator",
-                     func="_force_translate_non_name_segments")
-            return ""
 
     def _is_suspicious_identity_translation(self, source: str, translation: str) -> bool:
         """Heuristic: unchanged multi-word English output is likely a missed translation."""
@@ -520,100 +352,4 @@ class Translator:
             return True
 
         untranslated_issue = self._quality_checker._check_untranslated(source, translation)
-        if untranslated_issue is not None:
-            return True
-
-        fragment_issues = self._quality_checker._check_untranslated_fragments(source, translation)
-        return bool(fragment_issues)
-
-    def _has_blocking_translation_issues(self, issues: list) -> bool:
-        blocking_types = {
-            QualityIssueType.UNTRANSLATED,
-            QualityIssueType.UNTRANSLATED_FRAGMENTS,
-            QualityIssueType.PROPER_NOUN_MISMATCH,
-            QualityIssueType.FORMAT_VIOLATION,
-            QualityIssueType.PLACEHOLDER_MISMATCH,
-        }
-        return any(i.issue_type in blocking_types for i in issues)
-
-    def _retry_with_current_issues(
-            self,
-            source_text: str,
-            base_messages: list,
-            prompt_style: str,
-            target_lang: str,
-            matched_terms: dict,
-            issues: list,
-            log_callback=None) -> tuple[str, list]:
-        try:
-            retry_prompt = self._build_retry_prompt(issues, prompt_style, target_lang)
-            retry_messages = base_messages + [{"role": "user", "content": retry_prompt}]
-            response = self.llm_client.chat_completion(
-                retry_messages, log_callback=log_callback)
-            candidate = self._response_parser.parse(
-                response, source_text, retry_messages,
-                llm_client=self.llm_client, log_callback=log_callback)
-            candidate_issues = self._quality_checker.check(
-                source_text, candidate, matched_terms)
-            return candidate, candidate_issues
-        except Exception as e:
-            log_emit(log_callback, self.rag_engine.config, "WARNING",
-                     f"Final rescue retry failed: {e}",
-                     exc=e, module="translator", func="_retry_with_current_issues")
-            return "", issues
-
-    # --- Backward-compatible private methods (used by old code paths) ---
-
-    def _extract_english_words(self, text: str) -> set:
-        return self._text_analyzer.extract_english_words(text)
-
-    def _detect_source_language_code(self, text: str) -> str:
-        return self._text_analyzer.detect_source_language(text)
-
-    def _language_display_name(self, code: str) -> str:
-        return self._text_analyzer.language_display_name(code)
-
-    def _apply_prompt_vars(self, template: str, variables: dict) -> str:
-        return PromptBuilder.apply_prompt_vars(template, variables)
-
-    def _classify_term_type(self, term, source_text: Optional[str] = None) -> str:
-        return self._prompt_builder.classify_term_type(term, source_text=source_text)
-
-    def _build_glossary_context(self, source_text: str, matched_terms: dict) -> str:
-        return self._prompt_builder.build_glossary_context(source_text, matched_terms)
-
-    def _is_likely_untranslated(self, source: str, translation: str) -> bool:
-        issues = self._quality_checker._check_untranslated(source, translation)
-        return issues is not None
-
-    def _detect_untranslated_fragments(self, source: str, translation: str) -> list:
-        issues = self._quality_checker._check_untranslated_fragments(source, translation)
-        fragments = []
-        for issue in issues:
-            fragments.extend(issue.fragments)
-        return fragments
-
-    def _post_process_translation(self, source: str, translation: str,
-                                  log_callback=None) -> str:
-        return translation
-
-    def _is_only_symbols_or_numbers(self, text: str) -> bool:
-        return self._text_analyzer.is_only_symbols_or_numbers(text)
-
-    def _parse_translation_response(self, response: str, original_text: str,
-                                    messages: list, log_callback=None) -> str:
-        return self._response_parser.parse(
-            response, original_text, messages,
-            llm_client=self.llm_client, log_callback=log_callback)
-
-    def _term_appears_in_source(self, term: str, source_text: str) -> bool:
-        return self._prompt_builder._term_appears_in_source(term, source_text)
-
-    def _strip_term_edge_punct(self, term: str) -> str:
-        return self._prompt_builder._strip_term_edge_punct(term)
-
-    def _rag_token_spans(self, text: str):
-        return PromptBuilder.rag_token_spans(text)
-
-    def _truncate_rag_reference(self, text: str, anchors, max_tokens: int) -> str:
-        return PromptBuilder.truncate_rag_reference(text, anchors, max_tokens)
+        return untranslated_issue is not None

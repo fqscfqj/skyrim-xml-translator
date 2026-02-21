@@ -10,11 +10,8 @@ from src.translation.text_analyzer import TextAnalyzer
 
 class QualityIssueType(Enum):
     UNTRANSLATED = "untranslated"
-    UNTRANSLATED_FRAGMENTS = "fragments"
-    PROPER_NOUN_MISMATCH = "proper_noun"
     FORMAT_VIOLATION = "format"
     PLACEHOLDER_MISMATCH = "placeholder"
-    LENGTH_ANOMALY = "length"
 
 
 @dataclass
@@ -26,28 +23,16 @@ class QualityIssue:
 
 
 class QualityChecker:
-    """Multi-layer quality validation for translations."""
-
-    # Common preserved English terms in translations
-    _COMMON_PRESERVED = frozenset({
-        'ok', 'no', 'yes', 'hp', 'mp', 'sp', 'xp', 'npc', 'pc', 'id', 'ui',
-        'ai', 'mod', 'bug', 'app', 'api', 'url', 'xml', 'json', 'html',
-        'boss', 'buff', 'debuff', 'dps', 'tank', 'healer', 'pvp', 'pve',
-        'cm', 'mm', 'kg', 'km', 'gb', 'mb', 'kb',
-    })
+    """Quality validation for translations: untranslated detection + format preservation."""
 
     _CJK_CHAR_RE = re.compile(r'[\u4e00-\u9fff]')
-    _ASCII_WORD_RE = re.compile(r"[A-Za-z]{2,}")
-    _SKIP_CONTEXT_CHAR_RE = re.compile(
-        r"""[\s,.;:!?\-_"'`~(){}\[\]<>/\\|@#$%^&*+=，。！？；：、（）【】《》“”‘’…]+"""
-    )
 
     def __init__(self):
         self._text_analyzer = TextAnalyzer()
 
     def check(self, source: str, translation: str,
               matched_terms: Optional[dict] = None) -> list[QualityIssue]:
-        """Run all quality checks and return a list of issues."""
+        """Run quality checks and return a list of issues."""
         issues: list[QualityIssue] = []
 
         if not source or not translation:
@@ -59,37 +44,15 @@ class QualityChecker:
             issues.append(issue)
             return issues  # No point checking further
 
-        # Layer 2: Untranslated fragment detection
-        fragment_issues = self._check_untranslated_fragments(
-            source, translation, matched_terms=matched_terms)
-        issues.extend(fragment_issues)
-
-        # Layer 3: Proper noun compliance
-        if matched_terms:
-            noun_issues = self._check_proper_noun_compliance(source, translation, matched_terms)
-            issues.extend(noun_issues)
-
-        # Layer 4: Format preservation
+        # Layer 2: Format preservation
         format_issues = self._check_format_preservation(source, translation)
         issues.extend(format_issues)
-
-        # Layer 5: Length anomaly
-        length_issue = self._check_length_anomaly(source, translation)
-        if length_issue:
-            issues.append(length_issue)
 
         return issues
 
     def should_retry(self, issues: list[QualityIssue]) -> bool:
         """Determine if the translation should be retried based on issues."""
-        if any(i.severity == "error" for i in issues):
-            return True
-
-        retry_warning_types = {
-            QualityIssueType.UNTRANSLATED_FRAGMENTS,
-            QualityIssueType.PROPER_NOUN_MISMATCH,
-        }
-        return any(i.issue_type in retry_warning_types for i in issues)
+        return any(i.severity == "error" for i in issues)
 
     def get_retry_context(self, issues: list[QualityIssue]) -> dict:
         """Build context for retry prompt based on detected issues."""
@@ -137,140 +100,7 @@ class QualityChecker:
 
         return None
 
-    # --- Layer 2: Untranslated fragments ---
-
-    def _check_untranslated_fragments(
-            self,
-            source: str,
-            translation: str,
-            matched_terms: Optional[dict] = None) -> list[QualityIssue]:
-        source_words = self._text_analyzer.extract_english_words(source)
-        translation_words = self._text_analyzer.extract_english_words(translation)
-        likely_proper_noun_words = self._collect_likely_proper_noun_words(
-            source, matched_terms)
-
-        untranslated = []
-        for word in translation_words:
-            if (
-                word in source_words
-                and word not in self._COMMON_PRESERVED
-                and word not in likely_proper_noun_words
-                and len(word) > 2
-            ):
-                untranslated.append(word)
-
-        if not untranslated:
-            return []
-
-        # Check if fragments are suspicious (embedded in CJK text)
-        suspicious = []
-        for word in untranslated:
-            escaped = re.escape(word)
-            matches = list(re.finditer(
-                rf'(?<![a-zA-Z]){escaped}(?![a-zA-Z])', translation, re.IGNORECASE))
-            for match in matches:
-                start, end = match.start(), match.end()
-                if self._has_nearby_cjk_context(translation, start, end):
-                    suspicious.append(word)
-                    break
-
-        issues = []
-        if suspicious:
-            severity = "error" if len(suspicious) >= 3 else "warning"
-            issues.append(QualityIssue(
-                issue_type=QualityIssueType.UNTRANSLATED_FRAGMENTS,
-                severity=severity,
-                details=f"Found {len(suspicious)} untranslated fragments embedded in CJK text",
-                fragments=suspicious,
-            ))
-
-        return issues
-
-    def _collect_likely_proper_noun_words(
-            self,
-            source: str,
-            matched_terms: Optional[dict]) -> set[str]:
-        """Collect lowercase english words that are likely proper nouns in source context."""
-        from src.translation.prompt_builder import PromptBuilder
-        builder = PromptBuilder.__new__(PromptBuilder)
-
-        source_forms: dict[str, set[str]] = {}
-        for m in self._ASCII_WORD_RE.finditer(source or ""):
-            form = m.group(0)
-            key = form.lower()
-            if key not in source_forms:
-                source_forms[key] = set()
-            source_forms[key].add(form)
-
-        likely: set[str] = set()
-        for lower_word, forms in source_forms.items():
-            for form in forms:
-                term_type = PromptBuilder.classify_term_type(
-                    builder, form, source_text=source)
-                if term_type == "proper_noun":
-                    likely.add(lower_word)
-                    break
-
-        if isinstance(matched_terms, dict):
-            for term in matched_terms.keys():
-                if not isinstance(term, str):
-                    continue
-                term_type = PromptBuilder.classify_term_type(
-                    builder, term, source_text=source)
-                if term_type != "proper_noun":
-                    continue
-                for m in self._ASCII_WORD_RE.finditer(term):
-                    likely.add(m.group(0).lower())
-
-        return likely
-
-    def _nearest_non_skip_char(self, text: str, idx: int, step: int) -> str:
-        i = idx
-        while 0 <= i < len(text):
-            ch = text[i]
-            if self._SKIP_CONTEXT_CHAR_RE.match(ch):
-                i += step
-                continue
-            return ch
-        return ""
-
-    def _has_nearby_cjk_context(self, text: str, start: int, end: int) -> bool:
-        before = self._nearest_non_skip_char(text, start - 1, -1)
-        after = self._nearest_non_skip_char(text, end, 1)
-        return bool(self._CJK_CHAR_RE.match(before) or self._CJK_CHAR_RE.match(after))
-
-    # --- Layer 3: Proper noun compliance ---
-
-    def _check_proper_noun_compliance(self, source: str, translation: str,
-                                      matched_terms: dict) -> list[QualityIssue]:
-        """Check if mandatory glossary terms are used in the translation."""
-        issues = []
-        from src.translation.prompt_builder import PromptBuilder
-        builder = PromptBuilder.__new__(PromptBuilder)
-
-        for term, expected_translation in matched_terms.items():
-            if not isinstance(term, str) or not isinstance(expected_translation, str):
-                continue
-            if not expected_translation.strip():
-                continue
-
-            term_type = PromptBuilder.classify_term_type(
-                builder, term, source_text=source)
-            if term_type != "proper_noun":
-                continue
-
-            # Check if the expected translation appears in the output
-            if expected_translation not in translation:
-                issues.append(QualityIssue(
-                    issue_type=QualityIssueType.PROPER_NOUN_MISMATCH,
-                    severity="warning",
-                    details=f"Proper noun '{term}' should be translated as '{expected_translation}' but not found in output",
-                    fragments=[term],
-                ))
-
-        return issues
-
-    # --- Layer 4: Format preservation ---
+    # --- Layer 2: Format preservation ---
 
     def _check_format_preservation(self, source: str, translation: str) -> list[QualityIssue]:
         """Check that XML tags and placeholders are preserved."""
@@ -302,32 +132,3 @@ class QualityChecker:
                 ))
 
         return issues
-
-    # --- Layer 5: Length anomaly ---
-
-    def _check_length_anomaly(self, source: str, translation: str) -> Optional[QualityIssue]:
-        """Detect suspiciously short or long translations."""
-        src_len = len(source.strip())
-        trl_len = len(translation.strip())
-
-        if src_len < 5:
-            return None
-
-        ratio = trl_len / src_len if src_len > 0 else 0
-
-        # Chinese translations are typically shorter than English source
-        # but not by extreme amounts
-        if ratio < 0.1 and src_len > 20:
-            return QualityIssue(
-                issue_type=QualityIssueType.LENGTH_ANOMALY,
-                severity="warning",
-                details=f"Translation suspiciously short (ratio={ratio:.2f}, src={src_len}, trl={trl_len})",
-            )
-        if ratio > 5.0:
-            return QualityIssue(
-                issue_type=QualityIssueType.LENGTH_ANOMALY,
-                severity="warning",
-                details=f"Translation suspiciously long (ratio={ratio:.2f}, src={src_len}, trl={trl_len})",
-            )
-
-        return None
