@@ -41,6 +41,15 @@ class LLMClient:
     def reload_config(self) -> None:
         self._init_clients()
 
+    def close_clients(self) -> None:
+        """Close all underlying HTTP connections to interrupt any in-progress requests."""
+        for client in (self.llm_client, self.search_llm_client, self.embed_client):
+            if client:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+
     def get_embedding(self, text, log_callback=None):
         """获取文本向量"""
         if not self.embed_client:

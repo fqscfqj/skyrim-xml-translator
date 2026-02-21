@@ -692,21 +692,28 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, a0: Optional[QCloseEvent]) -> None:
         """Handle window close event to properly cleanup threads"""
+        # Close HTTP connections first so in-progress LLM/embedding requests raise
+        # immediately, letting background threads exit without force-termination.
+        try:
+            self.translator.llm_client.close_clients()
+        except Exception:
+            pass
+
         # Stop and wait for translation worker
         if self.worker and self.worker.isRunning():
             self.worker.stop()
-            self.worker.wait(3000)  # Wait up to 3 seconds
+            self.worker.wait(10000)  # HTTP clients are closed, so requests fail fast
             if self.worker.isRunning():
                 self.worker.terminate()
-                self.worker.wait(1000)
+                self.worker.wait(2000)
 
         # Stop and wait for glossary worker
         if self.glossary_worker and self.glossary_worker.isRunning():
             self.glossary_worker.stop()
-            self.glossary_worker.wait(3000)  # Wait up to 3 seconds
+            self.glossary_worker.wait(10000)
             if self.glossary_worker.isRunning():
                 self.glossary_worker.terminate()
-                self.glossary_worker.wait(1000)
+                self.glossary_worker.wait(2000)
 
         if a0 is not None:
             a0.accept()
@@ -1396,6 +1403,7 @@ class MainWindow(QMainWindow):
             return
 
         num_threads = self.config_manager.get("threads", "translation", 5)
+        self.translator.llm_client.reload_config()  # Reinitialize HTTP clients in case they were closed
         self.worker = Worker(items_to_process, self.translator, num_threads)
         self.worker.log.connect(self.log)
         self.worker.progress.connect(self.progress_bar.setValue)
@@ -1908,6 +1916,7 @@ class MainWindow(QMainWindow):
                 items_to_process.append((row, source_item.text(), context_hint))
 
         num_threads = self.config_manager.get("threads", "translation", 5)
+        self.translator.llm_client.reload_config()  # Reinitialize HTTP clients in case they were closed
         self.worker = Worker(items_to_process, self.translator, num_threads)
         self.worker.log.connect(self.log)
         self.worker.progress.connect(self.progress_bar.setValue)
