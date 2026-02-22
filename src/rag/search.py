@@ -30,6 +30,10 @@ class RAGSearcher:
     })
     _DEFAULT_SHORT_TERM_CHAR_LIMIT = 32
     _WEIGHTED_MAX_TERM_TOKENS = 12
+    _QUERY_CONTAINMENT_BONUS = 0.04
+    _SOURCE_HIT_BONUS = 0.06
+    _SENTENCE_LIKE_TOKEN_LIMIT = 9
+    _SENTENCE_LIKE_CHAR_LIMIT = 80
 
     def __init__(self, vector_store: VectorStore, glossary_manager: GlossaryManager,
                  config_manager, llm_client, embedding_cache: Optional[EmbeddingCache] = None):
@@ -399,6 +403,23 @@ class RAGSearcher:
             return bool(pattern.search(src_lower))
         return term_lower in src_lower
 
+    def _is_sentence_like_term(self, term: str) -> bool:
+        if not term or not isinstance(term, str):
+            return False
+        raw = term.strip()
+        if not raw:
+            return False
+        if "." in raw or "!" in raw or "?" in raw:
+            return True
+
+        normalized = self.glossary_manager.normalize_term_key(raw)
+        if not normalized:
+            return False
+        if len(normalized) > self._SENTENCE_LIKE_CHAR_LIMIT:
+            return True
+        tokens = [t for t in normalized.split() if t]
+        return len(tokens) >= self._SENTENCE_LIKE_TOKEN_LIMIT
+
     def _resolve_direct_match_term(self, query: str, source_text: Optional[str]) -> Optional[str]:
         if not query:
             return None
@@ -615,8 +636,10 @@ class RAGSearcher:
 
         for query in keywords:
             skip_semantic_recall = self._is_low_signal_query(query)
+            query_norm = self.glossary_manager.normalize_term_key(query)
 
             query_selected_terms: list[str] = []
+            source_boosted_terms: list[str] = []
             query_details: Dict[str, Any] = {
                 "query": query,
                 "task_limit": total_limit,
@@ -631,13 +654,19 @@ class RAGSearcher:
                 "selected_terms": query_selected_terms,
                 "selected_short_count": 0,
                 "selected_long_count": 0,
+                "semantic_match_count": 0,
+                "keyword_weighted_count": 0,
+                "sentence_like_filtered_count": 0,
+                "source_boosted_terms": source_boosted_terms,
             }
             if debug_info is not None:
                 debug_info.append(query_details)
 
             candidate_scores: Dict[str, float] = {}
+            source_boosted_seen: set[str] = set()
+            sentence_like_filtered_terms: set[str] = set()
 
-            def add_candidate(term: str, score: float) -> bool:
+            def add_candidate(term: str, score: float, apply_query_bonus: bool = True) -> bool:
                 if not term:
                     return False
                 normalized = self.glossary_manager.normalize_term_key(term)
@@ -646,16 +675,36 @@ class RAGSearcher:
                     canonical_term = term
                 if canonical_term not in self.glossary_manager.glossary:
                     return False
+                if self._is_sentence_like_term(canonical_term):
+                    sentence_like_filtered_terms.add(canonical_term)
+                    return False
                 # For semantic candidates, require signal-token overlap with query
                 # to reduce unrelated high-similarity noise.
                 if score < 1.0 and not self._has_signal_overlap(query, canonical_term):
                     return False
+
+                adjusted_score = score
+                normalized_canonical = self.glossary_manager.normalize_term_key(canonical_term)
+                if adjusted_score <= 1.0:
+                    bonus = 0.0
+                    if apply_query_bonus and query_norm and normalized_canonical and query_norm in normalized_canonical:
+                        bonus += self._QUERY_CONTAINMENT_BONUS
+                    if self._raw_term_appears_in_source(canonical_term, source_text):
+                        bonus += self._SOURCE_HIT_BONUS
+                        if canonical_term not in source_boosted_seen:
+                            source_boosted_seen.add(canonical_term)
+                            source_boosted_terms.append(canonical_term)
+                    if bonus > 0:
+                        adjusted_score = min(1.0, max(0.0, float(adjusted_score)) + bonus)
+
                 prev_score = candidate_scores.get(canonical_term)
-                if prev_score is None or score > prev_score:
-                    candidate_scores[canonical_term] = score
+                if prev_score is None or adjusted_score > prev_score:
+                    candidate_scores[canonical_term] = adjusted_score
                 return True
 
             try:
+                semantic_matches: list[tuple[str, float]] = []
+                keyword_weighted_matches: list[tuple[str, float]] = []
                 vector_matches: list[tuple[str, float]] = []
 
                 if skip_semantic_recall:
@@ -689,7 +738,7 @@ class RAGSearcher:
                         if idx < len(self.vector_store.terms):
                             score = float(similarities[idx])
                             if score >= min_vector_score:
-                                vector_matches.append((self.vector_store.terms[idx], score))
+                                semantic_matches.append((self.vector_store.terms[idx], score))
 
                     keyword_weighted_matches = self._collect_keyword_weighted_matches(
                         query=query,
@@ -698,21 +747,9 @@ class RAGSearcher:
                         min_vector_score=min_vector_score,
                     )
                     if keyword_weighted_matches:
-                        merged_scores: Dict[str, float] = {}
-                        for term, score in vector_matches:
-                            prev = merged_scores.get(term)
-                            if prev is None or score > prev:
-                                merged_scores[term] = score
-                        for term, score in keyword_weighted_matches:
-                            prev = merged_scores.get(term)
-                            if prev is None or score > prev:
-                                merged_scores[term] = score
-                        vector_matches = sorted(
-                            merged_scores.items(), key=lambda x: x[1], reverse=True
-                        )[:desired_top_k]
                         try:
                             log_emit(log_callback, self.config, "DEBUG",
-                                     f"[RAG] Query '{query}' merged {len(keyword_weighted_matches)} keyword-weighted candidates",
+                                     f"[RAG] Query '{query}' collected {len(keyword_weighted_matches)} keyword-weighted candidates",
                                      module="rag_search", func="search")
                         except Exception:
                             pass
@@ -720,11 +757,29 @@ class RAGSearcher:
                     del similarities
                     del ranked_idx
 
+                merged_scores: Dict[str, float] = {}
+                for term, score in semantic_matches:
+                    prev = merged_scores.get(term)
+                    if prev is None or score > prev:
+                        merged_scores[term] = score
+                for term, score in keyword_weighted_matches:
+                    prev = merged_scores.get(term)
+                    if prev is None or score > prev:
+                        merged_scores[term] = score
+                vector_matches = sorted(merged_scores.items(), key=lambda x: x[1], reverse=True)
+
                 if return_debug:
                     query_details["vector_matches"] = vector_matches
+                    query_details["semantic_match_count"] = len(semantic_matches)
+                    query_details["keyword_weighted_count"] = len(keyword_weighted_matches)
 
-                for term, score in vector_matches:
+                for term, score in semantic_matches:
                     add_candidate(term, score)
+                for term, score in keyword_weighted_matches:
+                    add_candidate(term, score, apply_query_bonus=False)
+
+                if return_debug:
+                    query_details["sentence_like_filtered_count"] = len(sentence_like_filtered_terms)
 
                 # 2) Rank by semantic score
                 ranked_candidates = sorted(
