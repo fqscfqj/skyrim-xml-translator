@@ -27,6 +27,9 @@
 ## 安装
 ## Recent Fixes
 - Fixed: LLM optional parameters could be enabled but became unchangeable in the UI on some platforms; the checkbox now uses the boolean `toggled` signal to enable and disable the related parameter controls reliably (see `src/gui_main.py`).
+- Updated: RAG advanced flow is flattened to per-keyword vector retrieval + optional keyword weighting, then constrained by `rag.short_term_max_results` and `rag.long_term_max_results`.
+- Updated: Short/long bucket split now uses pure character length via `rag.short_term_max_chars` (default `32`).
+- Updated: AI candidate selection path is currently disabled at runtime (kept in config/UI for forward compatibility) and will be replaced by reranker.
 
 1.  确保已安装 Python 3.8 或更高版本。
 2.  克隆或下载本项目。

@@ -38,6 +38,7 @@ class RAGConfig:
     similarity_threshold: float = 0.75
     short_term_max_results: int = 5
     long_term_max_results: int = 2
+    short_term_max_chars: int = 32
     keyword_max_queries: int = 8
     keyword_task_decompose_enabled: bool = True
     keyword_task_keep_original: bool = False

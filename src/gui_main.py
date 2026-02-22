@@ -519,6 +519,7 @@ class RAGVisualizationDialog(QDialog):
                                 "long_limit": query_result.get("long_limit"),
                                 "selected_short_count": query_result.get("selected_short_count"),
                                 "selected_long_count": query_result.get("selected_long_count"),
+                                "ai_path_disabled": query_result.get("ai_path_disabled"),
                             }
             if rag_tasks:
                 for keyword in rag_tasks:
@@ -536,6 +537,8 @@ class RAGVisualizationDialog(QDialog):
                     selected_long_count = limit_info.get("selected_long_count")
                     if isinstance(selected_short_count, int) and isinstance(selected_long_count, int):
                         suffix_parts.append(f"selected={selected_short_count}+{selected_long_count}")
+                    if bool(limit_info.get("ai_path_disabled")):
+                        suffix_parts.append("ai=off")
                     if suffix_parts:
                         label = f"{label} ({'; '.join(suffix_parts)})"
                     self._create_tree_item(keywords_item, label, full_text=str(keyword))
@@ -560,6 +563,8 @@ class RAGVisualizationDialog(QDialog):
                     selected_long_count = query_result.get("selected_long_count")
                     if isinstance(selected_short_count, int) and isinstance(selected_long_count, int):
                         query_meta_parts.append(f"selected={selected_short_count}+{selected_long_count}")
+                    if bool(query_result.get("ai_path_disabled")):
+                        query_meta_parts.append("ai=off")
                     query_label = f"Query: {query}"
                     if query_meta_parts:
                         query_label += f" ({'; '.join(query_meta_parts)})"
@@ -658,6 +663,7 @@ class RAGVisualizationDialog(QDialog):
                                 "long_limit": qr.get("long_limit"),
                                 "selected_short_count": qr.get("selected_short_count"),
                                 "selected_long_count": qr.get("selected_long_count"),
+                                "ai_path_disabled": qr.get("ai_path_disabled"),
                             }
             for task in rag_tasks:
                 label = str(task)
@@ -674,6 +680,8 @@ class RAGVisualizationDialog(QDialog):
                 selected_long_count = limit_info.get("selected_long_count")
                 if isinstance(selected_short_count, int) and isinstance(selected_long_count, int):
                     suffix_parts.append(f"selected={selected_short_count}+{selected_long_count}")
+                if bool(limit_info.get("ai_path_disabled")):
+                    suffix_parts.append("ai=off")
                 if suffix_parts:
                     lines.append(f"- {label} ({'; '.join(suffix_parts)})")
                 else:
@@ -699,6 +707,8 @@ class RAGVisualizationDialog(QDialog):
                 selected_long_count = qr.get("selected_long_count") if isinstance(qr, dict) else None
                 if isinstance(selected_short_count, int) and isinstance(selected_long_count, int):
                     meta_parts.append(f"selected={selected_short_count}+{selected_long_count}")
+                if isinstance(qr, dict) and bool(qr.get("ai_path_disabled")):
+                    meta_parts.append("ai=off")
                 if meta_parts:
                     lines.append(f"Query: {query} ({'; '.join(meta_parts)})")
                 else:
@@ -1355,32 +1365,16 @@ class MainWindow(QMainWindow):
         ))
         form_layout.addRow(self.rag_keyword_task_keep_original)
 
-        self.rag_ai_candidate_selection_enabled = QCheckBox(i18n.t(
-            "label_rag_ai_candidate_selection_enabled", "Enable AI candidate selection"
+        self.rag_short_term_max_chars = NoWheelSpinBox()
+        self.rag_short_term_max_chars.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_short_term_max_chars.setRange(1, 1024)
+        self.rag_short_term_max_chars.setSingleStep(1)
+        self.rag_short_term_max_chars.setValue(self.config_manager.get("rag", "short_term_max_chars", 32))
+        self.rag_short_term_max_chars.setToolTip(i18n.t(
+            "tooltip_rag_short_term_max_chars",
+            "Character-length threshold for short-term bucket; <= threshold goes to short-term."
         ))
-        self.rag_ai_candidate_selection_enabled.setChecked(bool(
-            self.config_manager.get("rag", "ai_candidate_selection_enabled", True)
-        ))
-        form_layout.addRow(self.rag_ai_candidate_selection_enabled)
-
-        self.rag_ai_candidate_pool_size = NoWheelSpinBox()
-        self.rag_ai_candidate_pool_size.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        self.rag_ai_candidate_pool_size.setRange(2, 128)
-        self.rag_ai_candidate_pool_size.setValue(self.config_manager.get("rag", "ai_candidate_pool_size", 12))
-        form_layout.addRow(i18n.t("label_rag_ai_candidate_pool_size", "AI candidate pool size:"), self.rag_ai_candidate_pool_size)
-
-        self.rag_ai_candidate_context_chars = NoWheelSpinBox()
-        self.rag_ai_candidate_context_chars.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        self.rag_ai_candidate_context_chars.setRange(64, 8000)
-        self.rag_ai_candidate_context_chars.setValue(self.config_manager.get("rag", "ai_candidate_context_chars", 320))
-        form_layout.addRow(i18n.t("label_rag_ai_candidate_context_chars", "AI candidate context chars:"), self.rag_ai_candidate_context_chars)
-
-        self.rag_ai_candidate_min_vector_score = NoWheelDoubleSpinBox()
-        self.rag_ai_candidate_min_vector_score.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        self.rag_ai_candidate_min_vector_score.setRange(0.0, 1.0)
-        self.rag_ai_candidate_min_vector_score.setSingleStep(0.01)
-        self.rag_ai_candidate_min_vector_score.setValue(self.config_manager.get("rag", "ai_candidate_min_vector_score", 0.45))
-        form_layout.addRow(i18n.t("label_rag_ai_candidate_min_vector_score", "AI candidate min vector score:"), self.rag_ai_candidate_min_vector_score)
+        form_layout.addRow(i18n.t("label_rag_short_term_max_chars", "Short-term length threshold (chars):"), self.rag_short_term_max_chars)
 
         self.rag_keyword_weight_enabled = QCheckBox(i18n.t(
             "label_rag_keyword_weight_enabled", "Enable keyword weighted retrieval"
@@ -1390,57 +1384,110 @@ class MainWindow(QMainWindow):
         ))
         form_layout.addRow(self.rag_keyword_weight_enabled)
 
+        ai_disabled_note = QLabel(i18n.t(
+            "label_rag_ai_path_disabled_note",
+            "AI candidate path is disabled in this version and will be replaced by reranker."
+        ))
+        ai_disabled_note.setWordWrap(True)
+        form_layout.addRow(ai_disabled_note)
+
+        self.rag_ai_candidate_selection_enabled = QCheckBox(i18n.t(
+            "label_rag_ai_candidate_selection_enabled", "Enable AI candidate selection"
+        ))
+        self.rag_ai_candidate_selection_enabled.setChecked(bool(
+            self.config_manager.get("rag", "ai_candidate_selection_enabled", True)
+        ))
+        self.rag_ai_candidate_selection_enabled.setEnabled(False)
+        form_layout.addRow(self.rag_ai_candidate_selection_enabled)
+
+        self.rag_ai_candidate_pool_size = NoWheelSpinBox()
+        self.rag_ai_candidate_pool_size.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_ai_candidate_pool_size.setRange(2, 128)
+        self.rag_ai_candidate_pool_size.setValue(self.config_manager.get("rag", "ai_candidate_pool_size", 12))
+        self.rag_ai_candidate_pool_size.setEnabled(False)
+        form_layout.addRow(i18n.t("label_rag_ai_candidate_pool_size", "AI candidate pool size:"), self.rag_ai_candidate_pool_size)
+
+        self.rag_ai_candidate_context_chars = NoWheelSpinBox()
+        self.rag_ai_candidate_context_chars.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_ai_candidate_context_chars.setRange(64, 8000)
+        self.rag_ai_candidate_context_chars.setValue(self.config_manager.get("rag", "ai_candidate_context_chars", 320))
+        self.rag_ai_candidate_context_chars.setEnabled(False)
+        form_layout.addRow(i18n.t("label_rag_ai_candidate_context_chars", "AI candidate context chars:"), self.rag_ai_candidate_context_chars)
+
+        self.rag_ai_candidate_min_vector_score = NoWheelDoubleSpinBox()
+        self.rag_ai_candidate_min_vector_score.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_ai_candidate_min_vector_score.setRange(0.0, 1.0)
+        self.rag_ai_candidate_min_vector_score.setSingleStep(0.01)
+        self.rag_ai_candidate_min_vector_score.setValue(self.config_manager.get("rag", "ai_candidate_min_vector_score", 0.45))
+        self.rag_ai_candidate_min_vector_score.setEnabled(False)
+        form_layout.addRow(i18n.t("label_rag_ai_candidate_min_vector_score", "AI candidate min vector score:"), self.rag_ai_candidate_min_vector_score)
+
+        self.rag_expert_toggle = QCheckBox(i18n.t(
+            "label_rag_expert_params", "Show expert parameters"
+        ))
+        self.rag_expert_toggle.setChecked(False)
+        form_layout.addRow(self.rag_expert_toggle)
+
+        self.rag_expert_container = QWidget()
+        expert_layout = QFormLayout(self.rag_expert_container)
+        expert_layout.setContentsMargins(16, 0, 0, 0)
+        expert_layout.setSpacing(6)
+
         self.rag_keyword_weight_candidate_pool_size = NoWheelSpinBox()
         self.rag_keyword_weight_candidate_pool_size.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.rag_keyword_weight_candidate_pool_size.setRange(1, 500)
         self.rag_keyword_weight_candidate_pool_size.setValue(self.config_manager.get("rag", "keyword_weight_candidate_pool_size", 24))
-        form_layout.addRow(i18n.t("label_rag_keyword_weight_candidate_pool_size", "Keyword weight candidate pool size:"), self.rag_keyword_weight_candidate_pool_size)
+        expert_layout.addRow(i18n.t("label_rag_keyword_weight_candidate_pool_size", "Keyword weight candidate pool size:"), self.rag_keyword_weight_candidate_pool_size)
 
         self.rag_keyword_weight_keep_k = NoWheelSpinBox()
         self.rag_keyword_weight_keep_k.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.rag_keyword_weight_keep_k.setRange(1, 500)
         self.rag_keyword_weight_keep_k.setValue(self.config_manager.get("rag", "keyword_weight_keep_k", 24))
-        form_layout.addRow(i18n.t("label_rag_keyword_weight_keep_k", "Keyword weight keep top-k:"), self.rag_keyword_weight_keep_k)
+        expert_layout.addRow(i18n.t("label_rag_keyword_weight_keep_k", "Keyword weight keep top-k:"), self.rag_keyword_weight_keep_k)
 
         self.rag_keyword_weight_min_primary_hits = NoWheelSpinBox()
         self.rag_keyword_weight_min_primary_hits.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.rag_keyword_weight_min_primary_hits.setRange(1, 500)
         self.rag_keyword_weight_min_primary_hits.setValue(self.config_manager.get("rag", "keyword_weight_min_primary_hits", 8))
-        form_layout.addRow(i18n.t("label_rag_keyword_weight_min_primary_hits", "Keyword weight min primary hits:"), self.rag_keyword_weight_min_primary_hits)
+        expert_layout.addRow(i18n.t("label_rag_keyword_weight_min_primary_hits", "Keyword weight min primary hits:"), self.rag_keyword_weight_min_primary_hits)
 
         self.rag_keyword_weight_exact_boost = NoWheelDoubleSpinBox()
         self.rag_keyword_weight_exact_boost.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.rag_keyword_weight_exact_boost.setRange(0.0, 2.0)
         self.rag_keyword_weight_exact_boost.setSingleStep(0.01)
         self.rag_keyword_weight_exact_boost.setValue(self.config_manager.get("rag", "keyword_weight_exact_boost", 0.14))
-        form_layout.addRow(i18n.t("label_rag_keyword_weight_exact_boost", "Keyword weight exact boost:"), self.rag_keyword_weight_exact_boost)
+        expert_layout.addRow(i18n.t("label_rag_keyword_weight_exact_boost", "Keyword weight exact boost:"), self.rag_keyword_weight_exact_boost)
 
         self.rag_keyword_weight_contains_boost = NoWheelDoubleSpinBox()
         self.rag_keyword_weight_contains_boost.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.rag_keyword_weight_contains_boost.setRange(0.0, 2.0)
         self.rag_keyword_weight_contains_boost.setSingleStep(0.01)
         self.rag_keyword_weight_contains_boost.setValue(self.config_manager.get("rag", "keyword_weight_contains_boost", 0.06))
-        form_layout.addRow(i18n.t("label_rag_keyword_weight_contains_boost", "Keyword weight contains boost:"), self.rag_keyword_weight_contains_boost)
+        expert_layout.addRow(i18n.t("label_rag_keyword_weight_contains_boost", "Keyword weight contains boost:"), self.rag_keyword_weight_contains_boost)
 
         self.rag_keyword_weight_token_boost = NoWheelDoubleSpinBox()
         self.rag_keyword_weight_token_boost.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.rag_keyword_weight_token_boost.setRange(0.0, 2.0)
         self.rag_keyword_weight_token_boost.setSingleStep(0.01)
         self.rag_keyword_weight_token_boost.setValue(self.config_manager.get("rag", "keyword_weight_token_boost", 0.04))
-        form_layout.addRow(i18n.t("label_rag_keyword_weight_token_boost", "Keyword weight token boost:"), self.rag_keyword_weight_token_boost)
+        expert_layout.addRow(i18n.t("label_rag_keyword_weight_token_boost", "Keyword weight token boost:"), self.rag_keyword_weight_token_boost)
 
         self.rag_keyword_weight_anchor_max_df = NoWheelSpinBox()
         self.rag_keyword_weight_anchor_max_df.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.rag_keyword_weight_anchor_max_df.setRange(1, 200000)
         self.rag_keyword_weight_anchor_max_df.setValue(self.config_manager.get("rag", "keyword_weight_anchor_max_df", 500))
-        form_layout.addRow(i18n.t("label_rag_keyword_weight_anchor_max_df", "Anchor max DF:"), self.rag_keyword_weight_anchor_max_df)
+        expert_layout.addRow(i18n.t("label_rag_keyword_weight_anchor_max_df", "Anchor max DF:"), self.rag_keyword_weight_anchor_max_df)
 
         self.rag_keyword_weight_anchor_boost = NoWheelDoubleSpinBox()
         self.rag_keyword_weight_anchor_boost.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.rag_keyword_weight_anchor_boost.setRange(0.0, 2.0)
         self.rag_keyword_weight_anchor_boost.setSingleStep(0.01)
         self.rag_keyword_weight_anchor_boost.setValue(self.config_manager.get("rag", "keyword_weight_anchor_boost", 0.18))
-        form_layout.addRow(i18n.t("label_rag_keyword_weight_anchor_boost", "Anchor boost:"), self.rag_keyword_weight_anchor_boost)
+        expert_layout.addRow(i18n.t("label_rag_keyword_weight_anchor_boost", "Anchor boost:"), self.rag_keyword_weight_anchor_boost)
+
+        self.rag_expert_container.setVisible(False)
+        self.rag_expert_toggle.toggled.connect(self.rag_expert_container.setVisible)
+        form_layout.addRow(self.rag_expert_container)
 
         form_layout.addRow(QLabel(f"<b>{i18n.t('group_system_settings')}</b>"))
         self.log_level_combo = NoWheelComboBox()
@@ -1599,6 +1646,7 @@ class MainWindow(QMainWindow):
         self.rag_keyword_max_queries.setValue(default_rag.keyword_max_queries)
         self.rag_keyword_task_decompose_enabled.setChecked(default_rag.keyword_task_decompose_enabled)
         self.rag_keyword_task_keep_original.setChecked(default_rag.keyword_task_keep_original)
+        self.rag_short_term_max_chars.setValue(default_rag.short_term_max_chars)
         self.rag_ai_candidate_selection_enabled.setChecked(default_rag.ai_candidate_selection_enabled)
         self.rag_ai_candidate_pool_size.setValue(default_rag.ai_candidate_pool_size)
         self.rag_ai_candidate_context_chars.setValue(default_rag.ai_candidate_context_chars)
@@ -2136,6 +2184,7 @@ class MainWindow(QMainWindow):
                 "similarity_threshold": self.rag_threshold.value(),
                 "short_term_max_results": self.rag_short_max_results.value(),
                 "long_term_max_results": self.rag_long_max_results.value(),
+                "short_term_max_chars": self.rag_short_term_max_chars.value(),
                 "keyword_max_queries": self.rag_keyword_max_queries.value(),
                 "keyword_task_decompose_enabled": bool(self.rag_keyword_task_decompose_enabled.isChecked()),
                 "keyword_task_keep_original": bool(self.rag_keyword_task_keep_original.isChecked()),

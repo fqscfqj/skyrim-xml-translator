@@ -1,4 +1,4 @@
-"""RAG search orchestration with AI candidate selection."""
+"""RAG search orchestration with flattened, per-keyword recall flow."""
 
 import json
 import re
@@ -28,8 +28,7 @@ class RAGSearcher:
     _LOW_SIGNAL_LEADING_TOKENS = frozenset({
         "my", "your", "his", "her", "its", "our", "their",
     })
-    _SHORT_TERM_TOKEN_LIMIT = 4
-    _SHORT_TERM_CHAR_LIMIT = 32
+    _DEFAULT_SHORT_TERM_CHAR_LIMIT = 32
     _WEIGHTED_MAX_TERM_TOKENS = 12
 
     def __init__(self, vector_store: VectorStore, glossary_manager: GlossaryManager,
@@ -81,18 +80,26 @@ class RAGSearcher:
         total_limit = max(0, short_limit) + max(0, long_limit)
         return short_limit, long_limit, total_limit
 
-    def _is_short_term_candidate(self, term: str) -> bool:
+    def _get_short_term_max_chars(self) -> int:
+        return self._get_rag_int(
+            "short_term_max_chars",
+            self._DEFAULT_SHORT_TERM_CHAR_LIMIT,
+            min_value=1,
+            max_value=1024,
+        )
+
+    def _is_short_term_candidate(self, term: str, short_term_max_chars: int) -> bool:
         normalized = self.glossary_manager.normalize_term_key(term)
         if not normalized:
             return False
-        token_count = len([t for t in normalized.split() if t])
-        return token_count <= self._SHORT_TERM_TOKEN_LIMIT and len(normalized) <= self._SHORT_TERM_CHAR_LIMIT
+        return len(normalized) <= short_term_max_chars
 
     def _apply_bucket_limits(
             self,
             ranked_terms: list[str],
             short_limit: int,
-            long_limit: int) -> tuple[list[str], int, int]:
+            long_limit: int,
+            short_term_max_chars: int) -> tuple[list[str], int, int]:
         selected: list[str] = []
         selected_short_count = 0
         selected_long_count = 0
@@ -102,7 +109,7 @@ class RAGSearcher:
             if term in seen:
                 continue
             seen.add(term)
-            if self._is_short_term_candidate(term):
+            if self._is_short_term_candidate(term, short_term_max_chars=short_term_max_chars):
                 if selected_short_count >= short_limit:
                     continue
                 selected_short_count += 1
@@ -444,6 +451,8 @@ class RAGSearcher:
                 pass
         return []
 
+    # Legacy AI selection path kept for future reranker replacement reference.
+    # It is intentionally not used by search() in the current flat recall flow.
     def _ai_select_candidates_for_query(
             self,
             query: str,
@@ -592,7 +601,15 @@ class RAGSearcher:
             if return_debug:
                 return {}, []
             return {}
+        short_term_max_chars = self._get_short_term_max_chars()
         min_vector_score = self._get_rag_float("ai_candidate_min_vector_score", 0.45, 0.0, 1.0)
+
+        try:
+            log_emit(log_callback, self.config, "DEBUG",
+                     "[RAG] AI candidate selection path is disabled in current build; using flat ranked flow",
+                     module="rag_search", func="search")
+        except Exception:
+            pass
 
         query_embeddings = self._batch_embed_keywords(keywords, log_callback)
 
@@ -607,6 +624,7 @@ class RAGSearcher:
                 "long_limit": long_limit,
                 "direct_match": None,
                 "vector_matches": [],
+                "ai_path_disabled": True,
                 "ai_selection_attempted": False,
                 "ai_selected": [],
                 "low_signal_skipped": skip_semantic_recall,
@@ -639,7 +657,6 @@ class RAGSearcher:
 
             try:
                 vector_matches: list[tuple[str, float]] = []
-                direct_mode_term: Optional[str] = None
 
                 if skip_semantic_recall:
                     log_emit(log_callback, self.config, "DEBUG",
@@ -653,14 +670,9 @@ class RAGSearcher:
                         add_candidate(direct_term, 1.2)
                         if return_debug:
                             query_details["direct_match"] = direct_term
-                        if (
-                            self.glossary_manager.normalize_term_key(direct_term)
-                            == self.glossary_manager.normalize_term_key(query)
-                        ):
-                            direct_mode_term = direct_term
 
                 # 1) Vector semantic search
-                if vector_ready and direct_mode_term is None and not skip_semantic_recall:
+                if vector_ready and not skip_semantic_recall:
                     raw_vec = query_embeddings.get(query)
                     if raw_vec is None:
                         raw_vec = self.llm_client.get_embedding(query, log_callback=log_callback)
@@ -670,7 +682,7 @@ class RAGSearcher:
                     desired_top_k = max(
                         top_k,
                         total_limit * 2,
-                        self._get_rag_int("ai_candidate_pool_size", 12, min_value=2, max_value=40) * 2,
+                        24,
                     )
                     ranked_idx = np.argsort(similarities)[::-1]
                     for idx in ranked_idx[:desired_top_k]:
@@ -719,55 +731,22 @@ class RAGSearcher:
                     candidate_scores.items(), key=lambda x: x[1], reverse=True
                 )
 
-                if direct_mode_term is not None:
-                    working_ranked = [
-                        (direct_mode_term, candidate_scores.get(direct_mode_term, 1.2))
-                    ]
-                else:
-                    working_ranked = ranked_candidates
-
-                # 3) AI candidate selection if ambiguous
-                ai_selected_terms: list[str] = []
-                ai_selection_attempted = (
-                    direct_mode_term is None
-                    and self._should_use_ai_selection(query, source_text, working_ranked)
-                )
-                if ai_selection_attempted:
-                    ai_selected_terms = self._ai_select_candidates_for_query(
-                        query=query,
-                        source_text=source_text,
-                        ranked_candidates=working_ranked,
-                        max_select=total_limit,
-                        log_callback=log_callback,
-                    )
-                    if return_debug:
-                        query_details["ai_selection_attempted"] = True
-                        query_details["ai_selected"] = ai_selected_terms
-
-                # 4) Build final selected terms
+                # 3) Build final selected terms from ranked candidates (AI path disabled).
                 preselected_terms: list[str] = []
-                if ai_selected_terms:
-                    for term in ai_selected_terms:
-                        if term in self.glossary_manager.glossary and term not in preselected_terms:
+                for term, score in ranked_candidates:
+                    if score >= threshold or score >= 1.0:
+                        if term not in preselected_terms:
                             preselected_terms.append(term)
-                elif direct_mode_term is not None:
-                    preselected_terms.append(direct_mode_term)
-                elif ai_selection_attempted:
-                    # Ambiguous query + AI returned empty => keep empty to avoid noisy fallback.
-                    pass
-                else:
-                    # Fallback: top-N by score
-                    for term, score in working_ranked:
-                        if score >= threshold or score >= 1.0:
-                            if term not in preselected_terms:
-                                preselected_terms.append(term)
-                    if not preselected_terms:
-                        for term, score in working_ranked:
-                            if term not in preselected_terms:
-                                preselected_terms.append(term)
+                if not preselected_terms:
+                    for term, _score in ranked_candidates:
+                        if term not in preselected_terms:
+                            preselected_terms.append(term)
 
                 limited_terms, selected_short_count, selected_long_count = self._apply_bucket_limits(
-                    preselected_terms, short_limit=short_limit, long_limit=long_limit
+                    preselected_terms,
+                    short_limit=short_limit,
+                    long_limit=long_limit,
+                    short_term_max_chars=short_term_max_chars,
                 )
                 query_selected_terms.extend(limited_terms)
                 if return_debug:
