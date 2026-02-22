@@ -190,7 +190,8 @@ class LLMClient:
 
     def chat_completion_search(self, messages, temperature=None, top_p=None,
                                frequency_penalty=None, presence_penalty=None,
-                               max_tokens=None, log_callback=None) -> str:
+                               max_tokens=None, log_callback=None,
+                               operation: str = "search") -> str:
         """LLM 对话补全 (用于搜索/关键词提取)"""
         client = self.search_llm_client if self.search_llm_client else self.llm_client
         config_section = "llm_search" if self.search_llm_client else "llm"
@@ -206,5 +207,5 @@ class LLMClient:
                 "max_tokens": max_tokens,
             },
             log_callback=log_callback,
-            operation="keyword_extract",
+            operation=operation,
         )

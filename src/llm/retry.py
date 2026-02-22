@@ -65,6 +65,9 @@ def get_strategy(error_type: ErrorType, config_overrides: Optional[dict] = None)
     If config_overrides is provided, max_retries and backoff_base are taken from it.
     """
     base = _DEFAULT_STRATEGIES.get(error_type, _DEFAULT_STRATEGIES[ErrorType.UNKNOWN])
+    # Never override explicitly non-retryable categories.
+    if error_type in (ErrorType.AUTH_ERROR, ErrorType.INVALID_REQUEST):
+        return base
     if not config_overrides:
         return base
     override_retries = config_overrides.get("max_retries")

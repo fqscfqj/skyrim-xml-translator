@@ -18,7 +18,15 @@ class KeywordExtractor:
     _WHITESPACE_RE = re.compile(r"\s+")
     _WORD_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9'\-]*")
     _STRIP_PUNCT_RE = re.compile(r"^[^\w\u4e00-\u9fff]+|[^\w\u4e00-\u9fff]+$")
-    _KW_CACHE_VERSION = "kw_v6"
+    _KW_CACHE_VERSION = "kw_v7"
+    _LOW_SIGNAL_SINGLE_TOKENS = frozenset({
+        "honestly", "kinda", "kindof", "sorta", "sortof",
+        "really", "actually", "basically", "seriously", "literally",
+        "maybe", "perhaps", "probably", "hopefully",
+    })
+    _LOW_SIGNAL_LEADING_TOKENS = frozenset({
+        "my", "your", "his", "her", "its", "our", "their",
+    })
 
     # Lowercase connectors in title-cased proper nouns.
     _TITLE_CONNECTORS = frozenset({
@@ -203,7 +211,7 @@ class KeywordExtractor:
 
             response = self.llm_client.chat_completion_search(
                 messages, temperature=0.1, max_tokens=max_tokens_override,
-                log_callback=log_callback,
+                log_callback=log_callback, operation="keyword_extract",
             )
             if response is None:
                 log_emit(log_callback, self.config, "WARNING",
@@ -348,9 +356,67 @@ class KeywordExtractor:
             pass
         return limited
 
+    def _filter_low_signal_keywords(self, keywords: list[str], log_callback) -> list[str]:
+        kept: list[str] = []
+        dropped: list[str] = []
+
+        for kw in keywords:
+            if not isinstance(kw, str):
+                continue
+            raw = kw.strip()
+            if not raw:
+                continue
+
+            normalized = self.glossary_manager.normalize_term_key(raw)
+            tokens = [t for t in normalized.split() if t]
+            if not tokens:
+                dropped.append(raw)
+                continue
+
+            direct_glossary_hit = self.glossary_manager.lookup_normalized(normalized) is not None
+
+            # Single-token discourse fillers/adverbs are usually poor term queries.
+            if len(tokens) == 1:
+                t = tokens[0]
+                if (
+                    t in self.glossary_manager._COMMON_WORDS
+                    or t in self._LOW_SIGNAL_SINGLE_TOKENS
+                    or (t.endswith("ly") and len(t) >= 5)
+                ):
+                    dropped.append(raw)
+                    continue
+                if direct_glossary_hit:
+                    kept.append(raw)
+                    continue
+                kept.append(raw)
+                continue
+
+            # Possessive-led generic noun phrases (e.g., "my X", "your Y")
+            # are usually sentence semantics, not glossary terms.
+            if tokens[0] in self._LOW_SIGNAL_LEADING_TOKENS:
+                if direct_glossary_hit:
+                    kept.append(raw)
+                    continue
+                dropped.append(raw)
+                continue
+
+            kept.append(raw)
+
+        if dropped:
+            try:
+                preview = dropped[:10]
+                suffix = "..." if len(dropped) > 10 else ""
+                log_emit(log_callback, self.config, "DEBUG",
+                         f"[RAG] Dropped {len(dropped)} low-signal keyword(s): {preview}{suffix}",
+                         module="keyword_extractor", func="_filter_low_signal_keywords")
+            except Exception:
+                pass
+        return kept
+
     def _finalize_keywords(self, keywords: list[str], text: str, log_callback) -> list[str]:
         keywords = self._deduplicate(keywords)
         keywords = self._filter_present_in_text(keywords, text, log_callback)
+        keywords = self._filter_low_signal_keywords(keywords, log_callback)
         keywords = self._limit_keywords(keywords, log_callback)
         return keywords
 

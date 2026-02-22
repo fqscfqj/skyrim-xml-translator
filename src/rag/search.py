@@ -20,6 +20,14 @@ class RAGSearcher:
         "won", "wouldn", "couldn", "shouldn",
         "mustn", "mightn", "needn", "shan", "ain",
     })
+    _LOW_SIGNAL_SINGLE_TOKENS = frozenset({
+        "honestly", "kinda", "kindof", "sorta", "sortof",
+        "really", "actually", "basically", "seriously", "literally",
+        "maybe", "perhaps", "probably", "hopefully",
+    })
+    _LOW_SIGNAL_LEADING_TOKENS = frozenset({
+        "my", "your", "his", "her", "its", "our", "their",
+    })
 
     def __init__(self, vector_store: VectorStore, glossary_manager: GlossaryManager,
                  config_manager, llm_client, embedding_cache: Optional[EmbeddingCache] = None):
@@ -81,6 +89,13 @@ class RAGSearcher:
                 return True
             if token in self._NEGATION_CONTRACTION_STEMS:
                 return True
+            if token in self._LOW_SIGNAL_SINGLE_TOKENS:
+                return True
+            if token.endswith("ly") and len(token) >= 5:
+                return True
+        elif tokens[0] in self._LOW_SIGNAL_LEADING_TOKENS:
+            # Possessive-led phrase is usually sentence semantics, not a term query.
+            return True
         return False
 
     # --- Matching helpers ---
@@ -225,6 +240,8 @@ class RAGSearcher:
             "最多选 {max_select} 个与该查询在此原文里真正相关的候选。\n"
             "优先实体/名称拼写完全一致；拒绝形近但不同名（如 Wulfur != Wulf）。\n"
             "若存在包含查询原拼写的候选，只能从这些候选中选择。\n"
+            "若候选与查询词不存在词形重合（同词、包含关系、常见屈折变化），必须返回 []。\n"
+            "语气词/感叹词默认不做术语映射；除非候选与原文拼写基本一致。\n"
             "优先简短实体词条，不选整句任务/对白。\n"
             "只返回 JSON 字符串数组，元素必须原样复制自候选列表；无匹配返回 []。"
         ).replace("{max_select}", str(max_select))
@@ -236,6 +253,7 @@ class RAGSearcher:
                 temperature=0.0,
                 max_tokens=max_tokens,
                 log_callback=log_callback,
+                operation="candidate_select",
             )
             picked = self._parse_string_array_response(response)
             if not picked:
@@ -334,6 +352,7 @@ class RAGSearcher:
                 "query": query,
                 "direct_match": None,
                 "vector_matches": [],
+                "ai_selection_attempted": False,
                 "ai_selected": [],
                 "low_signal_skipped": skip_semantic_recall,
                 "selected_terms": query_selected_terms,
@@ -367,16 +386,17 @@ class RAGSearcher:
                              module="rag_search", func="search")
 
                 # 0) Deterministic direct match
-                direct_term = self._resolve_direct_match_term(query, source_text)
-                if direct_term:
-                    add_candidate(direct_term, 1.2)
-                    if return_debug:
-                        query_details["direct_match"] = direct_term
-                    if (
-                        self.glossary_manager.normalize_term_key(direct_term)
-                        == self.glossary_manager.normalize_term_key(query)
-                    ):
-                        direct_mode_term = direct_term
+                if not skip_semantic_recall:
+                    direct_term = self._resolve_direct_match_term(query, source_text)
+                    if direct_term:
+                        add_candidate(direct_term, 1.2)
+                        if return_debug:
+                            query_details["direct_match"] = direct_term
+                        if (
+                            self.glossary_manager.normalize_term_key(direct_term)
+                            == self.glossary_manager.normalize_term_key(query)
+                        ):
+                            direct_mode_term = direct_term
 
                 # 1) Vector semantic search
                 if vector_ready and direct_mode_term is None and not skip_semantic_recall:
@@ -421,7 +441,11 @@ class RAGSearcher:
 
                 # 3) AI candidate selection if ambiguous
                 ai_selected_terms: list[str] = []
-                if direct_mode_term is None and self._should_use_ai_selection(query, source_text, working_ranked):
+                ai_selection_attempted = (
+                    direct_mode_term is None
+                    and self._should_use_ai_selection(query, source_text, working_ranked)
+                )
+                if ai_selection_attempted:
                     ai_selected_terms = self._ai_select_candidates_for_query(
                         query=query,
                         source_text=source_text,
@@ -430,6 +454,7 @@ class RAGSearcher:
                         log_callback=log_callback,
                     )
                     if return_debug:
+                        query_details["ai_selection_attempted"] = True
                         query_details["ai_selected"] = ai_selected_terms
 
                 # 4) Build final selected terms
@@ -441,6 +466,9 @@ class RAGSearcher:
                                 break
                 elif direct_mode_term is not None:
                     query_selected_terms.append(direct_mode_term)
+                elif ai_selection_attempted:
+                    # Ambiguous query + AI returned empty => keep empty to avoid noisy fallback.
+                    pass
                 else:
                     # Fallback: top-N by score
                     for term, score in working_ranked:
