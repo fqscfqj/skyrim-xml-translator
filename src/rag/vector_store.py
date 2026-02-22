@@ -31,11 +31,13 @@ class VectorStore:
 
     def _close_mmap(self) -> None:
         """Close memory-mapped vector array to release file handles."""
-        if self.vectors is not None and hasattr(self.vectors, '_mmap') and self.vectors._mmap is not None:
-            try:
-                self.vectors._mmap.close()
-            except Exception:
-                pass
+        if self.vectors is not None:
+            mmap_obj = getattr(self.vectors, "_mmap", None)
+            if mmap_obj is not None:
+                try:
+                    mmap_obj.close()
+                except Exception:
+                    pass
         self.vectors = None
 
     def load(self) -> None:
