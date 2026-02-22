@@ -77,8 +77,11 @@ class LRUCache:
                         data[k] = {"v": v, "ts": ts}
                     except (TypeError, ValueError):
                         continue
-            with open(self._persist_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False)
+                # Write inside lock to prevent concurrent corruption
+                tmp_path = self._persist_path + ".tmp"
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False)
+                os.replace(tmp_path, self._persist_path)
         except Exception:
             pass
 

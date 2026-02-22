@@ -29,6 +29,15 @@ class VectorStore:
 
     # --- Load / Save ---
 
+    def _close_mmap(self) -> None:
+        """Close memory-mapped vector array to release file handles."""
+        if self.vectors is not None and hasattr(self.vectors, '_mmap') and self.vectors._mmap is not None:
+            try:
+                self.vectors._mmap.close()
+            except Exception:
+                pass
+        self.vectors = None
+
     def load(self) -> None:
         """Load terms index and vector index from disk."""
         if os.path.exists(self.terms_path):
@@ -38,6 +47,7 @@ class VectorStore:
             except Exception:
                 self.terms = []
 
+        self._close_mmap()
         if os.path.exists(self.vector_path):
             try:
                 self.vectors = np.load(self.vector_path, mmap_mode="r")
@@ -70,7 +80,9 @@ class VectorStore:
             self.vectors = vec_np
             self.terms = [term]
         else:
-            self.vectors = np.vstack([self.vectors, vec_np])
+            old = np.array(self.vectors)
+            self._close_mmap()
+            self.vectors = np.vstack([old, vec_np])
             self.terms.append(term)
         self.save_vectors()
         self.save_terms_index()
@@ -81,7 +93,9 @@ class VectorStore:
             idx = self.terms.index(term)
             self.terms.pop(idx)
             if self.vectors is not None:
-                self.vectors = np.delete(self.vectors, idx, axis=0)
+                old = np.array(self.vectors)
+                self._close_mmap()
+                self.vectors = np.delete(old, idx, axis=0)
                 self.save_vectors()
             self.save_terms_index()
             return True
@@ -98,7 +112,9 @@ class VectorStore:
 
         if indices_to_delete and self.vectors is not None:
             indices_to_delete.sort(reverse=True)
-            self.vectors = np.delete(self.vectors, indices_to_delete, axis=0)
+            old = np.array(self.vectors)
+            self._close_mmap()
+            self.vectors = np.delete(old, indices_to_delete, axis=0)
             self.save_vectors()
             for idx in indices_to_delete:
                 self.terms.pop(idx)
@@ -194,7 +210,9 @@ class VectorStore:
             if self.vectors is None:
                 self.vectors = new_vectors_np
             else:
-                self.vectors = np.vstack([self.vectors, new_vectors_np])
+                old = np.array(self.vectors)
+                self._close_mmap()
+                self.vectors = np.vstack([old, new_vectors_np])
             self.terms.extend(new_terms_added)
             self.save_vectors()
             self.save_terms_index()
@@ -283,7 +301,9 @@ class VectorStore:
                     if self.vectors is None:
                         self.vectors = new_vectors_np
                     else:
-                        self.vectors = np.vstack([self.vectors, new_vectors_np])
+                        old = np.array(self.vectors)
+                        self._close_mmap()
+                        self.vectors = np.vstack([old, new_vectors_np])
                     self.terms.extend(batch_valid_terms)
                     self.save_vectors()
                     self.save_terms_index()
