@@ -18,7 +18,7 @@ class KeywordExtractor:
     _WHITESPACE_RE = re.compile(r"\s+")
     _WORD_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9'\-]*")
     _STRIP_PUNCT_RE = re.compile(r"^[^\w\u4e00-\u9fff]+|[^\w\u4e00-\u9fff]+$")
-    _KW_CACHE_VERSION = "kw_v5"
+    _KW_CACHE_VERSION = "kw_v6"
 
     # Lowercase connectors in title-cased proper nouns.
     _TITLE_CONNECTORS = frozenset({

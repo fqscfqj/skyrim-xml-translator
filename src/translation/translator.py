@@ -232,7 +232,8 @@ class Translator:
         for retry_count in range(max_retries + 1):
             try:
                 if retry_count > 0:
-                    retry_prompt = self._build_retry_prompt(target_lang)
+                    retry_context = self._quality_checker.get_retry_context(issues)
+                    retry_prompt = self._build_retry_prompt(target_lang, retry_context)
                     log_emit(log_callback, self.rag_engine.config, "WARNING",
                              f"Retry {retry_count}/{max_retries}",
                              module="translator", func="translate_text")
@@ -316,8 +317,8 @@ class Translator:
             "user_prompt": "",
         }
 
-    def _build_retry_prompt(self, target_lang: str) -> str:
-        """Build a generic retry prompt."""
+    def _build_retry_prompt(self, target_lang: str, retry_context: Optional[dict] = None) -> str:
+        """Build a retry prompt, optionally with specific fragment info."""
         prompt_vars = {
             "target_language": self._text_analyzer.language_display_name(target_lang),
         }
@@ -327,7 +328,14 @@ class Translator:
             "确保：1) 完整翻译所有内容，不要在目标语言中混入源语言词汇 "
             "2) 保留所有XML标签和占位符 3) 严格按照词典翻译术语。立即重新翻译：",
         )
-        return PromptBuilder.apply_prompt_vars(retry_template, prompt_vars)
+        prompt = PromptBuilder.apply_prompt_vars(retry_template, prompt_vars)
+
+        # Append specific untranslated fragments if available
+        if retry_context and retry_context.get("fragments"):
+            frags = retry_context["fragments"]
+            prompt += f"\n\n以下术语在上次翻译中未被翻译，请务必按照词典翻译：{', '.join(frags)}"
+
+        return prompt
 
     def _is_suspicious_identity_translation(self, source: str, translation: str) -> bool:
         """Heuristic: unchanged multi-word English output is likely a missed translation."""

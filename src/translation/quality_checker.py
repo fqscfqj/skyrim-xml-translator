@@ -26,6 +26,7 @@ class QualityChecker:
     """Quality validation for translations: untranslated detection + format preservation."""
 
     _CJK_CHAR_RE = re.compile(r'[\u4e00-\u9fff]')
+    _ALPHA_RE = re.compile(r'[a-zA-Z]')
 
     def __init__(self):
         self._text_analyzer = TextAnalyzer()
@@ -44,7 +45,12 @@ class QualityChecker:
             issues.append(issue)
             return issues  # No point checking further
 
-        # Layer 2: Format preservation
+        # Layer 2: Untranslated glossary fragments
+        frag_issue = self._check_untranslated_fragments(source, translation, matched_terms)
+        if frag_issue:
+            issues.append(frag_issue)
+
+        # Layer 3: Format preservation
         format_issues = self._check_format_preservation(source, translation)
         issues.extend(format_issues)
 
@@ -100,7 +106,39 @@ class QualityChecker:
 
         return None
 
-    # --- Layer 2: Format preservation ---
+    # --- Layer 2: Untranslated glossary fragments ---
+
+    def _check_untranslated_fragments(self, source: str, translation: str,
+                                       matched_terms: Optional[dict] = None) -> Optional[QualityIssue]:
+        """Detect glossary terms that appear verbatim (untranslated) in the output."""
+        if not matched_terms:
+            return None
+
+        untranslated = []
+        for term, expected_tl in matched_terms.items():
+            if not term or not expected_tl:
+                continue
+            # Only check English terms (2+ alpha chars)
+            if not self._ALPHA_RE.search(term) or len(term.strip()) < 2:
+                continue
+            # Skip if the expected translation itself contains the English term
+            if term.lower() in (expected_tl or "").lower():
+                continue
+            # Check if the English term still appears verbatim in translation
+            pattern = re.compile(r'(?<![a-zA-Z])' + re.escape(term) + r'(?![a-zA-Z])', re.IGNORECASE)
+            if pattern.search(translation):
+                untranslated.append(term)
+
+        if untranslated:
+            return QualityIssue(
+                issue_type=QualityIssueType.UNTRANSLATED,
+                severity="error",
+                details=f"Glossary terms left untranslated: {untranslated}",
+                fragments=untranslated,
+            )
+        return None
+
+    # --- Layer 3: Format preservation ---
 
     def _check_format_preservation(self, source: str, translation: str) -> list[QualityIssue]:
         """Check that XML tags and placeholders are preserved."""
