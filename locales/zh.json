@@ -129,7 +129,7 @@
     "language_option_de": "德语",
     "language_option_es": "西班牙语",
     "language_option_ru": "俄语",
-    "tooltip_prompt_style": "选择使用的提示词风格：'default' 为常规本地化风格，'nsfw' 为成人/Explicit 风格（不会进行软化或自我审查），'lore_accurate' 为最大化游戏内设定忠实度，'modern_colloquial' 为现代口语化风格，'erotic_novel' 为文学性成人小说品质。",
+    "tooltip_prompt_style": "选择使用的提示词风格",
     "btn_save_config": "保存配置",
     "title_open_xml": "打开 XML 文件",
     "title_open_translation_file": "打开翻译文件",
@@ -178,4 +178,36 @@
     "msg_cleared_selected_translations": "已清空 {count} 个选中译文。",
     "msg_config_saved_reloaded": "配置已保存并重新加载。",
     "msg_restart_for_language": "请重启应用以应用新的语言设置。"
+    ,"group_rag_advanced_settings": "RAG 高级设置"
+    ,"label_rag_keyword_max_queries": "关键词最大查询数:"
+    ,"label_rag_keyword_llm_max_tokens": "关键词提取最大 Tokens:"
+    ,"label_rag_keyword_task_decompose_enabled": "启用关键词任务拆分"
+    ,"label_rag_keyword_task_keep_original": "保留原短语任务"
+    ,"label_rag_keyword_task_min_token_len": "任务最小 token 长度:"
+    ,"label_rag_keyword_task_max_tokens": "短语最大 token 数:"
+    ,"label_rag_keyword_task_token_budget": "任务 token 预算:"
+    ,"label_rag_ai_candidate_selection_enabled": "启用 AI 候选选择"
+    ,"label_rag_ai_candidate_pool_size": "AI 候选池大小:"
+    ,"label_rag_ai_candidate_max_select": "AI 最大选择数:"
+    ,"label_rag_ai_candidate_max_tokens": "AI 最大 tokens:"
+    ,"label_rag_ai_candidate_context_chars": "AI 上下文字符数:"
+    ,"label_rag_ai_candidate_min_vector_score": "AI 候选最低向量分:"
+    ,"label_rag_keyword_weight_enabled": "启用关键词加权召回"
+    ,"label_rag_keyword_weight_candidate_pool_size": "加权候选池大小:"
+    ,"label_rag_keyword_weight_keep_k": "加权保留 Top-K:"
+    ,"label_rag_keyword_weight_min_primary_hits": "加权主命中最小数:"
+    ,"label_rag_keyword_weight_token_budget": "加权 token 预算:"
+    ,"label_rag_keyword_weight_token_top_k": "加权 token Top-K:"
+    ,"label_rag_keyword_weight_max_term_tokens": "加权术语最大 token 数:"
+    ,"label_rag_keyword_weight_exact_boost": "精确匹配加成:"
+    ,"label_rag_keyword_weight_contains_boost": "包含匹配加成:"
+    ,"label_rag_keyword_weight_token_boost": "token 匹配加成:"
+    ,"label_rag_keyword_weight_anchor_token_budget": "锚点 token 预算:"
+    ,"label_rag_keyword_weight_anchor_max_df": "锚点最大 DF:"
+    ,"label_rag_keyword_weight_anchor_boost": "锚点加成:"
+    ,"btn_reset_rag_advanced": "重置 RAG 高级参数"
+    ,"title_confirm_reset_rag_advanced": "确认重置"
+    ,"msg_confirm_reset_rag_advanced": "将 RAG 高级参数重置为默认值？"
+    ,"msg_rag_advanced_reset_done": "RAG 高级参数已重置，点击“保存配置”后生效。"
+    ,"step_rag_tasks": "1. RAG任务"
 }
