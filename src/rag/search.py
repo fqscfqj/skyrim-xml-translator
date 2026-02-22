@@ -148,6 +148,123 @@ class RAGSearcher:
                 return True
         return False
 
+    def _keyword_containment_boost(self, query_norm: str, term: str) -> float:
+        """Compute lexical boost when candidate surface form contains query tokens."""
+        if not query_norm or not term:
+            return 0.0
+
+        term_norm = self.glossary_manager.normalize_term_key(term)
+        if not term_norm:
+            return 0.0
+
+        term_tokens = [t for t in term_norm.split() if t]
+        if not term_tokens:
+            return 0.0
+
+        max_term_tokens = self._get_rag_int(
+            "keyword_weight_max_term_tokens", 12, min_value=1, max_value=100
+        )
+        if len(term_tokens) > max_term_tokens:
+            # Do not boost long sentence-like entries even if they contain the token.
+            return 0.0
+
+        if term_norm == query_norm:
+            base = self._get_rag_float("keyword_weight_exact_boost", 0.14, 0.0, 1.0)
+        elif query_norm in term_norm:
+            base = self._get_rag_float("keyword_weight_contains_boost", 0.06, 0.0, 1.0)
+        else:
+            query_tokens = [
+                t for t in query_norm.split()
+                if t and len(t) >= 3 and t not in self.glossary_manager._COMMON_WORDS
+            ]
+            if not query_tokens:
+                return 0.0
+            overlap = len(set(query_tokens) & set(term_tokens))
+            if overlap <= 0:
+                return 0.0
+            ratio = overlap / max(1, len(set(query_tokens)))
+            base = self._get_rag_float("keyword_weight_token_boost", 0.04, 0.0, 1.0) * ratio
+
+        # Shorter entity-like terms receive stronger lexical boost.
+        if len(term_tokens) <= 4:
+            damp = 1.0
+        elif len(term_tokens) <= 8:
+            damp = 0.75
+        else:
+            damp = 0.5
+        return base * damp
+
+    def _collect_keyword_weighted_matches(
+            self,
+            query: str,
+            similarities: np.ndarray,
+            desired_top_k: int,
+            min_vector_score: float) -> list[tuple[str, float]]:
+        """Retrieve containment candidates and re-score with lexical boost."""
+        if similarities.size == 0:
+            return []
+        if not self._get_rag_bool("keyword_weight_enabled", True):
+            return []
+
+        query_norm = self.glossary_manager.normalize_term_key(query)
+        if not query_norm:
+            return []
+
+        pool_size = self._get_rag_int(
+            "keyword_weight_candidate_pool_size", max(desired_top_k, 24), min_value=1, max_value=500
+        )
+        idx_to_base_score: Dict[int, float] = {}
+
+        def merge_hits(fragment: str, top_k: int) -> None:
+            if not fragment:
+                return
+            hits = self.vector_store.search_containment(
+                fragment, top_k=top_k, similarities=similarities
+            )
+            for idx, _term in hits:
+                if idx >= len(similarities):
+                    continue
+                score = float(similarities[idx])
+                prev = idx_to_base_score.get(idx)
+                if prev is None or score > prev:
+                    idx_to_base_score[idx] = score
+
+        merge_hits(query_norm, pool_size)
+
+        # If full-phrase containment is sparse, add token-level containment.
+        query_tokens = [
+            t for t in query_norm.split()
+            if t and len(t) >= 3 and t not in self.glossary_manager._COMMON_WORDS
+        ]
+        min_primary_hits = self._get_rag_int(
+            "keyword_weight_min_primary_hits", max(4, desired_top_k // 2), min_value=1, max_value=200
+        )
+        if len(idx_to_base_score) < min_primary_hits and len(query_tokens) > 1:
+            token_budget = self._get_rag_int("keyword_weight_token_budget", 3, min_value=1, max_value=8)
+            token_top_k = self._get_rag_int(
+                "keyword_weight_token_top_k", max(8, desired_top_k // 2), min_value=1, max_value=200
+            )
+            for token in query_tokens[:token_budget]:
+                merge_hits(token, token_top_k)
+
+        weighted: list[tuple[str, float]] = []
+        for idx, base_score in idx_to_base_score.items():
+            if idx >= len(self.vector_store.terms):
+                continue
+            term = self.vector_store.terms[idx]
+            boost = self._keyword_containment_boost(query_norm, term)
+            if boost <= 0:
+                continue
+            score = min(1.0, base_score + boost)
+            if score >= min_vector_score:
+                weighted.append((term, score))
+
+        weighted.sort(key=lambda x: x[1], reverse=True)
+        keep_k = self._get_rag_int(
+            "keyword_weight_keep_k", max(desired_top_k, 24), min_value=1, max_value=500
+        )
+        return weighted[:keep_k]
+
     # --- Matching helpers ---
 
     @staticmethod
@@ -471,6 +588,32 @@ class RAGSearcher:
                             score = float(similarities[idx])
                             if score >= min_vector_score:
                                 vector_matches.append((self.vector_store.terms[idx], score))
+
+                    keyword_weighted_matches = self._collect_keyword_weighted_matches(
+                        query=query,
+                        similarities=similarities,
+                        desired_top_k=desired_top_k,
+                        min_vector_score=min_vector_score,
+                    )
+                    if keyword_weighted_matches:
+                        merged_scores: Dict[str, float] = {}
+                        for term, score in vector_matches:
+                            prev = merged_scores.get(term)
+                            if prev is None or score > prev:
+                                merged_scores[term] = score
+                        for term, score in keyword_weighted_matches:
+                            prev = merged_scores.get(term)
+                            if prev is None or score > prev:
+                                merged_scores[term] = score
+                        vector_matches = sorted(
+                            merged_scores.items(), key=lambda x: x[1], reverse=True
+                        )[:desired_top_k]
+                        try:
+                            log_emit(log_callback, self.config, "DEBUG",
+                                     f"[RAG] Query '{query}' merged {len(keyword_weighted_matches)} keyword-weighted candidates",
+                                     module="rag_search", func="search")
+                        except Exception:
+                            pass
 
                     del similarities
                     del ranked_idx

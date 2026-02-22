@@ -47,6 +47,16 @@ class RAGConfig:
     ai_candidate_max_tokens: int = 96
     ai_candidate_context_chars: int = 320
     ai_candidate_min_vector_score: float = 0.45
+    keyword_weight_enabled: bool = True
+    keyword_weight_candidate_pool_size: int = 24
+    keyword_weight_keep_k: int = 24
+    keyword_weight_min_primary_hits: int = 8
+    keyword_weight_token_budget: int = 3
+    keyword_weight_token_top_k: int = 12
+    keyword_weight_max_term_tokens: int = 12
+    keyword_weight_exact_boost: float = 0.14
+    keyword_weight_contains_boost: float = 0.06
+    keyword_weight_token_boost: float = 0.04
 
 
 @dataclass

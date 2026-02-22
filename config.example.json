@@ -56,7 +56,17 @@
         "ai_candidate_max_select": 6,
         "ai_candidate_max_tokens": 96,
         "ai_candidate_context_chars": 320,
-        "ai_candidate_min_vector_score": 0.45
+        "ai_candidate_min_vector_score": 0.45,
+        "keyword_weight_enabled": true,
+        "keyword_weight_candidate_pool_size": 24,
+        "keyword_weight_keep_k": 24,
+        "keyword_weight_min_primary_hits": 8,
+        "keyword_weight_token_budget": 3,
+        "keyword_weight_token_top_k": 12,
+        "keyword_weight_max_term_tokens": 12,
+        "keyword_weight_exact_boost": 0.14,
+        "keyword_weight_contains_boost": 0.06,
+        "keyword_weight_token_boost": 0.04
     }
     ,
     "general": {
