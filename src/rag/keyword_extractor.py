@@ -18,7 +18,7 @@ class KeywordExtractor:
     _WHITESPACE_RE = re.compile(r"\s+")
     _WORD_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9'\-]*")
     _STRIP_PUNCT_RE = re.compile(r"^[^\w\u4e00-\u9fff]+|[^\w\u4e00-\u9fff]+$")
-    _KW_CACHE_VERSION = "kw_v8"
+    _KW_CACHE_VERSION = "kw_v9"
     _LOW_SIGNAL_SINGLE_TOKENS = frozenset({
         "honestly", "kinda", "kindof", "sorta", "sortof",
         "really", "actually", "basically", "seriously", "literally",
@@ -173,6 +173,17 @@ class KeywordExtractor:
         if value > max_value:
             return max_value
         return value
+
+    def _get_rag_bool(self, key: str, default: bool) -> bool:
+        try:
+            value = self.config.get("rag", key, default)
+        except Exception:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes", "on")
+        return bool(value)
 
     def _extract_via_llm(self, text: str, log_callback) -> list[str]:
         """Use LLM to extract fine-grained glossary lookup keywords."""
@@ -432,10 +443,87 @@ class KeywordExtractor:
                 pass
         return kept
 
+    def _expand_keywords_into_tasks(self, keywords: list[str], log_callback) -> list[str]:
+        """Expand multi-token phrases into independent RAG query tasks."""
+        if not self._get_rag_bool("keyword_task_decompose_enabled", True):
+            return keywords
+
+        keep_original = self._get_rag_bool("keyword_task_keep_original", False)
+        min_token_len = self._get_rag_int("keyword_task_min_token_len", 3, min_value=1, max_value=20)
+        max_tokens = self._get_rag_int("keyword_task_max_tokens", 6, min_value=2, max_value=24)
+        token_budget = self._get_rag_int("keyword_task_token_budget", 3, min_value=1, max_value=12)
+        missing_df = 10 ** 9
+
+        expanded: list[str] = []
+        for kw in keywords:
+            raw = (kw or "").strip()
+            if not raw:
+                continue
+
+            norm = self.glossary_manager.normalize_term_key(raw)
+            norm_tokens = [t for t in norm.split() if t]
+
+            # Keep as-is if this phrase is not suitable for decomposition.
+            if len(norm_tokens) < 2 or len(norm_tokens) > max_tokens:
+                expanded.append(raw)
+                continue
+
+            token_candidates = [
+                t for t in norm_tokens
+                if len(t) >= min_token_len
+                and t not in self.glossary_manager._COMMON_WORDS
+                and not t.isdigit()
+            ]
+
+            # Only decompose when at least two meaningful tokens exist.
+            if len(token_candidates) < 2:
+                expanded.append(raw)
+                continue
+
+            if keep_original:
+                expanded.append(raw)
+
+            ranked = sorted(
+                set(token_candidates),
+                key=lambda t: (int(self.glossary_manager._token_df.get(t, missing_df)), -len(t), t),
+            )
+            selected_set = set(ranked[:token_budget])
+
+            # Recover surface casing from source phrase when possible.
+            surface_map: dict[str, str] = {}
+            for token in self._WORD_TOKEN_RE.findall(raw):
+                token_norm = self.glossary_manager.normalize_term_key(token)
+                if token_norm and token_norm not in surface_map:
+                    surface_map[token_norm] = token
+
+            seen_norm: set[str] = set()
+            for token_norm in token_candidates:
+                if token_norm not in selected_set:
+                    continue
+                if token_norm in seen_norm:
+                    continue
+                seen_norm.add(token_norm)
+                expanded.append(surface_map.get(token_norm, token_norm))
+
+            # Safety fallback when decomposition produced nothing.
+            if not keep_original and not seen_norm:
+                expanded.append(raw)
+
+        if expanded != keywords:
+            try:
+                log_emit(log_callback, self.config, "DEBUG",
+                         f"[RAG] Keyword tasks expanded: {keywords} -> {expanded}",
+                         module="keyword_extractor", func="_expand_keywords_into_tasks")
+            except Exception:
+                pass
+        return expanded
+
     def _finalize_keywords(self, keywords: list[str], text: str, log_callback) -> list[str]:
         keywords = self._deduplicate(keywords)
         keywords = self._filter_present_in_text(keywords, text, log_callback)
         keywords = self._filter_low_signal_keywords(keywords, log_callback)
+        keywords = self._expand_keywords_into_tasks(keywords, log_callback)
+        keywords = self._deduplicate(keywords)
         keywords = self._limit_keywords(keywords, log_callback)
         return keywords
 

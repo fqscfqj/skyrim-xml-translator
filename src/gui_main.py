@@ -477,10 +477,24 @@ class RAGVisualizationDialog(QDialog):
             self.debug_info = debug_info
             
             # 1. 关键词提取
-            keywords_item = self._create_tree_item(None, i18n.t("step_keyword_extraction"))
-            if debug_info.get("keywords"):
-                for keyword in debug_info["keywords"]:
-                    self._create_tree_item(keywords_item, str(keyword))
+            keywords_item = self._create_tree_item(
+                None, i18n.t("step_rag_tasks", i18n.t("step_keyword_extraction"))
+            )
+            rag_tasks = debug_info.get("rag_tasks") or debug_info.get("keywords") or []
+            query_limit_map = {}
+            if isinstance(debug_info.get("search_results"), list):
+                for query_result in debug_info.get("search_results") or []:
+                    if isinstance(query_result, dict):
+                        q = str(query_result.get("query", "") or "")
+                        if q:
+                            query_limit_map[q] = query_result.get("task_limit")
+            if rag_tasks:
+                for keyword in rag_tasks:
+                    label = str(keyword)
+                    limit = query_limit_map.get(label)
+                    if isinstance(limit, int) and limit > 0:
+                        label = f"{label} (task_limit={limit})"
+                    self._create_tree_item(keywords_item, label, full_text=str(keyword))
             else:
                 self._create_tree_item(keywords_item, i18n.t("msg_no_valid_terms"))
             keywords_item.setExpanded(True)
@@ -569,11 +583,24 @@ class RAGVisualizationDialog(QDialog):
         lines.append(str(dst or ""))
         lines.append("")
 
-        keywords = di.get("keywords") or []
-        lines.append("[Keywords]")
-        if keywords:
-            for kw in keywords:
-                lines.append(f"- {kw}")
+        rag_tasks = di.get("rag_tasks") or di.get("keywords") or []
+        lines.append("[RAG Tasks]")
+        if rag_tasks:
+            query_limit_map = {}
+            search_results_for_limit = di.get("search_results") or []
+            if isinstance(search_results_for_limit, list):
+                for qr in search_results_for_limit:
+                    if isinstance(qr, dict):
+                        q = str(qr.get("query", "") or "")
+                        if q:
+                            query_limit_map[q] = qr.get("task_limit")
+            for task in rag_tasks:
+                label = str(task)
+                limit = query_limit_map.get(label)
+                if isinstance(limit, int) and limit > 0:
+                    lines.append(f"- {label} (task_limit={limit})")
+                else:
+                    lines.append(f"- {label}")
         else:
             lines.append("(none)")
         lines.append("")
@@ -1811,47 +1838,55 @@ class MainWindow(QMainWindow):
 
     def save_config(self):
         previous_language = self.config_manager.get("general", "language", "auto")
-
-        self.config_manager.set("llm", "base_url", self.llm_base.text())
-        self.config_manager.set("llm", "api_key", self.llm_key.text())
-        self.config_manager.set("llm", "model", self.llm_model.text())
-        
-        # Save Search LLM Config
-        self.config_manager.set("llm_search", "base_url", self.search_base.text())
-        self.config_manager.set("llm_search", "api_key", self.search_key.text())
-        self.config_manager.set("llm_search", "model", self.search_model.text())
-
-        self.config_manager.set("embedding", "base_url", self.embed_base.text())
-        self.config_manager.set("embedding", "api_key", self.embed_key.text())
-        self.config_manager.set("embedding", "model", self.embed_model.text())
-        self.config_manager.set("embedding", "dimensions", self.embed_dim.value())
-        
-        self.config_manager.set("threads", "translation", self.trans_threads.value())
-        self.config_manager.set("threads", "vectorization", self.vec_threads.value())
-        
-        self.config_manager.set("rag", "similarity_threshold", self.rag_threshold.value())
-        self.config_manager.set("rag", "short_term_max_tokens", self.rag_short_token_threshold.value())
-        self.config_manager.set("rag", "short_term_max_results", self.rag_short_max_results.value())
-        self.config_manager.set("rag", "long_term_max_results", self.rag_long_max_results.value())
-        self.config_manager.set("general", "log_level", self.log_level_combo.currentText())
-        # Prompt style determines which system prompt is used (default vs nsfw)
-        self.config_manager.set("general", "prompt_style", self.prompt_style_combo.currentText())
-
         selected_language = self.language_combo.currentData()
-        self.config_manager.set("general", "language", selected_language)
-
         source_lang = self.source_language_combo.currentData() if hasattr(self, "source_language_combo") else "auto"
         target_lang = self.target_language_combo.currentData() if hasattr(self, "target_language_combo") else "zh"
         if target_lang == "auto":
             target_lang = "zh"
-        self.config_manager.set("general", "source_language", source_lang)
-        self.config_manager.set("general", "target_language", target_lang)
         mcm_suffix = self.mcm_suffix_combo.currentData() if hasattr(self, "mcm_suffix_combo") else "source"
-        self.config_manager.set("general", "mcm_output_language_suffix", mcm_suffix)
         mcm_auto_export = bool(
             self.mcm_auto_export_checkbox.isChecked()
         ) if hasattr(self, "mcm_auto_export_checkbox") else True
-        self.config_manager.set("general", "mcm_auto_export", mcm_auto_export)
+
+        # Batch update to avoid repeated save() calls.
+        self.config_manager.set_many({
+            "llm": {
+                "base_url": self.llm_base.text(),
+                "api_key": self.llm_key.text(),
+                "model": self.llm_model.text(),
+            },
+            "llm_search": {
+                "base_url": self.search_base.text(),
+                "api_key": self.search_key.text(),
+                "model": self.search_model.text(),
+            },
+            "embedding": {
+                "base_url": self.embed_base.text(),
+                "api_key": self.embed_key.text(),
+                "model": self.embed_model.text(),
+                "dimensions": self.embed_dim.value(),
+            },
+            "threads": {
+                "translation": self.trans_threads.value(),
+                "vectorization": self.vec_threads.value(),
+            },
+            "rag": {
+                "similarity_threshold": self.rag_threshold.value(),
+                "short_term_max_tokens": self.rag_short_token_threshold.value(),
+                "short_term_max_results": self.rag_short_max_results.value(),
+                "long_term_max_results": self.rag_long_max_results.value(),
+            },
+            "general": {
+                "log_level": self.log_level_combo.currentText(),
+                # Prompt style determines which system prompt is used (default vs nsfw)
+                "prompt_style": self.prompt_style_combo.currentText(),
+                "language": selected_language,
+                "source_language": source_lang,
+                "target_language": target_lang,
+                "mcm_output_language_suffix": mcm_suffix,
+                "mcm_auto_export": mcm_auto_export,
+            },
+        }, save=False)
 
         def _param_widget_value(widget):
             if isinstance(widget, QComboBox):

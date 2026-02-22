@@ -41,6 +41,11 @@ class RAGConfig:
     long_term_max_results: int = 2
     keyword_max_queries: int = 8
     keyword_llm_max_tokens: int = 96
+    keyword_task_decompose_enabled: bool = True
+    keyword_task_keep_original: bool = False
+    keyword_task_min_token_len: int = 3
+    keyword_task_max_tokens: int = 6
+    keyword_task_token_budget: int = 3
     ai_candidate_selection_enabled: bool = True
     ai_candidate_pool_size: int = 12
     ai_candidate_max_select: int = 6
@@ -57,6 +62,9 @@ class RAGConfig:
     keyword_weight_exact_boost: float = 0.14
     keyword_weight_contains_boost: float = 0.06
     keyword_weight_token_boost: float = 0.04
+    keyword_weight_anchor_token_budget: int = 1
+    keyword_weight_anchor_max_df: int = 500
+    keyword_weight_anchor_boost: float = 0.18
 
 
 @dataclass

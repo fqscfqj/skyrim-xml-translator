@@ -57,6 +57,7 @@ class Translator:
         debug_info = {
             "original_text": text,
             "keywords": [],
+            "rag_tasks": [],
             "search_results": {},
             "matched_terms": {},
             "glossary_context": "",
@@ -76,6 +77,7 @@ class Translator:
             threshold = self.rag_engine.config.get("rag", "similarity_threshold", 0.75)
             keywords = self.rag_engine.extract_keywords(text, log_callback=log_callback)
             debug_info["keywords"] = keywords
+            debug_info["rag_tasks"] = keywords
 
             matched_terms = self.rag_engine.search_terms(
                 keywords, threshold=threshold, log_callback=log_callback,
@@ -188,6 +190,7 @@ class Translator:
             self._last_rag_debug_info = {
                 "original_text": text,
                 "keywords": keywords,
+                "rag_tasks": keywords,
                 "search_results": search_debug if isinstance(search_debug, list) else [],
                 "matched_terms": matched_terms,
             }
@@ -214,6 +217,7 @@ class Translator:
             debug_info = {
                 "original_text": text,
                 "keywords": keywords,
+                "rag_tasks": keywords,
                 "search_results": search_debug if isinstance(search_debug, list) else [],
                 "matched_terms": matched_terms,
                 "glossary_context": glossary_context,
@@ -310,6 +314,7 @@ class Translator:
         return {
             "original_text": text,
             "keywords": [],
+            "rag_tasks": [],
             "search_results": [],
             "matched_terms": {},
             "glossary_context": "",

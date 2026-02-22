@@ -3,6 +3,9 @@
         "api_key": "<YOUR_LLM_API_KEY>",
         "base_url": "https://api.example.com/v1",
         "model": "gpt-3.5-turbo",
+        "max_retries": 3,
+        "backoff_base": 0.5,
+        "stream": false,
         "request_timeout": 30,
         "request_timeout_step": 15,
         "request_timeout_max": 180,
@@ -19,6 +22,9 @@
         "api_key": "<YOUR_SEARCH_LLM_API_KEY>",
         "base_url": "https://api.example.com/v1",
         "model": "gpt-3.5-turbo",
+        "max_retries": 3,
+        "backoff_base": 0.5,
+        "stream": false,
         "request_timeout": 30,
         "request_timeout_step": 15,
         "request_timeout_max": 180,
@@ -34,7 +40,8 @@
     "embedding": {
         "api_key": "<YOUR_EMBEDDING_API_KEY>",
         "base_url": "https://api.example.com/v1",
-        "model": "text-embedding-3-large"
+        "model": "text-embedding-3-large",
+        "dimensions": 1536
     },
     "paths": {
         "glossary_file": "glossary.json",
@@ -51,6 +58,11 @@
         "long_term_max_results": 2,
         "keyword_max_queries": 8,
         "keyword_llm_max_tokens": 96,
+        "keyword_task_decompose_enabled": true,
+        "keyword_task_keep_original": false,
+        "keyword_task_min_token_len": 3,
+        "keyword_task_max_tokens": 6,
+        "keyword_task_token_budget": 3,
         "ai_candidate_selection_enabled": true,
         "ai_candidate_pool_size": 12,
         "ai_candidate_max_select": 6,
@@ -66,9 +78,11 @@
         "keyword_weight_max_term_tokens": 12,
         "keyword_weight_exact_boost": 0.14,
         "keyword_weight_contains_boost": 0.06,
-        "keyword_weight_token_boost": 0.04
-    }
-    ,
+        "keyword_weight_token_boost": 0.04,
+        "keyword_weight_anchor_token_budget": 1,
+        "keyword_weight_anchor_max_df": 500,
+        "keyword_weight_anchor_boost": 0.18
+    },
     "general": {
         "log_level": "INFO",
         "prompt_style": "default",
@@ -76,6 +90,13 @@
         "source_language": "auto",
         "target_language": "zh",
         "mcm_output_language_suffix": "source",
-        "mcm_auto_export": true
+        "mcm_auto_export": true,
+        "log_file": "logs/app.log"
+    },
+    "cache": {
+        "translation_cache_size": 50000,
+        "embedding_cache_size": 100000,
+        "cache_persist_dir": "cache",
+        "cache_ttl_hours": 0
     }
 }

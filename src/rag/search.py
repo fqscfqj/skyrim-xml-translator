@@ -194,6 +194,32 @@ class RAGSearcher:
             damp = 0.5
         return base * damp
 
+    def _select_anchor_tokens(self, query_tokens: list[str]) -> set[str]:
+        """Pick rare, entity-like query tokens as lexical anchors."""
+        if not query_tokens:
+            return set()
+
+        budget = self._get_rag_int("keyword_weight_anchor_token_budget", 1, min_value=1, max_value=4)
+        max_df = self._get_rag_int("keyword_weight_anchor_max_df", 500, min_value=1, max_value=100_000)
+        missing_df = 10 ** 9
+
+        ranked: list[tuple[int, str]] = []
+        for token in query_tokens:
+            df = int(self.glossary_manager._token_df.get(token, missing_df))
+            ranked.append((df, token))
+        ranked.sort(key=lambda x: (x[0], len(x[1]), x[1]))
+
+        selected: list[str] = []
+        for df, token in ranked:
+            if df <= max_df:
+                selected.append(token)
+            if len(selected) >= budget:
+                break
+
+        if not selected and ranked:
+            selected = [ranked[0][1]]
+        return set(selected)
+
     def _collect_keyword_weighted_matches(
             self,
             query: str,
@@ -214,8 +240,9 @@ class RAGSearcher:
             "keyword_weight_candidate_pool_size", max(desired_top_k, 24), min_value=1, max_value=500
         )
         idx_to_base_score: Dict[int, float] = {}
+        idx_to_token_hits: Dict[int, set[str]] = {}
 
-        def merge_hits(fragment: str, top_k: int) -> None:
+        def merge_hits(fragment: str, top_k: int, token_tag: Optional[str] = None) -> None:
             if not fragment:
                 return
             hits = self.vector_store.search_containment(
@@ -228,6 +255,12 @@ class RAGSearcher:
                 prev = idx_to_base_score.get(idx)
                 if prev is None or score > prev:
                     idx_to_base_score[idx] = score
+                if token_tag:
+                    hit_set = idx_to_token_hits.get(idx)
+                    if hit_set is None:
+                        hit_set = set()
+                        idx_to_token_hits[idx] = hit_set
+                    hit_set.add(token_tag)
 
         merge_hits(query_norm, pool_size)
 
@@ -245,7 +278,10 @@ class RAGSearcher:
                 "keyword_weight_token_top_k", max(8, desired_top_k // 2), min_value=1, max_value=200
             )
             for token in query_tokens[:token_budget]:
-                merge_hits(token, token_top_k)
+                merge_hits(token, token_top_k, token_tag=token)
+
+        anchor_tokens = self._select_anchor_tokens(query_tokens)
+        anchor_boost = self._get_rag_float("keyword_weight_anchor_boost", 0.18, 0.0, 1.0)
 
         weighted: list[tuple[str, float]] = []
         for idx, base_score in idx_to_base_score.items():
@@ -255,7 +291,13 @@ class RAGSearcher:
             boost = self._keyword_containment_boost(query_norm, term)
             if boost <= 0:
                 continue
-            score = min(1.0, base_score + boost)
+            score = base_score + boost
+            if anchor_tokens:
+                token_hits = idx_to_token_hits.get(idx, set())
+                overlap = len(anchor_tokens & token_hits)
+                if overlap > 0:
+                    score += anchor_boost * (overlap / max(1, len(anchor_tokens)))
+            score = min(1.0, score)
             if score >= min_vector_score:
                 weighted.append((term, score))
 
@@ -517,6 +559,7 @@ class RAGSearcher:
             query_selected_terms: list[str] = []
             query_details: Dict[str, Any] = {
                 "query": query,
+                "task_limit": total_limit,
                 "direct_match": None,
                 "vector_matches": [],
                 "ai_selection_attempted": False,

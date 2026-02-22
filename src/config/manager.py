@@ -14,7 +14,9 @@ class ConfigManager:
     def __init__(self, config_path: str = "config.json"):
         self.config_path = config_path
         self.config: dict = self._load_config()
-        self._ensure_defaults()
+        defaults_changed = self._ensure_defaults()
+        if defaults_changed:
+            self.save_config()
 
     def _load_config(self) -> dict:
         if not os.path.exists(self.config_path):
@@ -30,16 +32,19 @@ class ConfigManager:
     def _get_default_config(self) -> dict:
         return dataclass_to_dict(AppConfig())
 
-    def _ensure_defaults(self) -> None:
+    def _ensure_defaults(self) -> bool:
         defaults = self._get_default_config()
-        self._merge_dict(defaults, self.config)
+        return self._merge_dict(defaults, self.config)
 
-    def _merge_dict(self, defaults: dict, target: dict) -> None:
+    def _merge_dict(self, defaults: dict, target: dict) -> bool:
+        changed = False
         for key, value in defaults.items():
             if key not in target:
                 target[key] = value
+                changed = True
             elif isinstance(value, dict) and isinstance(target.get(key), dict):
-                self._merge_dict(value, target[key])
+                changed = self._merge_dict(value, target[key]) or changed
+        return changed
 
     def save_config(self) -> None:
         try:
@@ -54,11 +59,22 @@ class ConfigManager:
     def get(self, section: str, key: str, default: Any = None) -> Any:
         return self.config.get(section, {}).get(key, default)
 
-    def set(self, section: str, key: str, value: Any) -> None:
+    def set(self, section: str, key: str, value: Any, save: bool = True) -> None:
         if section not in self.config:
             self.config[section] = {}
         self.config[section][key] = value
-        self.save_config()
+        if save:
+            self.save_config()
+
+    def set_many(self, updates: dict[str, dict[str, Any]], save: bool = True) -> None:
+        """Batch update config values. Useful for GUI forms to avoid repeated disk writes."""
+        for section, items in updates.items():
+            if section not in self.config or not isinstance(self.config.get(section), dict):
+                self.config[section] = {}
+            for key, value in items.items():
+                self.config[section][key] = value
+        if save:
+            self.save_config()
 
     # --- New typed API ---
 
