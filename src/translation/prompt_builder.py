@@ -48,7 +48,7 @@ class PromptBuilder:
         if glossary_context:
             glossary_append = self.prompt_manager.get(
                 "translator.glossary_instruction_append",
-                "\n\n说明：将源文本翻译为{target_language}。源文本中出现的术语必须严格按照词典翻译。参考术语仅供一致性参考，不要强制使用。",
+                "\n术语规则：术语表仅作候选参考；仅在当前语义匹配时采用词典译法，不匹配可忽略。",
             )
             glossary_append = self.apply_prompt_vars(glossary_append, prompt_vars)
             system_prompt += f"\n\n{glossary_context}{glossary_append}"
@@ -60,7 +60,7 @@ class PromptBuilder:
                 context_hint=context_hint,
             )
 
-        user_template = self.prompt_manager.get("translator.user_template", "Input: {text}")
+        user_template = self.prompt_manager.get("translator.user_template", "原文：{text}")
         user_content = self.apply_prompt_vars(user_template, {**prompt_vars, "text": source_text})
 
         return system_prompt, user_content
@@ -75,41 +75,39 @@ class PromptBuilder:
 
         entry_type = entry_type_hint or self._infer_mcm_entry_type(entry_id)
         base_rules = [
-            "MCM UI MODE (MANDATORY): treat this as game UI copy, not prose.",
-            "Keep wording stable across all similar UI entries in this file; do not alternate synonyms.",
-            "Buttons/options must stay short and command-like; do not add subjects or extra punctuation.",
-            "Do not turn short labels into full sentences.",
-            "Keep placeholders, tags, tokens, braces, and escaped sequences unchanged.",
+            "MCM 界面模式（必须）：按游戏 UI 文案翻译，不按叙事文本。",
+            "同类条目用词保持稳定，不随意换同义词。",
+            "按钮/选项保持短促命令式，不补主语，不加多余标点。",
+            "短标签不要扩写成完整句。",
+            "占位符、标签、token、花括号和转义序列必须原样保留。",
         ]
 
         if target_lang_code.lower().startswith("zh"):
             base_rules.append(
-                "For Chinese UI consistency, lock core terms: "
-                "Enable=启用, Disable=禁用, Apply=应用, Reset=重置, Confirm=确认, "
-                "Cancel=取消, On=开, Off=关, Yes=是, No=否."
+                "中文 UI 术语固定：Enable=启用，Disable=禁用，Apply=应用，Reset=重置，"
+                "Confirm=确认，Cancel=取消，On=开，Off=关，Yes=是，No=否。"
             )
 
         if entry_type == "tooltip":
             base_rules.append(
-                "Tooltip style: concise explanatory statement style only; "
-                "do not mix '是否…' and '将会…' patterns for similar tips."
+                "Tooltip 用简短说明句；同类提示不要混用“是否…”和“将会…”。"
             )
         elif entry_type == "title":
             base_rules.append(
-                "Title/header style: noun phrase only, no sentence-ending punctuation."
+                "标题/页头使用名词短语，不加句末标点。"
             )
         elif entry_type == "option":
             base_rules.append(
-                "Option label style: keep it as a compact setting label, not a full clause."
+                "选项标签保持紧凑设置名，不写成完整分句。"
             )
         else:
             if self._looks_like_short_ui_label(source_text):
                 base_rules.append(
-                    "This input is a short label/button: keep translation very short and UI-like."
+                    "该文本是短标签/按钮：译文保持简短、界面化。"
                 )
 
         joined = "\n".join(f"- {r}" for r in base_rules)
-        return f"\n\n### MCM UI Copy Rules (MANDATORY)\n{joined}"
+        return f"\n\nMCM 界面文案规则（必须）：\n{joined}"
 
     @staticmethod
     def _infer_mcm_entry_type(entry_id: str) -> str:
@@ -160,18 +158,18 @@ class PromptBuilder:
 
         glossary_header = self.prompt_manager.get(
             "translator.glossary_header",
-            "## 术语词典\n以下术语用于保持翻译一致性：",
+            "术语表：",
         )
 
         sections: list[str] = []
         if in_source_lines:
             sections.append(
-                "### 源文本中出现的术语（必须使用）\n"
+                "命中术语（优先参考，按语义决定）\n"
                 + "\n".join(in_source_lines)
             )
         if reference_lines:
             sections.append(
-                "### 参考术语（仅供一致性参考）\n"
+                "参考术语（仅一致性参考）\n"
                 + "\n".join(reference_lines)
             )
 
@@ -202,9 +200,9 @@ class PromptBuilder:
                 pass
         if not system_prompt:
             system_prompt = (
-                "Translate the input text to {target_language}. "
-                "Output strictly as JSON only: {\"translation\": \"...\"}. "
-                "Preserve all XML/HTML tags, placeholders, and whitespace."
+                "将输入翻译为{target_language}。"
+                "只输出 JSON：{\"translation\":\"...\"}。"
+                "保留所有 XML/HTML 标签、占位符和空白。"
             )
         return system_prompt
 

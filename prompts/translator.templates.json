@@ -1,5 +1,5 @@
 {
-  "glossary_header": "## 术语词典\n以下术语用于保持翻译一致性：",
-  "glossary_instruction_append": "\n\n说明：将源文本翻译为{target_language}。源文本中出现的术语必须严格按照词典翻译。参考术语仅供一致性参考，不要强制使用。",
-  "user_template": "输入：{text}"
+  "glossary_header": "术语表：",
+  "glossary_instruction_append": "\n术语规则：术语表仅作候选参考；仅在当前语义匹配时采用词典译法，不匹配可忽略。",
+  "user_template": "原文：{text}"
 }

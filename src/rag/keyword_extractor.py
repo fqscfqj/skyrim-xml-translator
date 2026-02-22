@@ -172,16 +172,15 @@ class KeywordExtractor:
         max_terms = self._get_rag_int("keyword_max_queries", 8, min_value=1, max_value=32)
         if not prompt_template:
             prompt_template = (
-                "Extract glossary lookup keywords from the source text.\n"
-                "Return ONLY a JSON array of strings, max {max_terms} items.\n\n"
-                "Rules:\n"
-                "1) Each item must be an exact contiguous span from the source text.\n"
-                "2) Prioritize names, places, factions, titles, quests, creatures, spells, items, and lore entities.\n"
-                "3) Prefer fine-grained entity anchors; avoid generic words.\n"
-                "4) Do NOT infer, translate, normalize, or paraphrase.\n"
-                "5) Keep original casing.\n"
-                "6) If none, return [] only.\n\n"
-                "Source text: \"{text}\""
+                "从原文中提取术语查询词。\n"
+                "只返回 JSON 字符串数组，最多 {max_terms} 项。\n\n"
+                "规则：\n"
+                "1) 每项必须是原文中的连续片段。\n"
+                "2) 优先专有名词：人名、地名、阵营、称号、任务、怪物、法术、物品、世界观术语。\n"
+                "3) 其次提取有辨识度的关键词，避免泛词。\n"
+                "4) 不要推断、翻译、归一化或改写；保留原大小写。\n"
+                "5) 无结果仅返回 []。\n\n"
+                "原文：\"{text}\""
             )
 
         prompt = self._apply_prompt_vars(

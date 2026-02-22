@@ -110,7 +110,7 @@ class QualityChecker:
 
     def _check_untranslated_fragments(self, source: str, translation: str,
                                        matched_terms: Optional[dict] = None) -> Optional[QualityIssue]:
-        """Detect glossary terms that appear verbatim (untranslated) in the output."""
+        """Flag possible untranslated glossary fragments (advisory only)."""
         if not matched_terms:
             return None
 
@@ -132,8 +132,8 @@ class QualityChecker:
         if untranslated:
             return QualityIssue(
                 issue_type=QualityIssueType.UNTRANSLATED,
-                severity="error",
-                details=f"Glossary terms left untranslated: {untranslated}",
+                severity="warning",
+                details=f"Possible untranslated glossary fragments: {untranslated}",
                 fragments=untranslated,
             )
         return None

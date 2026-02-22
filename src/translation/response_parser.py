@@ -65,13 +65,13 @@ class ResponseParser:
                     break
 
             followup_msg = [
-                {"role": "system", "content": "You are a JSON formatter. Output only valid JSON, nothing else."},
+                {"role": "system", "content": "你是 JSON 格式化器，只输出合法 JSON。"},
                 {"role": "user", "content": (
-                    f"The translation task was: {original_input}\n\n"
-                    f"The response was: {response}\n\n"
-                    "Extract the Chinese translation and return it as JSON: "
-                    "{\"translation\": \"...\"}\n"
-                    "Respond only with valid JSON, no other text."
+                    f"原任务输入：{original_input}\n\n"
+                    f"模型回复：{response}\n\n"
+                    "请提取其中最终译文，并按以下格式返回："
+                    "{\"translation\":\"...\"}\n"
+                    "只输出合法 JSON，不要输出其他内容。"
                 )}
             ]
             followup_response = llm_client.chat_completion(followup_msg, log_callback=log_callback)
@@ -81,8 +81,9 @@ class ResponseParser:
 
             # Safety check for prompt leakage
             prompt_patterns = [
-                "reformat", "JSON", "json", "translation", "格式化", "重新格式化",
-                "{\"translation\"", "Respond only", "Output only", "Extract the"
+                "reformat", "Respond only", "Output only", "Extract the",
+                "格式化器", "原任务输入", "模型回复", "只输出合法 JSON",
+                "{\"translation\"", "translation", "JSON", "json"
             ]
             if result and not any(pattern in result for pattern in prompt_patterns if len(pattern) > 5):
                 return result

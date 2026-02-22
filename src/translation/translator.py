@@ -324,16 +324,21 @@ class Translator:
         }
         retry_template = self.prompt_manager.get(
             "translator.retry.generic",
-            "重要提示：你的上一次翻译存在质量问题。请将文本重新翻译成{target_language}。"
-            "确保：1) 完整翻译所有内容，不要在目标语言中混入源语言词汇 "
-            "2) 保留所有XML标签和占位符 3) 严格按照词典翻译术语。立即重新翻译：",
+            "上次结果存在质量问题。请重新翻译为{target_language}，并确保："
+            "1) 完整翻译，不混入源语言词；"
+            "2) 保留全部 XML/HTML 标签和占位符；"
+            "3) 术语表仅作参考，按当前语义决定是否采用词典译法；"
+            "4) 仅输出 JSON。",
         )
         prompt = PromptBuilder.apply_prompt_vars(retry_template, prompt_vars)
 
         # Append specific untranslated fragments if available
         if retry_context and retry_context.get("fragments"):
             frags = retry_context["fragments"]
-            prompt += f"\n\n以下术语在上次翻译中未被翻译，请务必按照词典翻译：{', '.join(frags)}"
+            prompt += (
+                "\n\n以下词在上次译文中保留了原文，请结合当前语义判断是否应采用术语表译法："
+                f"{', '.join(frags)}"
+            )
 
         return prompt
 

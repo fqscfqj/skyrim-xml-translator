@@ -216,19 +216,17 @@ class RAGSearcher:
         context_chars = self._get_rag_int("ai_candidate_context_chars", 320, min_value=120, max_value=2000)
         source_snippet = self._build_query_context_window(source_text, query, context_chars)
         prompt = (
-            "You are selecting glossary terms for translation consistency.\n\n"
-            f"Source text snippet: \"{source_snippet}\"\n"
-            f"Query term: \"{query}\"\n\n"
-            "Candidate glossary terms:\n"
+            "你在做术语候选筛选，用于翻译一致性。\n\n"
+            f"原文片段：\"{source_snippet}\"\n"
+            f"查询词：\"{query}\"\n\n"
+            "候选术语：\n"
             f"{numbered}\n\n"
-            "Task:\n"
-            "Select up to {max_select} candidates that are truly relevant to this query in this source text.\n"
-            "Prefer exact same entity/name spelling; reject lookalike names (example: Wulfur != Wulf).\n"
-            "If any candidate contains the exact query spelling, select from those first.\n"
-            "Do not select candidates without the query spelling when query-spelling candidates exist.\n"
-            "Prefer concise entity terms over full-sentence quest/dialog lines.\n"
-            "Return ONLY a JSON array of candidate strings copied exactly from the list.\n"
-            "Return [] if none."
+            "任务：\n"
+            "最多选 {max_select} 个与该查询在此原文里真正相关的候选。\n"
+            "优先实体/名称拼写完全一致；拒绝形近但不同名（如 Wulfur != Wulf）。\n"
+            "若存在包含查询原拼写的候选，只能从这些候选中选择。\n"
+            "优先简短实体词条，不选整句任务/对白。\n"
+            "只返回 JSON 字符串数组，元素必须原样复制自候选列表；无匹配返回 []。"
         ).replace("{max_select}", str(max_select))
 
         max_tokens = self._get_rag_int("ai_candidate_max_tokens", 96, min_value=32, max_value=256)
