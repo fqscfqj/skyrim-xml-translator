@@ -23,7 +23,6 @@ from src.mcm_processor import MCMProcessor
 from src.translator import Translator
 from src.logging_helper import emit as log_emit
 from src.i18n import i18n
-from src.config.schema import AppConfig
 
 class GlossaryWorker(QThread):
     progress = pyqtSignal(int)
@@ -1577,12 +1576,9 @@ class MainWindow(QMainWindow):
         self.language_combo.setCurrentIndex(current_index)
         form_layout.addRow(i18n.t("label_language"), self.language_combo)
 
-        rag_reset_btn = QPushButton(i18n.t("btn_reset_rag_advanced", "Reset RAG Advanced"))
-        rag_reset_btn.clicked.connect(self.reset_rag_advanced_settings)
         save_btn = QPushButton(i18n.t("btn_save_config"))
         save_btn.clicked.connect(self.save_config)
         action_row = QHBoxLayout()
-        action_row.addWidget(rag_reset_btn)
         action_row.addWidget(save_btn)
         form_layout.addRow(action_row)
 
@@ -1626,49 +1622,6 @@ class MainWindow(QMainWindow):
                 self.prompt_style_combo.setCurrentIndex(0)
         finally:
             self.prompt_style_combo.blockSignals(False)
-
-    def reset_rag_advanced_settings(self):
-        confirm = QMessageBox.question(
-            self,
-            i18n.t("title_confirm_reset_rag_advanced", i18n.t("title_warning")),
-            i18n.t(
-                "msg_confirm_reset_rag_advanced",
-                "Reset all RAG advanced settings to default values?",
-            ),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if confirm != QMessageBox.StandardButton.Yes:
-            return
-
-        default_rag = AppConfig().rag
-
-        self.rag_keyword_max_queries.setValue(default_rag.keyword_max_queries)
-        self.rag_keyword_task_decompose_enabled.setChecked(default_rag.keyword_task_decompose_enabled)
-        self.rag_keyword_task_keep_original.setChecked(default_rag.keyword_task_keep_original)
-        self.rag_short_term_max_chars.setValue(default_rag.short_term_max_chars)
-        self.rag_ai_candidate_selection_enabled.setChecked(default_rag.ai_candidate_selection_enabled)
-        self.rag_ai_candidate_pool_size.setValue(default_rag.ai_candidate_pool_size)
-        self.rag_ai_candidate_context_chars.setValue(default_rag.ai_candidate_context_chars)
-        self.rag_ai_candidate_min_vector_score.setValue(default_rag.ai_candidate_min_vector_score)
-        self.rag_keyword_weight_enabled.setChecked(default_rag.keyword_weight_enabled)
-        self.rag_keyword_weight_candidate_pool_size.setValue(default_rag.keyword_weight_candidate_pool_size)
-        self.rag_keyword_weight_keep_k.setValue(default_rag.keyword_weight_keep_k)
-        self.rag_keyword_weight_min_primary_hits.setValue(default_rag.keyword_weight_min_primary_hits)
-        self.rag_keyword_weight_exact_boost.setValue(default_rag.keyword_weight_exact_boost)
-        self.rag_keyword_weight_contains_boost.setValue(default_rag.keyword_weight_contains_boost)
-        self.rag_keyword_weight_token_boost.setValue(default_rag.keyword_weight_token_boost)
-        self.rag_keyword_weight_anchor_max_df.setValue(default_rag.keyword_weight_anchor_max_df)
-        self.rag_keyword_weight_anchor_boost.setValue(default_rag.keyword_weight_anchor_boost)
-
-        QMessageBox.information(
-            self,
-            i18n.t("title_success"),
-            i18n.t(
-                "msg_rag_advanced_reset_done",
-                "RAG advanced settings were reset. Click Save Config to persist.",
-            ),
-        )
 
     # Note: prompts are intentionally not localized; language changes only affect UI (i18n).
 
