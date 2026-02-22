@@ -3,6 +3,7 @@ import traceback
 import inspect
 import os
 import sys
+import tempfile
 from typing import Optional, Callable
 
 
@@ -40,21 +41,42 @@ def _resolve_log_file_path(config_manager):
 
 
 def _write_log_to_disk(path: Optional[str], message: str) -> None:
-    # Avoid writing logs to disk when running as a bundled executable
-    if getattr(sys, 'frozen', False) or hasattr(sys, '_MEIPASS'):
-        return
     if not path:
         return
-    try:
-        log_dir = os.path.dirname(path)
-        if log_dir:
-            os.makedirs(log_dir, exist_ok=True)
-        with open(path, 'a', encoding='utf-8') as f:
-            f.write(message)
-            if not message.endswith('\n'):
-                f.write('\n')
-    except Exception:
-        pass
+
+    def _candidate_paths() -> list[str]:
+        filename = os.path.basename(path) or 'app.log'
+        candidates = [path]
+
+        if os.name == 'nt':
+            local_app_data = os.environ.get('LOCALAPPDATA')
+            if local_app_data:
+                candidates.append(os.path.join(local_app_data, 'trx2', 'logs', filename))
+        candidates.append(os.path.join(os.path.expanduser('~'), '.trx2', 'logs', filename))
+        candidates.append(os.path.join(tempfile.gettempdir(), 'trx2', 'logs', filename))
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for item in candidates:
+            resolved = os.path.abspath(item)
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            deduped.append(resolved)
+        return deduped
+
+    for candidate in _candidate_paths():
+        try:
+            log_dir = os.path.dirname(candidate)
+            if log_dir:
+                os.makedirs(log_dir, exist_ok=True)
+            with open(candidate, 'a', encoding='utf-8') as f:
+                f.write(message)
+                if not message.endswith('\n'):
+                    f.write('\n')
+            return
+        except Exception:
+            continue
 
 
 def should_emit(config_manager, level: str) -> bool:
@@ -93,7 +115,8 @@ def format_log_message(level: str, message: str, module: Optional[str] = None,
     exc_str = ''
     if exc:
         try:
-            exc_str = '\n' + traceback.format_exc()
+            exc_tb = getattr(exc, "__traceback__", None)
+            exc_str = '\n' + ''.join(traceback.format_exception(type(exc), exc, exc_tb))
         except Exception:
             exc_str = f"\n{exc}"
 
@@ -135,10 +158,10 @@ def emit(log_callback: Optional[Callable[[str], None]], config_manager, level: s
 
     formatted = format_log_message(level, message, module=module, func=func, lineno=lineno, exc=exc, extra=extra)
 
-    # Only write to disk when not running as a PyInstaller bundled executable
+    # Always attempt disk logging; when the configured path is not writable,
+    # _write_log_to_disk falls back to user/temp directories.
     try:
-        if not (getattr(sys, 'frozen', False) or hasattr(sys, '_MEIPASS')):
-            _write_log_to_disk(_resolve_log_file_path(config_manager), formatted)
+        _write_log_to_disk(_resolve_log_file_path(config_manager), formatted)
     except Exception:
         pass
 
