@@ -11,11 +11,22 @@ from src.config.schema import (
 
 
 class ConfigManager:
+    # Explicitly deprecated keys kept for backward compatibility during migration.
+    # They are no longer read by runtime code and can be safely removed from config.json.
+    _DEPRECATED_KEYS: tuple[tuple[str, str], ...] = (
+        ("general", "crash_log_file"),
+        ("rag", "reference_max_tokens"),
+        ("rag", "keyword_skip_llm_for_simple_text"),
+        ("rag", "keyword_simple_text_max_chars"),
+        ("rag", "keyword_simple_text_max_words"),
+    )
+
     def __init__(self, config_path: str = "config.json"):
         self.config_path = config_path
         self.config: dict = self._load_config()
         defaults_changed = self._ensure_defaults()
-        if defaults_changed:
+        deprecated_changed = self._cleanup_deprecated_keys()
+        if defaults_changed or deprecated_changed:
             self.save_config()
 
     def _load_config(self) -> dict:
@@ -44,6 +55,28 @@ class ConfigManager:
                 changed = True
             elif isinstance(value, dict) and isinstance(target.get(key), dict):
                 changed = self._merge_dict(value, target[key]) or changed
+        return changed
+
+    def _cleanup_deprecated_keys(self) -> bool:
+        changed = False
+        removed: list[str] = []
+        for section, key in self._DEPRECATED_KEYS:
+            section_dict = self.config.get(section)
+            if not isinstance(section_dict, dict):
+                continue
+            if key in section_dict:
+                section_dict.pop(key, None)
+                changed = True
+                removed.append(f"{section}.{key}")
+        if removed:
+            log_emit(
+                None,
+                self,
+                "INFO",
+                f"Removed deprecated config keys: {', '.join(removed)}",
+                module="config_manager",
+                func="_cleanup_deprecated_keys",
+            )
         return changed
 
     def save_config(self) -> None:

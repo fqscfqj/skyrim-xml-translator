@@ -1227,6 +1227,177 @@ class MainWindow(QMainWindow):
         form_layout.addRow(i18n.t("label_rag_short_max_results"), self.rag_short_max_results)
         form_layout.addRow(i18n.t("label_rag_long_max_results"), self.rag_long_max_results)
 
+        form_layout.addRow(QLabel(f"<b>{i18n.t('group_rag_advanced_settings', 'RAG Advanced Settings')}</b>"))
+
+        self.rag_keyword_max_queries = NoWheelSpinBox()
+        self.rag_keyword_max_queries.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_keyword_max_queries.setRange(1, 64)
+        self.rag_keyword_max_queries.setValue(self.config_manager.get("rag", "keyword_max_queries", 8))
+        form_layout.addRow(i18n.t("label_rag_keyword_max_queries", "Keyword max queries:"), self.rag_keyword_max_queries)
+
+        self.rag_keyword_llm_max_tokens = NoWheelSpinBox()
+        self.rag_keyword_llm_max_tokens.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_keyword_llm_max_tokens.setRange(16, 1024)
+        self.rag_keyword_llm_max_tokens.setValue(self.config_manager.get("rag", "keyword_llm_max_tokens", 96))
+        form_layout.addRow(i18n.t("label_rag_keyword_llm_max_tokens", "Keyword LLM max tokens:"), self.rag_keyword_llm_max_tokens)
+
+        self.rag_keyword_task_decompose_enabled = QCheckBox(i18n.t(
+            "label_rag_keyword_task_decompose_enabled", "Enable keyword task decomposition"
+        ))
+        self.rag_keyword_task_decompose_enabled.setChecked(bool(
+            self.config_manager.get("rag", "keyword_task_decompose_enabled", True)
+        ))
+        form_layout.addRow(self.rag_keyword_task_decompose_enabled)
+
+        self.rag_keyword_task_keep_original = QCheckBox(i18n.t(
+            "label_rag_keyword_task_keep_original", "Keep original phrase task"
+        ))
+        self.rag_keyword_task_keep_original.setChecked(bool(
+            self.config_manager.get("rag", "keyword_task_keep_original", False)
+        ))
+        form_layout.addRow(self.rag_keyword_task_keep_original)
+
+        self.rag_keyword_task_min_token_len = NoWheelSpinBox()
+        self.rag_keyword_task_min_token_len.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_keyword_task_min_token_len.setRange(1, 32)
+        self.rag_keyword_task_min_token_len.setValue(self.config_manager.get("rag", "keyword_task_min_token_len", 3))
+        form_layout.addRow(i18n.t("label_rag_keyword_task_min_token_len", "Task min token length:"), self.rag_keyword_task_min_token_len)
+
+        self.rag_keyword_task_max_tokens = NoWheelSpinBox()
+        self.rag_keyword_task_max_tokens.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_keyword_task_max_tokens.setRange(2, 64)
+        self.rag_keyword_task_max_tokens.setValue(self.config_manager.get("rag", "keyword_task_max_tokens", 6))
+        form_layout.addRow(i18n.t("label_rag_keyword_task_max_tokens", "Task max tokens in phrase:"), self.rag_keyword_task_max_tokens)
+
+        self.rag_keyword_task_token_budget = NoWheelSpinBox()
+        self.rag_keyword_task_token_budget.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_keyword_task_token_budget.setRange(1, 32)
+        self.rag_keyword_task_token_budget.setValue(self.config_manager.get("rag", "keyword_task_token_budget", 3))
+        form_layout.addRow(i18n.t("label_rag_keyword_task_token_budget", "Task token budget:"), self.rag_keyword_task_token_budget)
+
+        self.rag_ai_candidate_selection_enabled = QCheckBox(i18n.t(
+            "label_rag_ai_candidate_selection_enabled", "Enable AI candidate selection"
+        ))
+        self.rag_ai_candidate_selection_enabled.setChecked(bool(
+            self.config_manager.get("rag", "ai_candidate_selection_enabled", True)
+        ))
+        form_layout.addRow(self.rag_ai_candidate_selection_enabled)
+
+        self.rag_ai_candidate_pool_size = NoWheelSpinBox()
+        self.rag_ai_candidate_pool_size.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_ai_candidate_pool_size.setRange(2, 128)
+        self.rag_ai_candidate_pool_size.setValue(self.config_manager.get("rag", "ai_candidate_pool_size", 12))
+        form_layout.addRow(i18n.t("label_rag_ai_candidate_pool_size", "AI candidate pool size:"), self.rag_ai_candidate_pool_size)
+
+        self.rag_ai_candidate_max_select = NoWheelSpinBox()
+        self.rag_ai_candidate_max_select.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_ai_candidate_max_select.setRange(1, 64)
+        self.rag_ai_candidate_max_select.setValue(self.config_manager.get("rag", "ai_candidate_max_select", 6))
+        form_layout.addRow(i18n.t("label_rag_ai_candidate_max_select", "AI candidate max select:"), self.rag_ai_candidate_max_select)
+
+        self.rag_ai_candidate_max_tokens = NoWheelSpinBox()
+        self.rag_ai_candidate_max_tokens.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_ai_candidate_max_tokens.setRange(32, 2048)
+        self.rag_ai_candidate_max_tokens.setValue(self.config_manager.get("rag", "ai_candidate_max_tokens", 96))
+        form_layout.addRow(i18n.t("label_rag_ai_candidate_max_tokens", "AI candidate max tokens:"), self.rag_ai_candidate_max_tokens)
+
+        self.rag_ai_candidate_context_chars = NoWheelSpinBox()
+        self.rag_ai_candidate_context_chars.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_ai_candidate_context_chars.setRange(64, 8000)
+        self.rag_ai_candidate_context_chars.setValue(self.config_manager.get("rag", "ai_candidate_context_chars", 320))
+        form_layout.addRow(i18n.t("label_rag_ai_candidate_context_chars", "AI candidate context chars:"), self.rag_ai_candidate_context_chars)
+
+        self.rag_ai_candidate_min_vector_score = NoWheelDoubleSpinBox()
+        self.rag_ai_candidate_min_vector_score.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_ai_candidate_min_vector_score.setRange(0.0, 1.0)
+        self.rag_ai_candidate_min_vector_score.setSingleStep(0.01)
+        self.rag_ai_candidate_min_vector_score.setValue(self.config_manager.get("rag", "ai_candidate_min_vector_score", 0.45))
+        form_layout.addRow(i18n.t("label_rag_ai_candidate_min_vector_score", "AI candidate min vector score:"), self.rag_ai_candidate_min_vector_score)
+
+        self.rag_keyword_weight_enabled = QCheckBox(i18n.t(
+            "label_rag_keyword_weight_enabled", "Enable keyword weighted retrieval"
+        ))
+        self.rag_keyword_weight_enabled.setChecked(bool(
+            self.config_manager.get("rag", "keyword_weight_enabled", True)
+        ))
+        form_layout.addRow(self.rag_keyword_weight_enabled)
+
+        self.rag_keyword_weight_candidate_pool_size = NoWheelSpinBox()
+        self.rag_keyword_weight_candidate_pool_size.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_keyword_weight_candidate_pool_size.setRange(1, 500)
+        self.rag_keyword_weight_candidate_pool_size.setValue(self.config_manager.get("rag", "keyword_weight_candidate_pool_size", 24))
+        form_layout.addRow(i18n.t("label_rag_keyword_weight_candidate_pool_size", "Keyword weight candidate pool size:"), self.rag_keyword_weight_candidate_pool_size)
+
+        self.rag_keyword_weight_keep_k = NoWheelSpinBox()
+        self.rag_keyword_weight_keep_k.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_keyword_weight_keep_k.setRange(1, 500)
+        self.rag_keyword_weight_keep_k.setValue(self.config_manager.get("rag", "keyword_weight_keep_k", 24))
+        form_layout.addRow(i18n.t("label_rag_keyword_weight_keep_k", "Keyword weight keep top-k:"), self.rag_keyword_weight_keep_k)
+
+        self.rag_keyword_weight_min_primary_hits = NoWheelSpinBox()
+        self.rag_keyword_weight_min_primary_hits.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_keyword_weight_min_primary_hits.setRange(1, 500)
+        self.rag_keyword_weight_min_primary_hits.setValue(self.config_manager.get("rag", "keyword_weight_min_primary_hits", 8))
+        form_layout.addRow(i18n.t("label_rag_keyword_weight_min_primary_hits", "Keyword weight min primary hits:"), self.rag_keyword_weight_min_primary_hits)
+
+        self.rag_keyword_weight_token_budget = NoWheelSpinBox()
+        self.rag_keyword_weight_token_budget.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_keyword_weight_token_budget.setRange(1, 32)
+        self.rag_keyword_weight_token_budget.setValue(self.config_manager.get("rag", "keyword_weight_token_budget", 3))
+        form_layout.addRow(i18n.t("label_rag_keyword_weight_token_budget", "Keyword weight token budget:"), self.rag_keyword_weight_token_budget)
+
+        self.rag_keyword_weight_token_top_k = NoWheelSpinBox()
+        self.rag_keyword_weight_token_top_k.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_keyword_weight_token_top_k.setRange(1, 500)
+        self.rag_keyword_weight_token_top_k.setValue(self.config_manager.get("rag", "keyword_weight_token_top_k", 12))
+        form_layout.addRow(i18n.t("label_rag_keyword_weight_token_top_k", "Keyword weight token top-k:"), self.rag_keyword_weight_token_top_k)
+
+        self.rag_keyword_weight_max_term_tokens = NoWheelSpinBox()
+        self.rag_keyword_weight_max_term_tokens.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_keyword_weight_max_term_tokens.setRange(1, 256)
+        self.rag_keyword_weight_max_term_tokens.setValue(self.config_manager.get("rag", "keyword_weight_max_term_tokens", 12))
+        form_layout.addRow(i18n.t("label_rag_keyword_weight_max_term_tokens", "Keyword weight max term tokens:"), self.rag_keyword_weight_max_term_tokens)
+
+        self.rag_keyword_weight_exact_boost = NoWheelDoubleSpinBox()
+        self.rag_keyword_weight_exact_boost.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_keyword_weight_exact_boost.setRange(0.0, 2.0)
+        self.rag_keyword_weight_exact_boost.setSingleStep(0.01)
+        self.rag_keyword_weight_exact_boost.setValue(self.config_manager.get("rag", "keyword_weight_exact_boost", 0.14))
+        form_layout.addRow(i18n.t("label_rag_keyword_weight_exact_boost", "Keyword weight exact boost:"), self.rag_keyword_weight_exact_boost)
+
+        self.rag_keyword_weight_contains_boost = NoWheelDoubleSpinBox()
+        self.rag_keyword_weight_contains_boost.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_keyword_weight_contains_boost.setRange(0.0, 2.0)
+        self.rag_keyword_weight_contains_boost.setSingleStep(0.01)
+        self.rag_keyword_weight_contains_boost.setValue(self.config_manager.get("rag", "keyword_weight_contains_boost", 0.06))
+        form_layout.addRow(i18n.t("label_rag_keyword_weight_contains_boost", "Keyword weight contains boost:"), self.rag_keyword_weight_contains_boost)
+
+        self.rag_keyword_weight_token_boost = NoWheelDoubleSpinBox()
+        self.rag_keyword_weight_token_boost.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_keyword_weight_token_boost.setRange(0.0, 2.0)
+        self.rag_keyword_weight_token_boost.setSingleStep(0.01)
+        self.rag_keyword_weight_token_boost.setValue(self.config_manager.get("rag", "keyword_weight_token_boost", 0.04))
+        form_layout.addRow(i18n.t("label_rag_keyword_weight_token_boost", "Keyword weight token boost:"), self.rag_keyword_weight_token_boost)
+
+        self.rag_keyword_weight_anchor_token_budget = NoWheelSpinBox()
+        self.rag_keyword_weight_anchor_token_budget.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_keyword_weight_anchor_token_budget.setRange(1, 32)
+        self.rag_keyword_weight_anchor_token_budget.setValue(self.config_manager.get("rag", "keyword_weight_anchor_token_budget", 1))
+        form_layout.addRow(i18n.t("label_rag_keyword_weight_anchor_token_budget", "Anchor token budget:"), self.rag_keyword_weight_anchor_token_budget)
+
+        self.rag_keyword_weight_anchor_max_df = NoWheelSpinBox()
+        self.rag_keyword_weight_anchor_max_df.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_keyword_weight_anchor_max_df.setRange(1, 200000)
+        self.rag_keyword_weight_anchor_max_df.setValue(self.config_manager.get("rag", "keyword_weight_anchor_max_df", 500))
+        form_layout.addRow(i18n.t("label_rag_keyword_weight_anchor_max_df", "Anchor max DF:"), self.rag_keyword_weight_anchor_max_df)
+
+        self.rag_keyword_weight_anchor_boost = NoWheelDoubleSpinBox()
+        self.rag_keyword_weight_anchor_boost.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_keyword_weight_anchor_boost.setRange(0.0, 2.0)
+        self.rag_keyword_weight_anchor_boost.setSingleStep(0.01)
+        self.rag_keyword_weight_anchor_boost.setValue(self.config_manager.get("rag", "keyword_weight_anchor_boost", 0.18))
+        form_layout.addRow(i18n.t("label_rag_keyword_weight_anchor_boost", "Anchor boost:"), self.rag_keyword_weight_anchor_boost)
+
         form_layout.addRow(QLabel(f"<b>{i18n.t('group_system_settings')}</b>"))
         self.log_level_combo = NoWheelComboBox()
         self.log_level_combo.addItems(["DEBUG", "INFO", "WARNING", "ERROR"])
@@ -1875,6 +2046,32 @@ class MainWindow(QMainWindow):
                 "short_term_max_tokens": self.rag_short_token_threshold.value(),
                 "short_term_max_results": self.rag_short_max_results.value(),
                 "long_term_max_results": self.rag_long_max_results.value(),
+                "keyword_max_queries": self.rag_keyword_max_queries.value(),
+                "keyword_llm_max_tokens": self.rag_keyword_llm_max_tokens.value(),
+                "keyword_task_decompose_enabled": bool(self.rag_keyword_task_decompose_enabled.isChecked()),
+                "keyword_task_keep_original": bool(self.rag_keyword_task_keep_original.isChecked()),
+                "keyword_task_min_token_len": self.rag_keyword_task_min_token_len.value(),
+                "keyword_task_max_tokens": self.rag_keyword_task_max_tokens.value(),
+                "keyword_task_token_budget": self.rag_keyword_task_token_budget.value(),
+                "ai_candidate_selection_enabled": bool(self.rag_ai_candidate_selection_enabled.isChecked()),
+                "ai_candidate_pool_size": self.rag_ai_candidate_pool_size.value(),
+                "ai_candidate_max_select": self.rag_ai_candidate_max_select.value(),
+                "ai_candidate_max_tokens": self.rag_ai_candidate_max_tokens.value(),
+                "ai_candidate_context_chars": self.rag_ai_candidate_context_chars.value(),
+                "ai_candidate_min_vector_score": self.rag_ai_candidate_min_vector_score.value(),
+                "keyword_weight_enabled": bool(self.rag_keyword_weight_enabled.isChecked()),
+                "keyword_weight_candidate_pool_size": self.rag_keyword_weight_candidate_pool_size.value(),
+                "keyword_weight_keep_k": self.rag_keyword_weight_keep_k.value(),
+                "keyword_weight_min_primary_hits": self.rag_keyword_weight_min_primary_hits.value(),
+                "keyword_weight_token_budget": self.rag_keyword_weight_token_budget.value(),
+                "keyword_weight_token_top_k": self.rag_keyword_weight_token_top_k.value(),
+                "keyword_weight_max_term_tokens": self.rag_keyword_weight_max_term_tokens.value(),
+                "keyword_weight_exact_boost": self.rag_keyword_weight_exact_boost.value(),
+                "keyword_weight_contains_boost": self.rag_keyword_weight_contains_boost.value(),
+                "keyword_weight_token_boost": self.rag_keyword_weight_token_boost.value(),
+                "keyword_weight_anchor_token_budget": self.rag_keyword_weight_anchor_token_budget.value(),
+                "keyword_weight_anchor_max_df": self.rag_keyword_weight_anchor_max_df.value(),
+                "keyword_weight_anchor_boost": self.rag_keyword_weight_anchor_boost.value(),
             },
             "general": {
                 "log_level": self.log_level_combo.currentText(),
