@@ -19,6 +19,17 @@ class ConfigManager:
         ("rag", "keyword_skip_llm_for_simple_text"),
         ("rag", "keyword_simple_text_max_chars"),
         ("rag", "keyword_simple_text_max_words"),
+        ("rag", "short_term_max_tokens"),
+        ("rag", "keyword_llm_max_tokens"),
+        ("rag", "keyword_task_min_token_len"),
+        ("rag", "keyword_task_max_tokens"),
+        ("rag", "keyword_task_token_budget"),
+        ("rag", "ai_candidate_max_select"),
+        ("rag", "ai_candidate_max_tokens"),
+        ("rag", "keyword_weight_token_budget"),
+        ("rag", "keyword_weight_token_top_k"),
+        ("rag", "keyword_weight_max_term_tokens"),
+        ("rag", "keyword_weight_anchor_token_budget"),
     )
 
     def __init__(self, config_path: str = "config.json"):

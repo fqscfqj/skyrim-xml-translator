@@ -513,13 +513,31 @@ class RAGVisualizationDialog(QDialog):
                     if isinstance(query_result, dict):
                         q = str(query_result.get("query", "") or "")
                         if q:
-                            query_limit_map[q] = query_result.get("task_limit")
+                            query_limit_map[q] = {
+                                "task_limit": query_result.get("task_limit"),
+                                "short_limit": query_result.get("short_limit"),
+                                "long_limit": query_result.get("long_limit"),
+                                "selected_short_count": query_result.get("selected_short_count"),
+                                "selected_long_count": query_result.get("selected_long_count"),
+                            }
             if rag_tasks:
                 for keyword in rag_tasks:
                     label = str(keyword)
-                    limit = query_limit_map.get(label)
-                    if isinstance(limit, int) and limit > 0:
-                        label = f"{label} (task_limit={limit})"
+                    limit_info = query_limit_map.get(label) or {}
+                    suffix_parts = []
+                    limit = limit_info.get("task_limit")
+                    if isinstance(limit, int):
+                        suffix_parts.append(f"task_limit={limit}")
+                    short_limit = limit_info.get("short_limit")
+                    long_limit = limit_info.get("long_limit")
+                    if isinstance(short_limit, int) and isinstance(long_limit, int):
+                        suffix_parts.append(f"short={short_limit}, long={long_limit}")
+                    selected_short_count = limit_info.get("selected_short_count")
+                    selected_long_count = limit_info.get("selected_long_count")
+                    if isinstance(selected_short_count, int) and isinstance(selected_long_count, int):
+                        suffix_parts.append(f"selected={selected_short_count}+{selected_long_count}")
+                    if suffix_parts:
+                        label = f"{label} ({'; '.join(suffix_parts)})"
                     self._create_tree_item(keywords_item, label, full_text=str(keyword))
             else:
                 self._create_tree_item(keywords_item, i18n.t("msg_no_valid_terms"))
@@ -530,7 +548,22 @@ class RAGVisualizationDialog(QDialog):
             if isinstance(debug_info.get("search_results"), list):
                 for query_result in debug_info["search_results"]:
                     query = query_result.get("query", "")
-                    query_node = self._create_tree_item(search_item, f"Query: {query}")
+                    query_meta_parts = []
+                    task_limit = query_result.get("task_limit")
+                    if isinstance(task_limit, int):
+                        query_meta_parts.append(f"task_limit={task_limit}")
+                    short_limit = query_result.get("short_limit")
+                    long_limit = query_result.get("long_limit")
+                    if isinstance(short_limit, int) and isinstance(long_limit, int):
+                        query_meta_parts.append(f"short={short_limit}, long={long_limit}")
+                    selected_short_count = query_result.get("selected_short_count")
+                    selected_long_count = query_result.get("selected_long_count")
+                    if isinstance(selected_short_count, int) and isinstance(selected_long_count, int):
+                        query_meta_parts.append(f"selected={selected_short_count}+{selected_long_count}")
+                    query_label = f"Query: {query}"
+                    if query_meta_parts:
+                        query_label += f" ({'; '.join(query_meta_parts)})"
+                    query_node = self._create_tree_item(search_item, query_label)
                     
                     # 直接匹配
                     direct_match = query_result.get("direct_match")
@@ -619,12 +652,30 @@ class RAGVisualizationDialog(QDialog):
                     if isinstance(qr, dict):
                         q = str(qr.get("query", "") or "")
                         if q:
-                            query_limit_map[q] = qr.get("task_limit")
+                            query_limit_map[q] = {
+                                "task_limit": qr.get("task_limit"),
+                                "short_limit": qr.get("short_limit"),
+                                "long_limit": qr.get("long_limit"),
+                                "selected_short_count": qr.get("selected_short_count"),
+                                "selected_long_count": qr.get("selected_long_count"),
+                            }
             for task in rag_tasks:
                 label = str(task)
-                limit = query_limit_map.get(label)
-                if isinstance(limit, int) and limit > 0:
-                    lines.append(f"- {label} (task_limit={limit})")
+                limit_info = query_limit_map.get(label) or {}
+                suffix_parts = []
+                limit = limit_info.get("task_limit")
+                if isinstance(limit, int):
+                    suffix_parts.append(f"task_limit={limit}")
+                short_limit = limit_info.get("short_limit")
+                long_limit = limit_info.get("long_limit")
+                if isinstance(short_limit, int) and isinstance(long_limit, int):
+                    suffix_parts.append(f"short={short_limit}, long={long_limit}")
+                selected_short_count = limit_info.get("selected_short_count")
+                selected_long_count = limit_info.get("selected_long_count")
+                if isinstance(selected_short_count, int) and isinstance(selected_long_count, int):
+                    suffix_parts.append(f"selected={selected_short_count}+{selected_long_count}")
+                if suffix_parts:
+                    lines.append(f"- {label} ({'; '.join(suffix_parts)})")
                 else:
                     lines.append(f"- {label}")
         else:
@@ -636,7 +687,22 @@ class RAGVisualizationDialog(QDialog):
         if isinstance(search_results, list) and search_results:
             for qr in search_results:
                 query = qr.get("query", "") if isinstance(qr, dict) else ""
-                lines.append(f"Query: {query}")
+                meta_parts = []
+                task_limit = qr.get("task_limit") if isinstance(qr, dict) else None
+                if isinstance(task_limit, int):
+                    meta_parts.append(f"task_limit={task_limit}")
+                short_limit = qr.get("short_limit") if isinstance(qr, dict) else None
+                long_limit = qr.get("long_limit") if isinstance(qr, dict) else None
+                if isinstance(short_limit, int) and isinstance(long_limit, int):
+                    meta_parts.append(f"short={short_limit}, long={long_limit}")
+                selected_short_count = qr.get("selected_short_count") if isinstance(qr, dict) else None
+                selected_long_count = qr.get("selected_long_count") if isinstance(qr, dict) else None
+                if isinstance(selected_short_count, int) and isinstance(selected_long_count, int):
+                    meta_parts.append(f"selected={selected_short_count}+{selected_long_count}")
+                if meta_parts:
+                    lines.append(f"Query: {query} ({'; '.join(meta_parts)})")
+                else:
+                    lines.append(f"Query: {query}")
 
                 if isinstance(qr, dict) and qr.get("direct_match"):
                     lines.append(f"  Direct Match: {qr.get('direct_match')}")
@@ -1241,13 +1307,6 @@ class MainWindow(QMainWindow):
         self.rag_threshold.setSingleStep(0.05)
         self.rag_threshold.setValue(self.config_manager.get("rag", "similarity_threshold", 0.75))
 
-        self.rag_short_token_threshold = NoWheelSpinBox()
-        self.rag_short_token_threshold.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        self.rag_short_token_threshold.setRange(0, 200)
-        self.rag_short_token_threshold.setSingleStep(1)
-        self.rag_short_token_threshold.setValue(self.config_manager.get("rag", "short_term_max_tokens", 6))
-        self.rag_short_token_threshold.setToolTip(i18n.t("tooltip_rag_short_token_threshold"))
-
         self.rag_short_max_results = NoWheelSpinBox()
         self.rag_short_max_results.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.rag_short_max_results.setRange(0, 200)
@@ -1263,9 +1322,14 @@ class MainWindow(QMainWindow):
         self.rag_long_max_results.setToolTip(i18n.t("tooltip_rag_long_max_results"))
 
         form_layout.addRow(i18n.t("label_rag_threshold"), self.rag_threshold)
-        form_layout.addRow(i18n.t("label_rag_short_token_threshold"), self.rag_short_token_threshold)
         form_layout.addRow(i18n.t("label_rag_short_max_results"), self.rag_short_max_results)
         form_layout.addRow(i18n.t("label_rag_long_max_results"), self.rag_long_max_results)
+        recall_limit_note = QLabel(i18n.t(
+            "label_rag_recall_limit_note",
+            "Recall count is controlled only by short/long glossary max results."
+        ))
+        recall_limit_note.setWordWrap(True)
+        form_layout.addRow(recall_limit_note)
 
         form_layout.addRow(QLabel(f"<b>{i18n.t('group_rag_advanced_settings', 'RAG Advanced Settings')}</b>"))
 
@@ -1274,12 +1338,6 @@ class MainWindow(QMainWindow):
         self.rag_keyword_max_queries.setRange(1, 64)
         self.rag_keyword_max_queries.setValue(self.config_manager.get("rag", "keyword_max_queries", 8))
         form_layout.addRow(i18n.t("label_rag_keyword_max_queries", "Keyword max queries:"), self.rag_keyword_max_queries)
-
-        self.rag_keyword_llm_max_tokens = NoWheelSpinBox()
-        self.rag_keyword_llm_max_tokens.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        self.rag_keyword_llm_max_tokens.setRange(16, 1024)
-        self.rag_keyword_llm_max_tokens.setValue(self.config_manager.get("rag", "keyword_llm_max_tokens", 96))
-        form_layout.addRow(i18n.t("label_rag_keyword_llm_max_tokens", "Keyword LLM max tokens:"), self.rag_keyword_llm_max_tokens)
 
         self.rag_keyword_task_decompose_enabled = QCheckBox(i18n.t(
             "label_rag_keyword_task_decompose_enabled", "Enable keyword task decomposition"
@@ -1297,24 +1355,6 @@ class MainWindow(QMainWindow):
         ))
         form_layout.addRow(self.rag_keyword_task_keep_original)
 
-        self.rag_keyword_task_min_token_len = NoWheelSpinBox()
-        self.rag_keyword_task_min_token_len.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        self.rag_keyword_task_min_token_len.setRange(1, 32)
-        self.rag_keyword_task_min_token_len.setValue(self.config_manager.get("rag", "keyword_task_min_token_len", 3))
-        form_layout.addRow(i18n.t("label_rag_keyword_task_min_token_len", "Task min token length:"), self.rag_keyword_task_min_token_len)
-
-        self.rag_keyword_task_max_tokens = NoWheelSpinBox()
-        self.rag_keyword_task_max_tokens.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        self.rag_keyword_task_max_tokens.setRange(2, 64)
-        self.rag_keyword_task_max_tokens.setValue(self.config_manager.get("rag", "keyword_task_max_tokens", 6))
-        form_layout.addRow(i18n.t("label_rag_keyword_task_max_tokens", "Task max tokens in phrase:"), self.rag_keyword_task_max_tokens)
-
-        self.rag_keyword_task_token_budget = NoWheelSpinBox()
-        self.rag_keyword_task_token_budget.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        self.rag_keyword_task_token_budget.setRange(1, 32)
-        self.rag_keyword_task_token_budget.setValue(self.config_manager.get("rag", "keyword_task_token_budget", 3))
-        form_layout.addRow(i18n.t("label_rag_keyword_task_token_budget", "Task token budget:"), self.rag_keyword_task_token_budget)
-
         self.rag_ai_candidate_selection_enabled = QCheckBox(i18n.t(
             "label_rag_ai_candidate_selection_enabled", "Enable AI candidate selection"
         ))
@@ -1328,18 +1368,6 @@ class MainWindow(QMainWindow):
         self.rag_ai_candidate_pool_size.setRange(2, 128)
         self.rag_ai_candidate_pool_size.setValue(self.config_manager.get("rag", "ai_candidate_pool_size", 12))
         form_layout.addRow(i18n.t("label_rag_ai_candidate_pool_size", "AI candidate pool size:"), self.rag_ai_candidate_pool_size)
-
-        self.rag_ai_candidate_max_select = NoWheelSpinBox()
-        self.rag_ai_candidate_max_select.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        self.rag_ai_candidate_max_select.setRange(1, 64)
-        self.rag_ai_candidate_max_select.setValue(self.config_manager.get("rag", "ai_candidate_max_select", 6))
-        form_layout.addRow(i18n.t("label_rag_ai_candidate_max_select", "AI candidate max select:"), self.rag_ai_candidate_max_select)
-
-        self.rag_ai_candidate_max_tokens = NoWheelSpinBox()
-        self.rag_ai_candidate_max_tokens.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        self.rag_ai_candidate_max_tokens.setRange(32, 2048)
-        self.rag_ai_candidate_max_tokens.setValue(self.config_manager.get("rag", "ai_candidate_max_tokens", 96))
-        form_layout.addRow(i18n.t("label_rag_ai_candidate_max_tokens", "AI candidate max tokens:"), self.rag_ai_candidate_max_tokens)
 
         self.rag_ai_candidate_context_chars = NoWheelSpinBox()
         self.rag_ai_candidate_context_chars.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
@@ -1380,24 +1408,6 @@ class MainWindow(QMainWindow):
         self.rag_keyword_weight_min_primary_hits.setValue(self.config_manager.get("rag", "keyword_weight_min_primary_hits", 8))
         form_layout.addRow(i18n.t("label_rag_keyword_weight_min_primary_hits", "Keyword weight min primary hits:"), self.rag_keyword_weight_min_primary_hits)
 
-        self.rag_keyword_weight_token_budget = NoWheelSpinBox()
-        self.rag_keyword_weight_token_budget.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        self.rag_keyword_weight_token_budget.setRange(1, 32)
-        self.rag_keyword_weight_token_budget.setValue(self.config_manager.get("rag", "keyword_weight_token_budget", 3))
-        form_layout.addRow(i18n.t("label_rag_keyword_weight_token_budget", "Keyword weight token budget:"), self.rag_keyword_weight_token_budget)
-
-        self.rag_keyword_weight_token_top_k = NoWheelSpinBox()
-        self.rag_keyword_weight_token_top_k.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        self.rag_keyword_weight_token_top_k.setRange(1, 500)
-        self.rag_keyword_weight_token_top_k.setValue(self.config_manager.get("rag", "keyword_weight_token_top_k", 12))
-        form_layout.addRow(i18n.t("label_rag_keyword_weight_token_top_k", "Keyword weight token top-k:"), self.rag_keyword_weight_token_top_k)
-
-        self.rag_keyword_weight_max_term_tokens = NoWheelSpinBox()
-        self.rag_keyword_weight_max_term_tokens.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        self.rag_keyword_weight_max_term_tokens.setRange(1, 256)
-        self.rag_keyword_weight_max_term_tokens.setValue(self.config_manager.get("rag", "keyword_weight_max_term_tokens", 12))
-        form_layout.addRow(i18n.t("label_rag_keyword_weight_max_term_tokens", "Keyword weight max term tokens:"), self.rag_keyword_weight_max_term_tokens)
-
         self.rag_keyword_weight_exact_boost = NoWheelDoubleSpinBox()
         self.rag_keyword_weight_exact_boost.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.rag_keyword_weight_exact_boost.setRange(0.0, 2.0)
@@ -1418,12 +1428,6 @@ class MainWindow(QMainWindow):
         self.rag_keyword_weight_token_boost.setSingleStep(0.01)
         self.rag_keyword_weight_token_boost.setValue(self.config_manager.get("rag", "keyword_weight_token_boost", 0.04))
         form_layout.addRow(i18n.t("label_rag_keyword_weight_token_boost", "Keyword weight token boost:"), self.rag_keyword_weight_token_boost)
-
-        self.rag_keyword_weight_anchor_token_budget = NoWheelSpinBox()
-        self.rag_keyword_weight_anchor_token_budget.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        self.rag_keyword_weight_anchor_token_budget.setRange(1, 32)
-        self.rag_keyword_weight_anchor_token_budget.setValue(self.config_manager.get("rag", "keyword_weight_anchor_token_budget", 1))
-        form_layout.addRow(i18n.t("label_rag_keyword_weight_anchor_token_budget", "Anchor token budget:"), self.rag_keyword_weight_anchor_token_budget)
 
         self.rag_keyword_weight_anchor_max_df = NoWheelSpinBox()
         self.rag_keyword_weight_anchor_max_df.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
@@ -1593,29 +1597,19 @@ class MainWindow(QMainWindow):
         default_rag = AppConfig().rag
 
         self.rag_keyword_max_queries.setValue(default_rag.keyword_max_queries)
-        self.rag_keyword_llm_max_tokens.setValue(default_rag.keyword_llm_max_tokens)
         self.rag_keyword_task_decompose_enabled.setChecked(default_rag.keyword_task_decompose_enabled)
         self.rag_keyword_task_keep_original.setChecked(default_rag.keyword_task_keep_original)
-        self.rag_keyword_task_min_token_len.setValue(default_rag.keyword_task_min_token_len)
-        self.rag_keyword_task_max_tokens.setValue(default_rag.keyword_task_max_tokens)
-        self.rag_keyword_task_token_budget.setValue(default_rag.keyword_task_token_budget)
         self.rag_ai_candidate_selection_enabled.setChecked(default_rag.ai_candidate_selection_enabled)
         self.rag_ai_candidate_pool_size.setValue(default_rag.ai_candidate_pool_size)
-        self.rag_ai_candidate_max_select.setValue(default_rag.ai_candidate_max_select)
-        self.rag_ai_candidate_max_tokens.setValue(default_rag.ai_candidate_max_tokens)
         self.rag_ai_candidate_context_chars.setValue(default_rag.ai_candidate_context_chars)
         self.rag_ai_candidate_min_vector_score.setValue(default_rag.ai_candidate_min_vector_score)
         self.rag_keyword_weight_enabled.setChecked(default_rag.keyword_weight_enabled)
         self.rag_keyword_weight_candidate_pool_size.setValue(default_rag.keyword_weight_candidate_pool_size)
         self.rag_keyword_weight_keep_k.setValue(default_rag.keyword_weight_keep_k)
         self.rag_keyword_weight_min_primary_hits.setValue(default_rag.keyword_weight_min_primary_hits)
-        self.rag_keyword_weight_token_budget.setValue(default_rag.keyword_weight_token_budget)
-        self.rag_keyword_weight_token_top_k.setValue(default_rag.keyword_weight_token_top_k)
-        self.rag_keyword_weight_max_term_tokens.setValue(default_rag.keyword_weight_max_term_tokens)
         self.rag_keyword_weight_exact_boost.setValue(default_rag.keyword_weight_exact_boost)
         self.rag_keyword_weight_contains_boost.setValue(default_rag.keyword_weight_contains_boost)
         self.rag_keyword_weight_token_boost.setValue(default_rag.keyword_weight_token_boost)
-        self.rag_keyword_weight_anchor_token_budget.setValue(default_rag.keyword_weight_anchor_token_budget)
         self.rag_keyword_weight_anchor_max_df.setValue(default_rag.keyword_weight_anchor_max_df)
         self.rag_keyword_weight_anchor_boost.setValue(default_rag.keyword_weight_anchor_boost)
 
@@ -2140,33 +2134,22 @@ class MainWindow(QMainWindow):
             },
             "rag": {
                 "similarity_threshold": self.rag_threshold.value(),
-                "short_term_max_tokens": self.rag_short_token_threshold.value(),
                 "short_term_max_results": self.rag_short_max_results.value(),
                 "long_term_max_results": self.rag_long_max_results.value(),
                 "keyword_max_queries": self.rag_keyword_max_queries.value(),
-                "keyword_llm_max_tokens": self.rag_keyword_llm_max_tokens.value(),
                 "keyword_task_decompose_enabled": bool(self.rag_keyword_task_decompose_enabled.isChecked()),
                 "keyword_task_keep_original": bool(self.rag_keyword_task_keep_original.isChecked()),
-                "keyword_task_min_token_len": self.rag_keyword_task_min_token_len.value(),
-                "keyword_task_max_tokens": self.rag_keyword_task_max_tokens.value(),
-                "keyword_task_token_budget": self.rag_keyword_task_token_budget.value(),
                 "ai_candidate_selection_enabled": bool(self.rag_ai_candidate_selection_enabled.isChecked()),
                 "ai_candidate_pool_size": self.rag_ai_candidate_pool_size.value(),
-                "ai_candidate_max_select": self.rag_ai_candidate_max_select.value(),
-                "ai_candidate_max_tokens": self.rag_ai_candidate_max_tokens.value(),
                 "ai_candidate_context_chars": self.rag_ai_candidate_context_chars.value(),
                 "ai_candidate_min_vector_score": self.rag_ai_candidate_min_vector_score.value(),
                 "keyword_weight_enabled": bool(self.rag_keyword_weight_enabled.isChecked()),
                 "keyword_weight_candidate_pool_size": self.rag_keyword_weight_candidate_pool_size.value(),
                 "keyword_weight_keep_k": self.rag_keyword_weight_keep_k.value(),
                 "keyword_weight_min_primary_hits": self.rag_keyword_weight_min_primary_hits.value(),
-                "keyword_weight_token_budget": self.rag_keyword_weight_token_budget.value(),
-                "keyword_weight_token_top_k": self.rag_keyword_weight_token_top_k.value(),
-                "keyword_weight_max_term_tokens": self.rag_keyword_weight_max_term_tokens.value(),
                 "keyword_weight_exact_boost": self.rag_keyword_weight_exact_boost.value(),
                 "keyword_weight_contains_boost": self.rag_keyword_weight_contains_boost.value(),
                 "keyword_weight_token_boost": self.rag_keyword_weight_token_boost.value(),
-                "keyword_weight_anchor_token_budget": self.rag_keyword_weight_anchor_token_budget.value(),
                 "keyword_weight_anchor_max_df": self.rag_keyword_weight_anchor_max_df.value(),
                 "keyword_weight_anchor_boost": self.rag_keyword_weight_anchor_boost.value(),
             },

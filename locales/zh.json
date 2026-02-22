@@ -95,8 +95,6 @@
     "label_vec_threads": "向量化线程数:",
     "group_rag_settings": "RAG 设置",
     "label_rag_threshold": "相似度阈值 (0-1):",
-    "label_rag_short_token_threshold": "短词典 token 阈值（估算，≤此值为短词典）:",
-    "tooltip_rag_short_token_threshold": "Token 为本地估算：中文单字=1，连续英文/数字=1。用于区分短/长词典；≤阈值为短词典，>阈值为长词典。",
     "label_rag_short_max_results": "短词典单次召回上限:",
     "tooltip_rag_short_max_results": "每次 RAG 召回最多返回多少条短词典。",
     "label_rag_long_max_results": "长词典单次召回上限:",
@@ -178,31 +176,22 @@
     "msg_cleared_selected_translations": "已清空 {count} 个选中译文。",
     "msg_config_saved_reloaded": "配置已保存并重新加载。",
     "msg_restart_for_language": "请重启应用以应用新的语言设置。"
+    ,"label_rag_recall_limit_note": "召回数量仅由短/长词典上限控制。"
     ,"group_rag_advanced_settings": "RAG 高级设置"
     ,"label_rag_keyword_max_queries": "关键词最大查询数:"
-    ,"label_rag_keyword_llm_max_tokens": "关键词提取最大 Tokens:"
     ,"label_rag_keyword_task_decompose_enabled": "启用关键词任务拆分"
     ,"label_rag_keyword_task_keep_original": "保留原短语任务"
-    ,"label_rag_keyword_task_min_token_len": "任务最小 token 长度:"
-    ,"label_rag_keyword_task_max_tokens": "短语最大 token 数:"
-    ,"label_rag_keyword_task_token_budget": "任务 token 预算:"
     ,"label_rag_ai_candidate_selection_enabled": "启用 AI 候选选择"
     ,"label_rag_ai_candidate_pool_size": "AI 候选池大小:"
-    ,"label_rag_ai_candidate_max_select": "AI 最大选择数:"
-    ,"label_rag_ai_candidate_max_tokens": "AI 最大 tokens:"
     ,"label_rag_ai_candidate_context_chars": "AI 上下文字符数:"
     ,"label_rag_ai_candidate_min_vector_score": "AI 候选最低向量分:"
     ,"label_rag_keyword_weight_enabled": "启用关键词加权召回"
     ,"label_rag_keyword_weight_candidate_pool_size": "加权候选池大小:"
     ,"label_rag_keyword_weight_keep_k": "加权保留 Top-K:"
     ,"label_rag_keyword_weight_min_primary_hits": "加权主命中最小数:"
-    ,"label_rag_keyword_weight_token_budget": "加权 token 预算:"
-    ,"label_rag_keyword_weight_token_top_k": "加权 token Top-K:"
-    ,"label_rag_keyword_weight_max_term_tokens": "加权术语最大 token 数:"
     ,"label_rag_keyword_weight_exact_boost": "精确匹配加成:"
     ,"label_rag_keyword_weight_contains_boost": "包含匹配加成:"
     ,"label_rag_keyword_weight_token_boost": "token 匹配加成:"
-    ,"label_rag_keyword_weight_anchor_token_budget": "锚点 token 预算:"
     ,"label_rag_keyword_weight_anchor_max_df": "锚点最大 DF:"
     ,"label_rag_keyword_weight_anchor_boost": "锚点加成:"
     ,"btn_reset_rag_advanced": "重置 RAG 高级参数"

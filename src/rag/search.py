@@ -28,6 +28,9 @@ class RAGSearcher:
     _LOW_SIGNAL_LEADING_TOKENS = frozenset({
         "my", "your", "his", "her", "its", "our", "their",
     })
+    _SHORT_TERM_TOKEN_LIMIT = 4
+    _SHORT_TERM_CHAR_LIMIT = 32
+    _WEIGHTED_MAX_TERM_TOKENS = 12
 
     def __init__(self, vector_store: VectorStore, glossary_manager: GlossaryManager,
                  config_manager, llm_client, embedding_cache: Optional[EmbeddingCache] = None):
@@ -71,6 +74,47 @@ class RAGSearcher:
         if isinstance(value, str):
             return value.strip().lower() in ("1", "true", "yes", "on")
         return bool(value)
+
+    def _get_recall_limits(self) -> tuple[int, int, int]:
+        short_limit = self._get_rag_int("short_term_max_results", 5, min_value=0, max_value=500)
+        long_limit = self._get_rag_int("long_term_max_results", 2, min_value=0, max_value=500)
+        total_limit = max(0, short_limit) + max(0, long_limit)
+        return short_limit, long_limit, total_limit
+
+    def _is_short_term_candidate(self, term: str) -> bool:
+        normalized = self.glossary_manager.normalize_term_key(term)
+        if not normalized:
+            return False
+        token_count = len([t for t in normalized.split() if t])
+        return token_count <= self._SHORT_TERM_TOKEN_LIMIT and len(normalized) <= self._SHORT_TERM_CHAR_LIMIT
+
+    def _apply_bucket_limits(
+            self,
+            ranked_terms: list[str],
+            short_limit: int,
+            long_limit: int) -> tuple[list[str], int, int]:
+        selected: list[str] = []
+        selected_short_count = 0
+        selected_long_count = 0
+        seen: set[str] = set()
+
+        for term in ranked_terms:
+            if term in seen:
+                continue
+            seen.add(term)
+            if self._is_short_term_candidate(term):
+                if selected_short_count >= short_limit:
+                    continue
+                selected_short_count += 1
+            else:
+                if selected_long_count >= long_limit:
+                    continue
+                selected_long_count += 1
+            selected.append(term)
+            if selected_short_count >= short_limit and selected_long_count >= long_limit:
+                break
+
+        return selected, selected_short_count, selected_long_count
 
     @staticmethod
     def _simple_stem_token(token: str) -> str:
@@ -161,10 +205,7 @@ class RAGSearcher:
         if not term_tokens:
             return 0.0
 
-        max_term_tokens = self._get_rag_int(
-            "keyword_weight_max_term_tokens", 12, min_value=1, max_value=100
-        )
-        if len(term_tokens) > max_term_tokens:
+        if len(term_tokens) > self._WEIGHTED_MAX_TERM_TOKENS:
             # Do not boost long sentence-like entries even if they contain the token.
             return 0.0
 
@@ -194,12 +235,13 @@ class RAGSearcher:
             damp = 0.5
         return base * damp
 
-    def _select_anchor_tokens(self, query_tokens: list[str]) -> set[str]:
+    def _select_anchor_tokens(self, query_tokens: list[str], budget: int) -> set[str]:
         """Pick rare, entity-like query tokens as lexical anchors."""
         if not query_tokens:
             return set()
+        if budget <= 0:
+            return set()
 
-        budget = self._get_rag_int("keyword_weight_anchor_token_budget", 1, min_value=1, max_value=4)
         max_df = self._get_rag_int("keyword_weight_anchor_max_df", 500, min_value=1, max_value=100_000)
         missing_df = 10 ** 9
 
@@ -273,14 +315,13 @@ class RAGSearcher:
             "keyword_weight_min_primary_hits", max(4, desired_top_k // 2), min_value=1, max_value=200
         )
         if len(idx_to_base_score) < min_primary_hits and len(query_tokens) > 1:
-            token_budget = self._get_rag_int("keyword_weight_token_budget", 3, min_value=1, max_value=8)
-            token_top_k = self._get_rag_int(
-                "keyword_weight_token_top_k", max(8, desired_top_k // 2), min_value=1, max_value=200
-            )
+            token_budget = max(2, min(len(query_tokens), max(2, min(6, desired_top_k // 2))))
+            token_top_k = max(8, min(200, desired_top_k))
             for token in query_tokens[:token_budget]:
                 merge_hits(token, token_top_k, token_tag=token)
 
-        anchor_tokens = self._select_anchor_tokens(query_tokens)
+        anchor_budget = max(1, min(3, desired_top_k // 6))
+        anchor_tokens = self._select_anchor_tokens(query_tokens, budget=anchor_budget)
         anchor_boost = self._get_rag_float("keyword_weight_anchor_boost", 0.18, 0.0, 1.0)
 
         weighted: list[tuple[str, float]] = []
@@ -436,7 +477,7 @@ class RAGSearcher:
             return []
 
         numbered = "\n".join(f"{i+1}. {t}" for i, t in enumerate(pool_terms))
-        max_select = max(1, min(max_select, self._get_rag_int("ai_candidate_max_select", 6, 1, 20)))
+        max_select = max(1, min(max_select, 50))
         context_chars = self._get_rag_int("ai_candidate_context_chars", 320, min_value=120, max_value=2000)
         source_snippet = self._build_query_context_window(source_text, query, context_chars)
         prompt = (
@@ -455,12 +496,11 @@ class RAGSearcher:
             "只返回 JSON 字符串数组，元素必须原样复制自候选列表；无匹配返回 []。"
         ).replace("{max_select}", str(max_select))
 
-        max_tokens = self._get_rag_int("ai_candidate_max_tokens", 96, min_value=32, max_value=256)
         try:
             response = self.llm_client.chat_completion_search(
                 [{"role": "user", "content": prompt}],
                 temperature=0.0,
-                max_tokens=max_tokens,
+                max_tokens=None,
                 log_callback=log_callback,
                 operation="candidate_select",
             )
@@ -544,28 +584,35 @@ class RAGSearcher:
         results: dict[str, str] = {}
         debug_info: Optional[List[Dict[str, Any]]] = [] if return_debug else None
 
-        short_limit = self.config.get("rag", "short_term_max_results", 5)
-        long_limit = self.config.get("rag", "long_term_max_results", 2)
-        total_limit = max(0, short_limit) + max(0, long_limit)
+        short_limit, long_limit, total_limit = self._get_recall_limits()
+        if total_limit <= 0:
+            log_emit(log_callback, self.config, "DEBUG",
+                     "[RAG] Recall limits are zero, skipping search",
+                     module="rag_search", func="search")
+            if return_debug:
+                return {}, []
+            return {}
         min_vector_score = self._get_rag_float("ai_candidate_min_vector_score", 0.45, 0.0, 1.0)
 
         query_embeddings = self._batch_embed_keywords(keywords, log_callback)
 
         for query in keywords:
-            if total_limit <= 0:
-                continue
             skip_semantic_recall = self._is_low_signal_query(query)
 
             query_selected_terms: list[str] = []
             query_details: Dict[str, Any] = {
                 "query": query,
                 "task_limit": total_limit,
+                "short_limit": short_limit,
+                "long_limit": long_limit,
                 "direct_match": None,
                 "vector_matches": [],
                 "ai_selection_attempted": False,
                 "ai_selected": [],
                 "low_signal_skipped": skip_semantic_recall,
                 "selected_terms": query_selected_terms,
+                "selected_short_count": 0,
+                "selected_long_count": 0,
             }
             if debug_info is not None:
                 debug_info.append(query_details)
@@ -698,14 +745,13 @@ class RAGSearcher:
                         query_details["ai_selected"] = ai_selected_terms
 
                 # 4) Build final selected terms
+                preselected_terms: list[str] = []
                 if ai_selected_terms:
                     for term in ai_selected_terms:
-                        if term in self.glossary_manager.glossary and term not in query_selected_terms:
-                            query_selected_terms.append(term)
-                            if len(query_selected_terms) >= total_limit:
-                                break
+                        if term in self.glossary_manager.glossary and term not in preselected_terms:
+                            preselected_terms.append(term)
                 elif direct_mode_term is not None:
-                    query_selected_terms.append(direct_mode_term)
+                    preselected_terms.append(direct_mode_term)
                 elif ai_selection_attempted:
                     # Ambiguous query + AI returned empty => keep empty to avoid noisy fallback.
                     pass
@@ -713,16 +759,20 @@ class RAGSearcher:
                     # Fallback: top-N by score
                     for term, score in working_ranked:
                         if score >= threshold or score >= 1.0:
-                            if term not in query_selected_terms:
-                                query_selected_terms.append(term)
-                                if len(query_selected_terms) >= total_limit:
-                                    break
-                    if not query_selected_terms:
+                            if term not in preselected_terms:
+                                preselected_terms.append(term)
+                    if not preselected_terms:
                         for term, score in working_ranked:
-                            if term not in query_selected_terms:
-                                query_selected_terms.append(term)
-                                if len(query_selected_terms) >= total_limit:
-                                    break
+                            if term not in preselected_terms:
+                                preselected_terms.append(term)
+
+                limited_terms, selected_short_count, selected_long_count = self._apply_bucket_limits(
+                    preselected_terms, short_limit=short_limit, long_limit=long_limit
+                )
+                query_selected_terms.extend(limited_terms)
+                if return_debug:
+                    query_details["selected_short_count"] = selected_short_count
+                    query_details["selected_long_count"] = selected_long_count
 
                 # 5) Add {term: translation} directly to results
                 for term in query_selected_terms:

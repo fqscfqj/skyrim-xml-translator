@@ -36,33 +36,22 @@ class EmbeddingConfig:
 @dataclass
 class RAGConfig:
     similarity_threshold: float = 0.75
-    short_term_max_tokens: int = 6
     short_term_max_results: int = 5
     long_term_max_results: int = 2
     keyword_max_queries: int = 8
-    keyword_llm_max_tokens: int = 96
     keyword_task_decompose_enabled: bool = True
     keyword_task_keep_original: bool = False
-    keyword_task_min_token_len: int = 3
-    keyword_task_max_tokens: int = 6
-    keyword_task_token_budget: int = 3
     ai_candidate_selection_enabled: bool = True
     ai_candidate_pool_size: int = 12
-    ai_candidate_max_select: int = 6
-    ai_candidate_max_tokens: int = 96
     ai_candidate_context_chars: int = 320
     ai_candidate_min_vector_score: float = 0.45
     keyword_weight_enabled: bool = True
     keyword_weight_candidate_pool_size: int = 24
     keyword_weight_keep_k: int = 24
     keyword_weight_min_primary_hits: int = 8
-    keyword_weight_token_budget: int = 3
-    keyword_weight_token_top_k: int = 12
-    keyword_weight_max_term_tokens: int = 12
     keyword_weight_exact_boost: float = 0.14
     keyword_weight_contains_boost: float = 0.06
     keyword_weight_token_boost: float = 0.04
-    keyword_weight_anchor_token_budget: int = 1
     keyword_weight_anchor_max_df: int = 500
     keyword_weight_anchor_boost: float = 0.18
 

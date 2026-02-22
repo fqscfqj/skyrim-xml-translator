@@ -174,6 +174,11 @@ class KeywordExtractor:
             return max_value
         return value
 
+    def _get_query_task_limit(self) -> int:
+        short_limit = self._get_rag_int("short_term_max_results", 5, min_value=0, max_value=500)
+        long_limit = self._get_rag_int("long_term_max_results", 2, min_value=0, max_value=500)
+        return max(0, short_limit) + max(0, long_limit)
+
     def _get_rag_bool(self, key: str, default: bool) -> bool:
         try:
             value = self.config.get("rag", key, default)
@@ -209,19 +214,8 @@ class KeywordExtractor:
         messages = [{"role": "user", "content": prompt}]
 
         try:
-            max_tokens_override = None
-            try:
-                search_params = self.config.get("llm_search", "parameters", {}) or {}
-                llm_params = self.config.get("llm", "parameters", {}) or {}
-                if search_params.get("max_tokens") is None and llm_params.get("max_tokens") is None:
-                    max_tokens_override = self._get_rag_int(
-                        "keyword_llm_max_tokens", 96, min_value=32, max_value=512
-                    )
-            except Exception:
-                max_tokens_override = 96
-
             response = self.llm_client.chat_completion_search(
-                messages, temperature=0.1, max_tokens=max_tokens_override,
+                messages, temperature=0.1, max_tokens=None,
                 log_callback=log_callback, operation="keyword_extract",
             )
             if response is None:
@@ -449,9 +443,8 @@ class KeywordExtractor:
             return keywords
 
         keep_original = self._get_rag_bool("keyword_task_keep_original", False)
-        min_token_len = self._get_rag_int("keyword_task_min_token_len", 3, min_value=1, max_value=20)
-        max_tokens = self._get_rag_int("keyword_task_max_tokens", 6, min_value=2, max_value=24)
-        token_budget = self._get_rag_int("keyword_task_token_budget", 3, min_value=1, max_value=12)
+        per_phrase_budget = max(2, self._get_query_task_limit())
+        min_token_len = 2
         missing_df = 10 ** 9
 
         expanded: list[str] = []
@@ -464,7 +457,7 @@ class KeywordExtractor:
             norm_tokens = [t for t in norm.split() if t]
 
             # Keep as-is if this phrase is not suitable for decomposition.
-            if len(norm_tokens) < 2 or len(norm_tokens) > max_tokens:
+            if len(norm_tokens) < 2:
                 expanded.append(raw)
                 continue
 
@@ -487,7 +480,7 @@ class KeywordExtractor:
                 set(token_candidates),
                 key=lambda t: (int(self.glossary_manager._token_df.get(t, missing_df)), -len(t), t),
             )
-            selected_set = set(ranked[:token_budget])
+            selected_set = set(ranked[:per_phrase_budget])
 
             # Recover surface casing from source phrase when possible.
             surface_map: dict[str, str] = {}
