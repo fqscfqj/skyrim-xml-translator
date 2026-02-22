@@ -84,8 +84,8 @@ pip install -r requirements.txt
   * `translator.py`: 翻译核心逻辑。
   * `config_manager.py`: 配置管理。
 * `config.json`: 配置文件 (自动生成)。
-* `glossary.json`: 术语库存储文件。
-* `vector_index.npy` & `terms_index.json`: 向量索引文件。
+* `glossary/glossary.json`: 术语库存储文件。
+* `glossary/vector_index.npy` & `glossary/terms_index.json`: 向量索引文件。
 * `prompts/`: 翻译提示词模板（可手动编辑；不区分语言，默认提供英文提示词）。
    * `prompts/translator.system_prompts.json`: System prompt（可自行增加/删除风格条目）。
    * `prompts/translator.templates.json`: 术语注入与 user 模板。
@@ -95,7 +95,7 @@ pip install -r requirements.txt
 
 本项目使用 `PyInstaller` 打包为 Windows 可执行文件。仓库已包含用于打包的脚本:
 
-- `build_exe.py`: PyInstaller 构建脚本，会自动包含 `locales`、`config.json` 或 `config.example.json`、`glossary.json`、`terms_index.json`、`vector_index.npy` 和 `logs`（若存在）。
+- `build_exe.py`: PyInstaller 构建脚本，会自动包含 `locales`、`config.json` 或 `config.example.json`、`glossary/`（含词典与索引文件）和 `logs`（若存在）。
 - `prompts` 目录也会被一并打包，用于自定义翻译提示词模板。
 - `build_windows.ps1`: Windows 下的构建辅助脚本（创建虚拟环境并安装依赖后运行 `build_exe.py`）。
 

@@ -44,8 +44,8 @@
         "dimensions": 1536
     },
     "paths": {
-        "glossary_file": "glossary.json",
-        "vector_index_file": "vector_index.npy"
+        "glossary_file": "glossary/glossary.json",
+        "vector_index_file": "glossary/vector_index.npy"
     },
     "threads": {
         "translation": 5,

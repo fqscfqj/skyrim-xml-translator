@@ -14,7 +14,7 @@ def collect_data_files():
         ('prompts', 'prompts'),
         ('config.json', '.'),
         ('config.example.json', '.'),
-        ('glossary.json', '.'),
+        ('glossary', 'glossary'),
         ('data', 'data'),
         ('assets', 'assets'),
     ]
@@ -26,12 +26,12 @@ def collect_data_files():
 
 
 def copy_runtime_folders_to_dist(dist_root: str):
-    """Copy runtime folders (locales/prompts/data) next to the executable.
+    """Copy runtime folders (locales/prompts/data/glossary) next to the executable.
 
     PyInstaller may place bundled datas under the internal extraction directory.
     This ensures the end-user can edit/override JSON files directly in dist.
     """
-    folders = ['locales', 'prompts', 'data']
+    folders = ['locales', 'prompts', 'data', 'glossary']
     for folder in folders:
         src = os.path.abspath(folder)
         if not os.path.isdir(src):

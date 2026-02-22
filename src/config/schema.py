@@ -70,8 +70,8 @@ class GeneralConfig:
 
 @dataclass
 class PathsConfig:
-    glossary_file: str = "glossary.json"
-    vector_index_file: str = "vector_index.npy"
+    glossary_file: str = "glossary/glossary.json"
+    vector_index_file: str = "glossary/vector_index.npy"
 
 
 @dataclass

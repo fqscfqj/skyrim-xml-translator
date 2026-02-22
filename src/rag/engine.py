@@ -22,8 +22,9 @@ class RAGEngine:
         self.prompt_manager = PromptManager(config_manager)
 
         # Resolve paths
-        glossary_path = self.config.get("paths", "glossary_file", "glossary.json")
-        vector_path = self.config.get("paths", "vector_index_file", "vector_index.npy")
+        glossary_path = self.config.get("paths", "glossary_file", "glossary/glossary.json")
+        vector_path = self.config.get("paths", "vector_index_file", "glossary/vector_index.npy")
+        self._migrate_legacy_dictionary_files(glossary_path, vector_path)
         terms_path = os.path.join(
             os.path.dirname(vector_path) if os.path.dirname(vector_path) else ".",
             "terms_index.json",
@@ -54,6 +55,44 @@ class RAGEngine:
         # Preserved flags for GUI pause/stop
         self.stop_flag: bool = False
         self.pause_flag: bool = False
+
+    @staticmethod
+    def _ensure_parent_dir(path: str) -> None:
+        parent = os.path.dirname(path or "")
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+
+    def _migrate_legacy_dictionary_files(self, glossary_path: str, vector_path: str) -> None:
+        """Move root-level legacy dictionary files into configured directory when needed."""
+        mappings = []
+        terms_path = os.path.join(
+            os.path.dirname(vector_path) if os.path.dirname(vector_path) else ".",
+            "terms_index.json",
+        )
+        mappings.append(("glossary.json", glossary_path))
+        mappings.append(("vector_index.npy", vector_path))
+        mappings.append(("terms_index.json", terms_path))
+
+        for old_path, new_path in mappings:
+            try:
+                if not old_path or not new_path:
+                    continue
+                old_abs = os.path.abspath(old_path)
+                new_abs = os.path.abspath(new_path)
+                if old_abs == new_abs:
+                    continue
+                if not os.path.exists(old_abs):
+                    continue
+                if os.path.exists(new_abs):
+                    continue
+                self._ensure_parent_dir(new_abs)
+                os.replace(old_abs, new_abs)
+            except Exception as e:
+                log_emit(
+                    None, self.config, "WARNING",
+                    f"Failed to migrate dictionary file '{old_path}' -> '{new_path}': {e}",
+                    exc=e, module="rag_engine", func="_migrate_legacy_dictionary_files",
+                )
 
     # --- Properties for backward compat ---
 

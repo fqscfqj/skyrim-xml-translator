@@ -67,9 +67,15 @@ class VectorStore:
 
     def save_vectors(self) -> None:
         if self.vectors is not None:
+            parent = os.path.dirname(self.vector_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
             np.save(self.vector_path, self.vectors)
 
     def save_terms_index(self) -> None:
+        parent = os.path.dirname(self.terms_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         with open(self.terms_path, "w", encoding="utf-8") as f:
             json.dump(self.terms, f, indent=4, ensure_ascii=False)
 

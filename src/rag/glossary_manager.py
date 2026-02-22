@@ -170,6 +170,9 @@ class GlossaryManager:
 
     def save(self) -> None:
         """Save glossary to disk."""
+        parent = os.path.dirname(self.glossary_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         with open(self.glossary_path, "w", encoding="utf-8") as f:
             json.dump(self.glossary, f, indent=4, ensure_ascii=False)
 
