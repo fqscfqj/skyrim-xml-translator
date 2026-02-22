@@ -149,6 +149,7 @@ class Worker(QThread):
                 row_idx = item[0]
                 source = item[1]
                 context_hint = item[2] if len(item) > 2 else None
+                task_logs: list[str] = []
                 if not self.is_running or self.stop_receiving:
                     return None
                 # Wait while paused using threading.Event for efficient blocking.
@@ -158,15 +159,20 @@ class Worker(QThread):
                 if not self.is_running or self.stop_receiving:
                     return None
                 try:
+                    def _task_log_callback(msg):
+                        text = str(msg)
+                        task_logs.append(text)
+                        self.log.emit(text)
+
                     translation, debug_info = self.translator.translate_text(
                         source,
-                        log_callback=self.log.emit,
+                        log_callback=_task_log_callback,
                         return_debug_info=True,
                         context_hint=context_hint,
                     )
-                    return (row_idx, source, translation, debug_info)
+                    return (row_idx, source, translation, debug_info, task_logs)
                 except Exception as e:
-                    return (row_idx, source, None, None, str(e))
+                    return (row_idx, source, None, None, str(e), task_logs)
 
             # Limit concurrent tasks to reduce memory pressure
             # Each task holds embedding vectors and LLM context in memory
@@ -207,8 +213,8 @@ class Worker(QThread):
                         result = future.result()
                         
                         if result:
-                            if len(result) == 4:
-                                row_idx, source, translation, debug_info = result
+                            if len(result) == 5:
+                                row_idx, source, translation, debug_info, task_logs = result
                                 safe_translation = str(translation) if translation is not None else ""
                                 safe_source = str(source) if source is not None else ""
                                 
@@ -217,10 +223,6 @@ class Worker(QThread):
                                 
                                 # Check stop_receiving again before emitting results
                                 if not self.stop_receiving:
-                                    # Cache debug info for visualization
-                                    if debug_info and safe_source:
-                                        self.rag_debug_ready.emit(safe_source, debug_info)
-                                    
                                     # 为所有相同内容的行发送翻译结果
                                     for target_row in all_rows:
                                         self.result_ready.emit(target_row, safe_translation)
@@ -228,18 +230,41 @@ class Worker(QThread):
                                     # 缓存翻译结果
                                     translation_cache[source] = safe_translation
                                     
+                                    status_line = ""
                                     if len(all_rows) > 1:
+                                        status_line = f"[{processed_count+1}/{unique_count}] {safe_source[:20]}... -> {safe_translation[:20]}... (x{len(all_rows)} {i18n.t('msg_duplicate_applied')})"
                                         log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', 
-                                                f"[{processed_count+1}/{unique_count}] {safe_source[:20]}... -> {safe_translation[:20]}... (x{len(all_rows)} {i18n.t('msg_duplicate_applied')})", 
+                                                status_line, 
                                                 module='gui_main', func='Worker.run')
                                     else:
+                                        status_line = f"[{processed_count+1}/{unique_count}] {safe_source[:20]}... -> {safe_translation[:20]}..."
                                         log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', 
-                                                f"[{processed_count+1}/{unique_count}] {safe_source[:20]}... -> {safe_translation[:20]}...", 
+                                                status_line, 
                                                 module='gui_main', func='Worker.run')
+
+                                    # Cache debug info for visualization
+                                    if debug_info and safe_source:
+                                        if isinstance(debug_info, dict):
+                                            flow_logs = list(task_logs)
+                                            if status_line:
+                                                flow_logs.append(status_line)
+                                            debug_info["flow_logs"] = flow_logs
+                                        self.rag_debug_ready.emit(safe_source, debug_info)
                             else:
-                                row_idx, source, _, _, error = result
+                                row_idx, source, _, _, error, task_logs = result
                                 if not self.stop_receiving:
                                     log_emit(self.log.emit, self.translator.rag_engine.config, 'ERROR', f"Error translating {str(source)[:20]}...: {error}", module='gui_main', func='Worker.run')
+                                    safe_source = str(source) if source is not None else ""
+                                    if safe_source:
+                                        self.rag_debug_ready.emit(safe_source, {
+                                            "original_text": safe_source,
+                                            "flow_logs": list(task_logs),
+                                            "error": str(error),
+                                            "search_results": [],
+                                            "matched_terms": {},
+                                            "rag_tasks": [],
+                                            "keywords": [],
+                                        })
 
                         # Only update progress when not stopping to avoid inaccurate calculations
                         if not self.stop_receiving:
@@ -572,7 +597,7 @@ class RAGVisualizationDialog(QDialog):
     def _format_rag_log_text(self) -> str:
         di = self.debug_info or {}
         lines = []
-        lines.append("=== RAG Debug Log ===")
+        lines.append("=== Translation Full Debug Log ===")
         lines.append("")
 
         src = di.get("original_text", self.original_text)
@@ -664,6 +689,20 @@ class RAGVisualizationDialog(QDialog):
                 lines.append("-- User Prompt --")
                 lines.append(str(user_prompt))
                 lines.append("")
+
+        flow_logs = di.get("flow_logs") or []
+        lines.append("[Full Flow Logs]")
+        if isinstance(flow_logs, list) and flow_logs:
+            for msg in flow_logs:
+                lines.append(str(msg))
+        else:
+            lines.append("(none)")
+        lines.append("")
+
+        if di.get("error"):
+            lines.append("[Error]")
+            lines.append(str(di.get("error")))
+            lines.append("")
 
         return "\n".join(lines).strip() + "\n"
 
