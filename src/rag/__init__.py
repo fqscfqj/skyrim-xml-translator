@@ -1,3 +1,3 @@
-from src.rag.engine import RAGEngine
+from .engine import RAGEngine
 
 __all__ = ["RAGEngine"]

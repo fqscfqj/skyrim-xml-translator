@@ -3,7 +3,7 @@
 from typing import Optional
 
 from src.llm.client import LLMClient
-from src.rag.engine import RAGEngine
+from ..rag.engine import RAGEngine
 from src.prompt.prompt_manager import PromptManager
 from src.translation.text_analyzer import TextAnalyzer
 from src.translation.prompt_builder import PromptBuilder

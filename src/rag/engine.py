@@ -4,10 +4,10 @@ import os
 from typing import Optional, Callable
 
 from src.logging_helper import emit as log_emit
-from src.rag.glossary_manager import GlossaryManager
-from src.rag.vector_store import VectorStore
-from src.rag.keyword_extractor import KeywordExtractor
-from src.rag.search import RAGSearcher
+from .glossary_manager import GlossaryManager
+from .vector_store import VectorStore
+from .keyword_extractor import KeywordExtractor
+from .search import RAGSearcher
 from src.cache.lru_cache import LRUCache
 from src.cache.embedding_cache import EmbeddingCache
 from src.prompt.prompt_manager import PromptManager

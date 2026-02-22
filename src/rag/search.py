@@ -7,8 +7,8 @@ from typing import Optional, Callable, Dict, List, Any
 import numpy as np
 
 from src.logging_helper import emit as log_emit
-from src.rag.glossary_manager import GlossaryManager
-from src.rag.vector_store import VectorStore
+from .glossary_manager import GlossaryManager
+from .vector_store import VectorStore
 from src.cache.embedding_cache import EmbeddingCache
 
 
