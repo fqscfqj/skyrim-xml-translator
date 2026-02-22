@@ -18,7 +18,7 @@ class KeywordExtractor:
     _WHITESPACE_RE = re.compile(r"\s+")
     _WORD_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9'\-]*")
     _STRIP_PUNCT_RE = re.compile(r"^[^\w\u4e00-\u9fff]+|[^\w\u4e00-\u9fff]+$")
-    _KW_CACHE_VERSION = "kw_v7"
+    _KW_CACHE_VERSION = "kw_v8"
     _LOW_SIGNAL_SINGLE_TOKENS = frozenset({
         "honestly", "kinda", "kindof", "sorta", "sortof",
         "really", "actually", "basically", "seriously", "literally",
@@ -374,6 +374,9 @@ class KeywordExtractor:
                 continue
 
             direct_glossary_hit = self.glossary_manager.lookup_normalized(normalized) is not None
+            non_common_tokens = [t for t in tokens if t not in self.glossary_manager._COMMON_WORDS]
+            signal_count = sum(1 for t in non_common_tokens if self.glossary_manager.is_signal_token(t))
+            has_possessive_token = any(t in self._LOW_SIGNAL_LEADING_TOKENS for t in tokens)
 
             # Single-token discourse fillers/adverbs are usually poor term queries.
             if len(tokens) == 1:
@@ -399,6 +402,22 @@ class KeywordExtractor:
                     continue
                 dropped.append(raw)
                 continue
+
+            # Multi-token query must have meaningful glossary signal, otherwise
+            # semantic retrieval tends to produce noisy unrelated terms.
+            if not direct_glossary_hit:
+                if signal_count == 0:
+                    dropped.append(raw)
+                    continue
+                # One weak signal among many content words is usually too ambiguous.
+                if signal_count == 1 and len(non_common_tokens) >= 3:
+                    dropped.append(raw)
+                    continue
+                # Possessive constructions with only one signal token are often
+                # sentence-level semantics (e.g., "take your seed"), not terms.
+                if has_possessive_token and signal_count <= 1:
+                    dropped.append(raw)
+                    continue
 
             kept.append(raw)
 

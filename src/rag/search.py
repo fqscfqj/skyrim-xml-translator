@@ -72,13 +72,56 @@ class RAGSearcher:
             return value.strip().lower() in ("1", "true", "yes", "on")
         return bool(value)
 
+    @staticmethod
+    def _simple_stem_token(token: str) -> str:
+        t = (token or "").strip().lower()
+        if len(t) <= 3:
+            return t
+        if t.endswith("ies") and len(t) > 4:
+            return t[:-3] + "y"
+        for suffix in ("ing", "ers", "er", "ed", "es", "s"):
+            if t.endswith(suffix) and len(t) - len(suffix) >= 3:
+                return t[:-len(suffix)]
+        return t
+
+    def _build_signal_signature(self, text: str) -> set[str]:
+        normalized = self.glossary_manager.normalize_term_key(text)
+        if not normalized:
+            return set()
+        result: set[str] = set()
+        for token in normalized.split():
+            if not token:
+                continue
+            if token in self.glossary_manager._COMMON_WORDS:
+                continue
+            if len(token) < 2:
+                continue
+            result.add(token)
+            stem = self._simple_stem_token(token)
+            if stem:
+                result.add(stem)
+        return result
+
+    def _has_signal_overlap(self, query: str, candidate: str) -> bool:
+        q_sig = self._build_signal_signature(query)
+        c_sig = self._build_signal_signature(candidate)
+        if not q_sig or not c_sig:
+            return False
+        return bool(q_sig & c_sig)
+
     def _is_low_signal_query(self, query: str) -> bool:
         normalized = self.glossary_manager.normalize_term_key(query)
         if not normalized:
             return True
+        exact = self.glossary_manager.lookup_normalized(normalized)
+        if exact and exact.strip().lower() == query.strip().lower():
+            return False
         tokens = [t for t in normalized.split() if t]
         if not tokens:
             return True
+        non_common_tokens = [t for t in tokens if t not in self.glossary_manager._COMMON_WORDS]
+        signal_count = sum(1 for t in non_common_tokens if self.glossary_manager.is_signal_token(t))
+        has_possessive_token = any(t in self._LOW_SIGNAL_LEADING_TOKENS for t in tokens)
         if all(t in self.glossary_manager._COMMON_WORDS for t in tokens):
             return True
         if len(tokens) == 1:
@@ -93,9 +136,16 @@ class RAGSearcher:
                 return True
             if token.endswith("ly") and len(token) >= 5:
                 return True
-        elif tokens[0] in self._LOW_SIGNAL_LEADING_TOKENS:
-            # Possessive-led phrase is usually sentence semantics, not a term query.
-            return True
+        else:
+            if tokens[0] in self._LOW_SIGNAL_LEADING_TOKENS:
+                # Possessive-led phrase is usually sentence semantics, not a term query.
+                return True
+            if signal_count == 0:
+                return True
+            if signal_count == 1 and len(non_common_tokens) >= 3:
+                return True
+            if has_possessive_token and signal_count <= 1:
+                return True
         return False
 
     # --- Matching helpers ---
@@ -370,6 +420,10 @@ class RAGSearcher:
                 if canonical_term is None:
                     canonical_term = term
                 if canonical_term not in self.glossary_manager.glossary:
+                    return False
+                # For semantic candidates, require signal-token overlap with query
+                # to reduce unrelated high-similarity noise.
+                if score < 1.0 and not self._has_signal_overlap(query, canonical_term):
                     return False
                 prev_score = candidate_scores.get(canonical_term)
                 if prev_score is None or score > prev_score:
