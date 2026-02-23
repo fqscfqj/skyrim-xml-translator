@@ -203,6 +203,9 @@ class PromptBuilder:
                 "将输入翻译为{target_language}。"
                 "只输出 JSON：{\"translation\":\"...\"}。"
                 "保留所有 XML/HTML 标签、占位符和空白。"
+                "标点与引号用法应与原文结构一致，保持停顿和语气关系；"
+                "可做必要的目标语言排版转换，但不得无依据增删关键标点，"
+                "且原文未出现书名号《》时，译文不得擅自添加。"
             )
         return system_prompt
 

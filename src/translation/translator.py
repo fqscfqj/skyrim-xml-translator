@@ -333,7 +333,8 @@ class Translator:
             "1) 完整翻译，不混入源语言词；"
             "2) 保留全部 XML/HTML 标签和占位符；"
             "3) 术语表仅作参考，按当前语义决定是否采用词典译法；"
-            "4) 仅输出 JSON。",
+            "4) 标点与引号用法保持与原文结构一致，不得擅自添加书名号《》；"
+            "5) 仅输出 JSON。",
         )
         prompt = PromptBuilder.apply_prompt_vars(retry_template, prompt_vars)
 
