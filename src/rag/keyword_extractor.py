@@ -613,7 +613,8 @@ class KeywordExtractor:
                 if token_norm in seen_norm:
                     continue
                 seen_norm.add(token_norm)
-                expanded.append(surface_map.get(token_norm, token_norm))
+                surface_form = surface_map.get(token_norm)
+                expanded.append(surface_form or token_norm)
 
             # Safety fallback when decomposition produced nothing.
             if not keep_original and not seen_norm:
