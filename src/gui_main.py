@@ -1921,6 +1921,7 @@ class MainWindow(QMainWindow):
         strings = list(self.current_processor.get_strings())
         self.trans_table.setRowCount(len(strings))
         
+        cleared_same_count = 0
         for i, (node, id_text, source, dest) in enumerate(strings):
             # ID
             id_item = QTableWidgetItem(id_text)
@@ -1933,11 +1934,22 @@ class MainWindow(QMainWindow):
             self.trans_table.setItem(i, 1, source_item)
             
             # Dest
-            dest_item = QTableWidgetItem(dest)
+            source_text = str(source) if source is not None else ""
+            dest_text = str(dest) if dest is not None else ""
+            if source_text.strip() and source_text.strip() == dest_text.strip():
+                dest_text = ""
+                cleared_same_count += 1
+                if node is not None:
+                    try:
+                        self.current_processor.update_dest(node, "", overwrite=True)
+                    except Exception as e:
+                        self.log(f"Error normalizing identical source/dest at row {i}: {e}")
+
+            dest_item = QTableWidgetItem(dest_text)
             # Store node in UserRole for easy update
             dest_item.setData(Qt.ItemDataRole.UserRole, node) 
             self.trans_table.setItem(i, 2, dest_item)
-            if str(dest).strip():
+            if str(dest_text).strip():
                 self._set_row_status(i, self.ROW_STATUS_SUCCESS)
             else:
                 self._set_row_status(i, self.ROW_STATUS_UNTRANSLATED)
@@ -1945,6 +1957,15 @@ class MainWindow(QMainWindow):
         self.trans_table.blockSignals(False)
         self._apply_status_filter()
         log_emit(self.log, self.config_manager, 'INFO', i18n.t("msg_loaded_strings").format(count=len(strings)), module='gui_main', func='load_xml_to_table')
+        if cleared_same_count > 0:
+            log_emit(
+                self.log,
+                self.config_manager,
+                'INFO',
+                f"Normalized {cleared_same_count} entries where Source == Dest to untranslated.",
+                module='gui_main',
+                func='load_xml_to_table'
+            )
         
         # Clear RAG debug cache when loading new file
         self.rag_debug_cache.clear()
