@@ -119,10 +119,13 @@ class RAGSearcher:
                     continue
                 selected_short_count += 1
             else:
-                # Long terms are intentionally unbounded so sentence/book glossary
-                # entries can still reach prompt context.
+                # Long-term terms remain eligible, but still obey configured cap.
+                if selected_long_count >= long_limit:
+                    continue
                 selected_long_count += 1
             selected.append(term)
+            if selected_short_count >= short_limit and selected_long_count >= long_limit:
+                break
 
         return selected, selected_short_count, selected_long_count
 
