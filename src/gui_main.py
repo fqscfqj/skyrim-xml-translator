@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QComboBox, QAbstractSpinBox, QScrollArea, QDialog, QTreeWidget, QTreeWidgetItem,
                              QAbstractItemView)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QWheelEvent, QGuiApplication, QCloseEvent
+from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QWheelEvent, QGuiApplication, QCloseEvent, QColor
 
 from src.config_manager import ConfigManager
 from src.llm_client import LLMClient
@@ -95,6 +95,7 @@ class Worker(QThread):
     progress = pyqtSignal(int)
     log = pyqtSignal(str)
     result_ready = pyqtSignal(int, str) # row_index, translation
+    row_failed = pyqtSignal(int, str) # row_index, error
     rag_debug_ready = pyqtSignal(str, object) # original_text, debug_info
     finished = pyqtSignal()
 
@@ -143,6 +144,7 @@ class Worker(QThread):
             processed_count = 0
             # 用于存储已翻译结果的缓存
             translation_cache = {}  # source_text -> translation
+            completed_sources = set()
 
             def translate_task(item):
                 row_idx = item[0]
@@ -228,6 +230,7 @@ class Worker(QThread):
                                     
                                     # 缓存翻译结果
                                     translation_cache[source] = safe_translation
+                                    completed_sources.add(source)
                                     
                                     status_line = ""
                                     if len(all_rows) > 1:
@@ -254,6 +257,10 @@ class Worker(QThread):
                                 if not self.stop_receiving:
                                     log_emit(self.log.emit, self.translator.rag_engine.config, 'ERROR', f"Error translating {str(source)[:20]}...: {error}", module='gui_main', func='Worker.run')
                                     safe_source = str(source) if source is not None else ""
+                                    all_rows = source_to_rows.get(source, [row_idx])
+                                    for target_row in all_rows:
+                                        self.row_failed.emit(target_row, str(error))
+                                    completed_sources.add(source)
                                     if safe_source:
                                         self.rag_debug_ready.emit(safe_source, {
                                             "original_text": safe_source,
@@ -269,7 +276,7 @@ class Worker(QThread):
                         if not self.stop_receiving:
                             processed_count += 1
                             # 进度基于总项目数而非唯一项目数，以反映实际完成进度
-                            completed_total = sum(len(source_to_rows.get(s, [])) for s in translation_cache.keys())
+                            completed_total = sum(len(source_to_rows.get(s, [])) for s in completed_sources)
                             self.progress.emit(int(completed_total / total * 100))
 
                         # Submit next task
@@ -793,6 +800,10 @@ class RAGVisualizationDialog(QDialog):
 
 
 class MainWindow(QMainWindow):
+    ROW_STATUS_UNTRANSLATED = "untranslated"
+    ROW_STATUS_SUCCESS = "success"
+    ROW_STATUS_FAILED = "failed"
+
     def __init__(self):
         super().__init__()
         self.config_manager = ConfigManager()
@@ -825,6 +836,8 @@ class MainWindow(QMainWindow):
         # Cache for RAG debug info to avoid re-running translation for visualization
         # Key: original_text, Value: debug_info dict
         self.rag_debug_cache = {}
+        self.row_status_map = {}
+        self.row_error_map = {}
 
         # Pagination state
         self.current_page = 1
@@ -951,6 +964,12 @@ class MainWindow(QMainWindow):
 
         # Options & Actions
         action_layout = QHBoxLayout()
+        self.status_filter_combo = NoWheelComboBox()
+        self.status_filter_combo.addItem(i18n.t("status_filter_all"), "all")
+        self.status_filter_combo.addItem(i18n.t("status_filter_untranslated"), self.ROW_STATUS_UNTRANSLATED)
+        self.status_filter_combo.addItem(i18n.t("status_filter_success"), self.ROW_STATUS_SUCCESS)
+        self.status_filter_combo.addItem(i18n.t("status_filter_failed"), self.ROW_STATUS_FAILED)
+        self.status_filter_combo.currentIndexChanged.connect(self._apply_status_filter)
         # Overwrite existing translations option removed — always overwrite now
         
         self.start_btn = QPushButton(i18n.t("btn_translate_all"))
@@ -970,7 +989,9 @@ class MainWindow(QMainWindow):
         self.trans_resume_btn = QPushButton(i18n.t("btn_resume"))
         self.trans_resume_btn.clicked.connect(self.resume_translation)
         self.trans_resume_btn.setEnabled(False)
-        
+
+        action_layout.addWidget(QLabel(i18n.t("label_translation_status_filter")))
+        action_layout.addWidget(self.status_filter_combo)
         action_layout.addStretch()
         action_layout.addWidget(self.start_btn)
         action_layout.addWidget(self.trans_sel_btn)
@@ -1018,6 +1039,47 @@ class MainWindow(QMainWindow):
 
         widget.setLayout(layout)
         return widget
+
+    def _set_row_status(self, row: int, status: str, error: str = "") -> None:
+        if row < 0:
+            return
+        self.row_status_map[row] = status
+        if error:
+            self.row_error_map[row] = str(error)
+        else:
+            self.row_error_map.pop(row, None)
+        self._apply_row_status_style(row)
+
+    def _apply_row_status_style(self, row: int) -> None:
+        status = self.row_status_map.get(row, self.ROW_STATUS_UNTRANSLATED)
+        if status == self.ROW_STATUS_SUCCESS:
+            color = QColor("#E8F5E9")
+        elif status == self.ROW_STATUS_FAILED:
+            color = QColor("#FFEBEE")
+        else:
+            color = QColor("#F5F5F5")
+
+        error_text = self.row_error_map.get(row, "")
+        for col in range(self.trans_table.columnCount()):
+            item = self.trans_table.item(row, col)
+            if item is None:
+                continue
+            item.setBackground(color)
+            if error_text and status == self.ROW_STATUS_FAILED:
+                item.setToolTip(error_text)
+            else:
+                item.setToolTip("")
+
+    def _apply_status_filter(self, _index: Optional[int] = None) -> None:
+        if not hasattr(self, "trans_table"):
+            return
+        selected = "all"
+        if hasattr(self, "status_filter_combo"):
+            selected = str(self.status_filter_combo.currentData() or "all")
+        for row in range(self.trans_table.rowCount()):
+            status = self.row_status_map.get(row, self.ROW_STATUS_UNTRANSLATED)
+            hidden = selected != "all" and status != selected
+            self.trans_table.setRowHidden(row, hidden)
 
     def create_glossary_tab(self):
         widget = QWidget()
@@ -1698,6 +1760,7 @@ class MainWindow(QMainWindow):
         self.worker.log.connect(self.log)
         self.worker.progress.connect(self.progress_bar.setValue)
         self.worker.result_ready.connect(self.update_table_row)
+        self.worker.row_failed.connect(self.update_table_row_failed)
         self.worker.rag_debug_ready.connect(self.cache_rag_debug_info)
         self.worker.finished.connect(self.on_translation_finished)
         self.worker.start()
@@ -1774,6 +1837,8 @@ class MainWindow(QMainWindow):
 
         self.trans_table.setRowCount(0)
         self.trans_table.blockSignals(True) # Prevent itemChanged signals during load
+        self.row_status_map.clear()
+        self.row_error_map.clear()
 
         strings = list(self.current_processor.get_strings())
         self.trans_table.setRowCount(len(strings))
@@ -1794,8 +1859,13 @@ class MainWindow(QMainWindow):
             # Store node in UserRole for easy update
             dest_item.setData(Qt.ItemDataRole.UserRole, node) 
             self.trans_table.setItem(i, 2, dest_item)
+            if str(dest).strip():
+                self._set_row_status(i, self.ROW_STATUS_SUCCESS)
+            else:
+                self._set_row_status(i, self.ROW_STATUS_UNTRANSLATED)
 
         self.trans_table.blockSignals(False)
+        self._apply_status_filter()
         log_emit(self.log, self.config_manager, 'INFO', i18n.t("msg_loaded_strings").format(count=len(strings)), module='gui_main', func='load_xml_to_table')
         
         # Clear RAG debug cache when loading new file
@@ -1863,6 +1933,28 @@ class MainWindow(QMainWindow):
                         node, str(translation) if translation is not None else "", overwrite=True)
                 except Exception as e:
                     self.log(f"Error updating row {row}: {e}")
+            self._set_row_status(row, self.ROW_STATUS_SUCCESS)
+            self._apply_status_filter()
+
+    def update_table_row_failed(self, row, error):
+        if self.stop_receiving_results:
+            return
+
+        dest_item = self.trans_table.item(row, 2)
+        if dest_item:
+            self.trans_table.blockSignals(True)
+            dest_item.setText("")
+            self.trans_table.blockSignals(False)
+
+            node = dest_item.data(Qt.ItemDataRole.UserRole)
+            if node is not None:
+                try:
+                    self.current_processor.update_dest(node, "", overwrite=True)
+                except Exception as e:
+                    self.log(f"Error clearing row {row} after failure: {e}")
+
+        self._set_row_status(row, self.ROW_STATUS_FAILED, str(error))
+        self._apply_status_filter()
 
     def on_table_item_changed(self, item):
         # Only care about Dest column (index 2)
@@ -1871,6 +1963,11 @@ class MainWindow(QMainWindow):
             if node is not None:
                 new_text = item.text()
                 self.current_processor.update_dest(node, new_text, overwrite=True)
+                if str(new_text).strip():
+                    self._set_row_status(item.row(), self.ROW_STATUS_SUCCESS)
+                else:
+                    self._set_row_status(item.row(), self.ROW_STATUS_UNTRANSLATED)
+                self._apply_status_filter()
                 # self.log(f"Updated translation manually for row {item.row()}")
         # Update button enabled state (in case manual edit changed content)
         self.update_translate_buttons_enabled()
@@ -2235,6 +2332,7 @@ class MainWindow(QMainWindow):
         self.worker.log.connect(self.log)
         self.worker.progress.connect(self.progress_bar.setValue)
         self.worker.result_ready.connect(self.update_table_row)
+        self.worker.row_failed.connect(self.update_table_row_failed)
         self.worker.rag_debug_ready.connect(self.cache_rag_debug_info)
         self.worker.finished.connect(self.on_translation_finished)
         self.worker.start()
@@ -2258,6 +2356,7 @@ class MainWindow(QMainWindow):
                 self.trans_table.setItem(row, 2, dest_item)
             else:
                 dest_item.setText("")
+            self._set_row_status(row, self.ROW_STATUS_UNTRANSLATED)
             # Update current file node
             node = dest_item.data(Qt.ItemDataRole.UserRole)
             if node is not None:
@@ -2266,6 +2365,7 @@ class MainWindow(QMainWindow):
                 except Exception as e:
                     self.log(f"Error clearing translation for row {row}: {e}")
         self.trans_table.blockSignals(False)
+        self._apply_status_filter()
         self._clear_translation_caches()
         self.log(i18n.t("msg_cleared_all_translations"))
 
@@ -2295,10 +2395,12 @@ class MainWindow(QMainWindow):
             dest_item = self.trans_table.item(row, 2)
             if dest_item:
                 dest_item.setText("")
+                self._set_row_status(row, self.ROW_STATUS_UNTRANSLATED)
                 node = dest_item.data(Qt.ItemDataRole.UserRole)
                 if node is not None:
                     self.current_processor.update_dest(node, "", overwrite=True)
         self.trans_table.blockSignals(False)
+        self._apply_status_filter()
         self._clear_translation_caches(selected_source_texts if selected_source_texts else None)
         log_emit(
             self.log,

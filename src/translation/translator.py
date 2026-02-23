@@ -298,15 +298,10 @@ class Translator:
                          f"Translation failed: {e}", exc=e,
                          module="translator", func="translate_text")
                 if retry_count == max_retries:
-                    if return_debug_info:
-                        return str(text), debug_info
-                    return str(text)
+                    raise
 
-        # Fallback
-        final = last_translation if last_translation else str(text)
-        if return_debug_info:
-            return final, debug_info
-        return final
+        # Should not be reachable; keep explicit failure semantics.
+        raise RuntimeError("Translation failed after retries")
 
     # --- Internal helpers ---
 
