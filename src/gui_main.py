@@ -181,7 +181,8 @@ class Worker(QThread):
             
             from concurrent.futures import wait, FIRST_COMPLETED
             
-            with ThreadPoolExecutor(max_workers=max_concurrent) as executor:
+            executor = ThreadPoolExecutor(max_workers=max_concurrent)
+            try:
                 # Use a set to keep track of active futures
                 active_futures = set()
                 # Iterator for unique items only
@@ -198,7 +199,14 @@ class Worker(QThread):
                 
                 while active_futures:
                     if not self.is_running or self.stop_receiving:
-                        executor.shutdown(wait=False)
+                        # Cancel pending futures and do NOT block waiting for in-flight HTTP calls;
+                        # this prevents the Worker thread from hanging after the user clicks Stop.
+                        try:
+                            executor.shutdown(wait=False, cancel_futures=True)
+                        except TypeError:
+                            # Python < 3.9 does not support cancel_futures parameter
+                            executor.shutdown(wait=False)
+                        active_futures.clear()
                         break
 
                     # Wait for at least one future to complete using FIRST_COMPLETED
@@ -288,9 +296,20 @@ class Worker(QThread):
                         except StopIteration:
                             pass
 
-                if not self.stop_receiving:
-                    log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', i18n.t("msg_translation_finished"), module='gui_main', func='Worker.run')
-                self.finished.emit()
+            finally:
+                # Always clean up the executor.
+                # When stopped, executor.shutdown(wait=False) was already called above;
+                # this call is safe (idempotent). When finishing normally all tasks have
+                # already completed (active_futures drained to empty), so wait=False is
+                # also sufficient to release the thread-pool threads.
+                try:
+                    executor.shutdown(wait=False, cancel_futures=True)
+                except TypeError:
+                    executor.shutdown(wait=False)
+
+            if not self.stop_receiving:
+                log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', i18n.t("msg_translation_finished"), module='gui_main', func='Worker.run')
+            self.finished.emit()
         except Exception as e:
             log_emit(self.log.emit, self.translator.rag_engine.config, 'ERROR', i18n.t("msg_worker_error").format(error=e), exc=e, module='gui_main', func='Worker.run')
             try:
@@ -2165,8 +2184,11 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 self.log(i18n.t("msg_error_saving").format(error=e))
 
-        # Clean up worker thread after translation finishes
+        # Clean up worker thread after translation finishes.
+        # Use a short wait() to ensure the QThread has truly finished its run()
+        # before scheduling deletion, preventing crashes from deleting a live thread.
         if self.worker:
+            self.worker.wait(3000)  # wait up to 3 s; run() should already be done
             self.worker.deleteLater()
             self.worker = None
 
