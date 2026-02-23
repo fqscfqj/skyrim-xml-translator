@@ -30,6 +30,7 @@ class RAGSearcher:
     })
     _DEFAULT_SHORT_TERM_CHAR_LIMIT = 32
     _WEIGHTED_MAX_TERM_TOKENS = 12
+    _EXTRA_LONG_TERM_CONTAINMENT_DAMP = 0.2
     _QUERY_CONTAINMENT_BONUS = 0.04
     _SOURCE_HIT_BONUS = 0.06
     _SENTENCE_LIKE_TOKEN_LIMIT = 9
@@ -118,12 +119,10 @@ class RAGSearcher:
                     continue
                 selected_short_count += 1
             else:
-                if selected_long_count >= long_limit:
-                    continue
+                # Long terms are intentionally unbounded so sentence/book glossary
+                # entries can still reach prompt context.
                 selected_long_count += 1
             selected.append(term)
-            if selected_short_count >= short_limit and selected_long_count >= long_limit:
-                break
 
         return selected, selected_short_count, selected_long_count
 
@@ -216,10 +215,6 @@ class RAGSearcher:
         if not term_tokens:
             return 0.0
 
-        if len(term_tokens) > self._WEIGHTED_MAX_TERM_TOKENS:
-            # Do not boost long sentence-like entries even if they contain the token.
-            return 0.0
-
         if term_norm == query_norm:
             base = self._get_rag_float("keyword_weight_exact_boost", 0.14, 0.0, 1.0)
         elif query_norm in term_norm:
@@ -242,8 +237,10 @@ class RAGSearcher:
             damp = 1.0
         elif len(term_tokens) <= 8:
             damp = 0.75
-        else:
+        elif len(term_tokens) <= self._WEIGHTED_MAX_TERM_TOKENS:
             damp = 0.5
+        else:
+            damp = self._EXTRA_LONG_TERM_CONTAINMENT_DAMP
         return base * damp
 
     def _select_anchor_tokens(self, query_tokens: list[str], budget: int) -> set[str]:
@@ -654,9 +651,12 @@ class RAGSearcher:
                 "selected_terms": query_selected_terms,
                 "selected_short_count": 0,
                 "selected_long_count": 0,
+                "long_terms_selected_count": 0,
+                "selected_total_count": 0,
                 "semantic_match_count": 0,
                 "keyword_weighted_count": 0,
                 "sentence_like_filtered_count": 0,
+                "sentence_like_candidate_count": 0,
                 "source_boosted_terms": source_boosted_terms,
             }
             if debug_info is not None:
@@ -664,7 +664,7 @@ class RAGSearcher:
 
             candidate_scores: Dict[str, float] = {}
             source_boosted_seen: set[str] = set()
-            sentence_like_filtered_terms: set[str] = set()
+            sentence_like_candidate_terms: set[str] = set()
 
             def add_candidate(term: str, score: float, apply_query_bonus: bool = True) -> bool:
                 if not term:
@@ -676,8 +676,7 @@ class RAGSearcher:
                 if canonical_term not in self.glossary_manager.glossary:
                     return False
                 if self._is_sentence_like_term(canonical_term):
-                    sentence_like_filtered_terms.add(canonical_term)
-                    return False
+                    sentence_like_candidate_terms.add(canonical_term)
                 # For semantic candidates, require signal-token overlap with query
                 # to reduce unrelated high-similarity noise.
                 if score < 1.0 and not self._has_signal_overlap(query, canonical_term):
@@ -779,7 +778,8 @@ class RAGSearcher:
                     add_candidate(term, score, apply_query_bonus=False)
 
                 if return_debug:
-                    query_details["sentence_like_filtered_count"] = len(sentence_like_filtered_terms)
+                    query_details["sentence_like_filtered_count"] = 0
+                    query_details["sentence_like_candidate_count"] = len(sentence_like_candidate_terms)
 
                 # 2) Rank by semantic score
                 ranked_candidates = sorted(
@@ -807,6 +807,8 @@ class RAGSearcher:
                 if return_debug:
                     query_details["selected_short_count"] = selected_short_count
                     query_details["selected_long_count"] = selected_long_count
+                    query_details["long_terms_selected_count"] = selected_long_count
+                    query_details["selected_total_count"] = len(limited_terms)
 
                 # 5) Add {term: translation} directly to results
                 for term in query_selected_terms:
