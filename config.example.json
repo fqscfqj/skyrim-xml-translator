@@ -37,6 +37,25 @@
             "enable_thinking": null
         }
     },
+    "llm_search_fallback": {
+        "api_key": "<YOUR_FALLBACK_SEARCH_LLM_API_KEY>",
+        "base_url": "https://api.example.com/v1",
+        "model": "gpt-3.5-turbo",
+        "max_retries": 3,
+        "backoff_base": 0.5,
+        "stream": false,
+        "request_timeout": 30,
+        "request_timeout_step": 15,
+        "request_timeout_max": 180,
+        "parameters": {
+            "temperature": null,
+            "top_p": null,
+            "frequency_penalty": null,
+            "presence_penalty": null,
+            "max_tokens": null,
+            "enable_thinking": null
+        }
+    },
     "embedding": {
         "api_key": "<YOUR_EMBEDDING_API_KEY>",
         "base_url": "https://api.example.com/v1",

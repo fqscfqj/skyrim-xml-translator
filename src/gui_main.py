@@ -829,6 +829,7 @@ class MainWindow(QMainWindow):
         self.translator.set_runtime_flags({"mcm_ui_mode": False})
         self.model_param_controls = {}
         self.search_param_controls = {}
+        self.search_fallback_param_controls = {}
         self.worker = None  # Translation worker reference
         self.glossary_worker = None  # Glossary worker reference
         self.stop_receiving_results = False  # Flag to immediately stop receiving translation results
@@ -1338,6 +1339,83 @@ class MainWindow(QMainWindow):
         s_thinking_combo.addItem(i18n.t("option_thinking_on"), True)
         s_thinking_combo.addItem(i18n.t("option_thinking_off"), False)
         add_search_param_control("enable_thinking", i18n.t("param_enable_thinking"), s_thinking_combo)
+        # --- Search Fallback LLM Settings ---
+        form_layout.addRow(QLabel(f"<b>{i18n.t('group_search_fallback_llm_settings')}</b>"))
+        self.search_fallback_base = QLineEdit(self.config_manager.get("llm_search_fallback", "base_url"))
+        self.search_fallback_key = QLineEdit(self.config_manager.get("llm_search_fallback", "api_key"))
+        self.search_fallback_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.search_fallback_model = QLineEdit(self.config_manager.get("llm_search_fallback", "model"))
+
+        form_layout.addRow(i18n.t("label_search_fallback_base_url"), self.search_fallback_base)
+        form_layout.addRow(i18n.t("label_search_fallback_api_key"), self.search_fallback_key)
+        form_layout.addRow(i18n.t("label_search_fallback_model"), self.search_fallback_model)
+
+        form_layout.addRow(QLabel(f"<b>{i18n.t('group_search_fallback_llm_params')}</b>"))
+        search_fallback_params = self.config_manager.get("llm_search_fallback", "parameters", {}) or {}
+
+        def add_search_fallback_param_control(name, label_text, widget):
+            checkbox = QCheckBox(label_text)
+            widget.setEnabled(False)
+            checkbox.toggled.connect(
+                lambda checked, w=widget: w.setEnabled(bool(checked))
+            )
+            row_widget = QWidget()
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.addWidget(checkbox)
+            row_layout.addWidget(widget)
+            row_layout.addStretch()
+            form_layout.addRow(row_widget)
+            self.search_fallback_param_controls[name] = (checkbox, widget)
+            stored_value = search_fallback_params.get(name)
+            if stored_value is not None:
+                checkbox.setChecked(True)
+                if isinstance(widget, QComboBox):
+                    idx = widget.findData(stored_value)
+                    if idx >= 0:
+                        widget.setCurrentIndex(idx)
+                else:
+                    widget.setValue(stored_value)
+
+        sf_temp_spin = NoWheelDoubleSpinBox()
+        sf_temp_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        sf_temp_spin.setRange(0.0, 2.0)
+        sf_temp_spin.setSingleStep(0.05)
+        sf_temp_spin.setValue(0.1)
+        add_search_fallback_param_control("temperature", i18n.t("param_temperature"), sf_temp_spin)
+
+        sf_top_p_spin = NoWheelDoubleSpinBox()
+        sf_top_p_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        sf_top_p_spin.setRange(0.0, 1.0)
+        sf_top_p_spin.setSingleStep(0.05)
+        sf_top_p_spin.setValue(1.0)
+        add_search_fallback_param_control("top_p", i18n.t("param_top_p"), sf_top_p_spin)
+
+        sf_freq_spin = NoWheelDoubleSpinBox()
+        sf_freq_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        sf_freq_spin.setRange(-2.0, 2.0)
+        sf_freq_spin.setSingleStep(0.1)
+        sf_freq_spin.setValue(0.0)
+        add_search_fallback_param_control("frequency_penalty", i18n.t("param_freq_penalty"), sf_freq_spin)
+
+        sf_pres_spin = NoWheelDoubleSpinBox()
+        sf_pres_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        sf_pres_spin.setRange(-2.0, 2.0)
+        sf_pres_spin.setSingleStep(0.1)
+        sf_pres_spin.setValue(0.0)
+        add_search_fallback_param_control("presence_penalty", i18n.t("param_pres_penalty"), sf_pres_spin)
+
+        sf_token_spin = NoWheelSpinBox()
+        sf_token_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        sf_token_spin.setRange(16, 8192)
+        sf_token_spin.setSingleStep(16)
+        sf_token_spin.setValue(512)
+        add_search_fallback_param_control("max_tokens", i18n.t("param_max_tokens"), sf_token_spin)
+
+        sf_thinking_combo = NoWheelComboBox()
+        sf_thinking_combo.addItem(i18n.t("option_thinking_on"), True)
+        sf_thinking_combo.addItem(i18n.t("option_thinking_off"), False)
+        add_search_fallback_param_control("enable_thinking", i18n.t("param_enable_thinking"), sf_thinking_combo)
         # ---------------------------
 
         form_layout.addRow(QLabel(f"<b>{i18n.t('group_embedding_settings')}</b>"))
@@ -2220,6 +2298,11 @@ class MainWindow(QMainWindow):
                 "api_key": self.search_key.text(),
                 "model": self.search_model.text(),
             },
+            "llm_search_fallback": {
+                "base_url": self.search_fallback_base.text(),
+                "api_key": self.search_fallback_key.text(),
+                "model": self.search_fallback_model.text(),
+            },
             "embedding": {
                 "base_url": self.embed_base.text(),
                 "api_key": self.embed_key.text(),
@@ -2276,6 +2359,12 @@ class MainWindow(QMainWindow):
         search_params = self.config_manager.config.setdefault("llm_search", {}).setdefault("parameters", {})
         for name, (checkbox, widget) in self.search_param_controls.items():
             search_params[name] = _param_widget_value(widget) if checkbox.isChecked() else None
+
+        search_fallback_params = self.config_manager.config.setdefault(
+            "llm_search_fallback", {}
+        ).setdefault("parameters", {})
+        for name, (checkbox, widget) in self.search_fallback_param_controls.items():
+            search_fallback_params[name] = _param_widget_value(widget) if checkbox.isChecked() else None
         
         self.config_manager.save_config()
         self.llm_client.reload_config()

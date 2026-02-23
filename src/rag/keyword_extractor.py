@@ -32,6 +32,14 @@ class KeywordExtractor:
     _TITLE_CONNECTORS = frozenset({
         "of", "the", "and", "or", "to", "for", "in", "on", "at", "from", "with",
     })
+    _REFUSAL_MARKERS = (
+        "抱歉",
+        "不能提供",
+        "无法提供",
+        "无法协助",
+        "不便提供",
+        "无法满足",
+    )
 
     def __init__(self, llm_client, prompt_manager, config_manager,
                  glossary_manager, cache: Optional[LRUCache] = None):
@@ -190,6 +198,43 @@ class KeywordExtractor:
             return value.strip().lower() in ("1", "true", "yes", "on")
         return bool(value)
 
+    @staticmethod
+    def _extract_status_code(exc) -> Optional[int]:
+        status_code = getattr(exc, "status_code", None)
+        if status_code is None:
+            response = getattr(exc, "response", None)
+            status_code = getattr(response, "status_code", None)
+        if status_code is None:
+            return None
+        try:
+            return int(status_code)
+        except Exception:
+            return None
+
+    def _is_sensitive_block_error(self, exc) -> bool:
+        return self._extract_status_code(exc) in (403, 421)
+
+    def _is_refusal_response_text(self, text: str) -> bool:
+        normalized = (text or "").strip().lower()
+        if not normalized:
+            return False
+        return any(marker in normalized for marker in self._REFUSAL_MARKERS)
+
+    def _is_search_call_failed(self, response_text: Optional[str] = None, exc: Optional[Exception] = None) -> bool:
+        if exc is not None:
+            return True
+        normalized = (response_text or "").strip()
+        if not normalized:
+            return True
+        return self._is_refusal_response_text(normalized)
+
+    def _normalize_search_response_text(self, response) -> str:
+        if response is None:
+            return ""
+        if not isinstance(response, str):
+            response = str(response)
+        return self._MARKDOWN_CODE_RE.sub("", response).strip()
+
     def _extract_via_llm(self, text: str, log_callback) -> list[str]:
         """Use LLM to extract fine-grained glossary lookup keywords."""
         prompt_template = self.prompt_manager.get("rag.keywords.prompt")
@@ -213,32 +258,104 @@ class KeywordExtractor:
         )
         messages = [{"role": "user", "content": prompt}]
 
+        primary_error: Optional[Exception] = None
+        primary_response_text = ""
         try:
-            response = self.llm_client.chat_completion_search(
-                messages, temperature=0.1, max_tokens=None,
-                log_callback=log_callback, operation="keyword_extract",
+            primary_response = self.llm_client.chat_completion_search(
+                messages,
+                temperature=0.1,
+                max_tokens=None,
+                log_callback=log_callback,
+                operation="keyword_extract",
+                force_search_fallback=False,
             )
-            if response is None:
-                log_emit(log_callback, self.config, "WARNING",
-                         "[RAG] Keyword extraction returned empty response",
-                         module="keyword_extractor", func="_extract_via_llm")
-                return []
-            if not isinstance(response, str):
-                response = str(response)
-
-            response = self._MARKDOWN_CODE_RE.sub("", response).strip()
-            if not response:
-                log_emit(log_callback, self.config, "WARNING",
-                         "[RAG] Keyword extraction returned blank response",
-                         module="keyword_extractor", func="_extract_via_llm")
-                return []
-            keywords = self._parse_keyword_response(response, log_callback)
-            return self._process_keywords(keywords)
+            primary_response_text = self._normalize_search_response_text(primary_response)
         except Exception as e:
-            log_emit(log_callback, self.config, "ERROR",
-                     f"[RAG] Keyword extraction failed: {e}",
-                     exc=e, module="keyword_extractor", func="_extract_via_llm")
-            return []
+            primary_error = e
+
+        if not self._is_search_call_failed(primary_response_text, primary_error):
+            keywords = self._parse_keyword_response(primary_response_text, log_callback)
+            return self._process_keywords(keywords)
+
+        if primary_error is not None:
+            status = self._extract_status_code(primary_error)
+            reason = f"exception status={status}" if status is not None else "exception"
+            sensitive = self._is_sensitive_block_error(primary_error)
+            log_emit(
+                log_callback,
+                self.config,
+                "WARNING",
+                f"[RAG] keyword_extract primary search failed ({reason}, sensitive_block={sensitive}); "
+                "action=fallback_to_search_fallback_model",
+                exc=primary_error,
+                module="keyword_extractor",
+                func="_extract_via_llm",
+            )
+        else:
+            reason = "refusal_text" if self._is_refusal_response_text(primary_response_text) else "blank_response"
+            log_emit(
+                log_callback,
+                self.config,
+                "WARNING",
+                f"[RAG] keyword_extract primary search failed ({reason}); "
+                "action=fallback_to_search_fallback_model",
+                module="keyword_extractor",
+                func="_extract_via_llm",
+            )
+
+        fallback_error: Optional[Exception] = None
+        fallback_response_text = ""
+        try:
+            fallback_response = self.llm_client.chat_completion_search(
+                messages,
+                temperature=0.1,
+                max_tokens=None,
+                log_callback=log_callback,
+                operation="keyword_extract_fallback",
+                force_search_fallback=True,
+            )
+            fallback_response_text = self._normalize_search_response_text(fallback_response)
+        except Exception as e:
+            fallback_error = e
+
+        if self._is_search_call_failed(fallback_response_text, fallback_error):
+            if fallback_error is not None:
+                status = self._extract_status_code(fallback_error)
+                reason = f"exception status={status}" if status is not None else "exception"
+                sensitive = self._is_sensitive_block_error(fallback_error)
+                log_emit(
+                    log_callback,
+                    self.config,
+                    "ERROR",
+                    f"[RAG] keyword_extract fallback search failed ({reason}, sensitive_block={sensitive}); "
+                    "result=fallback_failed",
+                    exc=fallback_error,
+                    module="keyword_extractor",
+                    func="_extract_via_llm",
+                )
+                raise RuntimeError("keyword search unavailable after fallback") from fallback_error
+
+            reason = "refusal_text" if self._is_refusal_response_text(fallback_response_text) else "blank_response"
+            log_emit(
+                log_callback,
+                self.config,
+                "ERROR",
+                f"[RAG] keyword_extract fallback search failed ({reason}); result=fallback_failed",
+                module="keyword_extractor",
+                func="_extract_via_llm",
+            )
+            raise RuntimeError("keyword search unavailable after fallback")
+
+        log_emit(
+            log_callback,
+            self.config,
+            "INFO",
+            "[RAG] keyword_extract fallback search succeeded; result=fallback_success",
+            module="keyword_extractor",
+            func="_extract_via_llm",
+        )
+        keywords = self._parse_keyword_response(fallback_response_text, log_callback)
+        return self._process_keywords(keywords)
 
     def _parse_keyword_response(self, response: str, log_callback) -> list:
         """Parse LLM response into a list of keyword strings."""

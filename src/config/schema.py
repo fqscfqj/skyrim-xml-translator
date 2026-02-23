@@ -93,6 +93,7 @@ class CacheConfig:
 class AppConfig:
     llm: LLMConfig = field(default_factory=LLMConfig)
     llm_search: LLMConfig = field(default_factory=LLMConfig)
+    llm_search_fallback: LLMConfig = field(default_factory=LLMConfig)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     rag: RAGConfig = field(default_factory=RAGConfig)
     general: GeneralConfig = field(default_factory=GeneralConfig)
@@ -105,6 +106,7 @@ class AppConfig:
 _SECTION_MAP: dict[str, type] = {
     "llm": LLMConfig,
     "llm_search": LLMConfig,
+    "llm_search_fallback": LLMConfig,
     "embedding": EmbeddingConfig,
     "rag": RAGConfig,
     "general": GeneralConfig,
@@ -161,6 +163,7 @@ def config_to_dataclass(raw: dict) -> AppConfig:
     return AppConfig(
         llm=_dict_to_dataclass(LLMConfig, raw.get("llm", {})),
         llm_search=_dict_to_dataclass(LLMConfig, raw.get("llm_search", {})),
+        llm_search_fallback=_dict_to_dataclass(LLMConfig, raw.get("llm_search_fallback", {})),
         embedding=_dict_to_dataclass(EmbeddingConfig, raw.get("embedding", {})),
         rag=_dict_to_dataclass(RAGConfig, raw.get("rag", {})),
         general=_dict_to_dataclass(GeneralConfig, raw.get("general", {})),

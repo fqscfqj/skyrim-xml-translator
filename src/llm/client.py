@@ -14,6 +14,7 @@ class LLMClient:
         self.config = config_manager
         self.llm_client: Optional[OpenAI] = None
         self.search_llm_client: Optional[OpenAI] = None
+        self.search_fallback_llm_client: Optional[OpenAI] = None
         self.embed_client: Optional[OpenAI] = None
         self.log_callback = log_callback
         self.cost_tracker = cost_tracker
@@ -35,6 +36,9 @@ class LLMClient:
         # Initialize Search LLM Client (Optional)
         self.search_llm_client = build_client("llm_search")
 
+        # Initialize Search Fallback LLM Client (Optional)
+        self.search_fallback_llm_client = build_client("llm_search_fallback")
+
         # Initialize Embedding Client
         self.embed_client = build_client("embedding")
 
@@ -43,7 +47,7 @@ class LLMClient:
 
     def close_clients(self) -> None:
         """Close all underlying HTTP connections to interrupt any in-progress requests."""
-        for client in (self.llm_client, self.search_llm_client, self.embed_client):
+        for client in (self.llm_client, self.search_llm_client, self.search_fallback_llm_client, self.embed_client):
             if client:
                 try:
                     client.close()
@@ -191,10 +195,17 @@ class LLMClient:
     def chat_completion_search(self, messages, temperature=None, top_p=None,
                                frequency_penalty=None, presence_penalty=None,
                                max_tokens=None, log_callback=None,
-                               operation: str = "search") -> str:
+                               operation: str = "search",
+                               force_search_fallback: bool = False) -> str:
         """LLM 对话补全 (用于搜索/关键词提取)"""
-        client = self.search_llm_client if self.search_llm_client else self.llm_client
-        config_section = "llm_search" if self.search_llm_client else "llm"
+        if force_search_fallback:
+            client = self.search_fallback_llm_client
+            config_section = "llm_search_fallback"
+            if not client:
+                raise ValueError("Fallback search LLM client not initialized. Please check llm_search_fallback API Key.")
+        else:
+            client = self.search_llm_client if self.search_llm_client else self.llm_client
+            config_section = "llm_search" if self.search_llm_client else "llm"
         return self._call(
             client=client,
             config_section=config_section,
