@@ -35,6 +35,8 @@ class RAGSearcher:
     _SOURCE_HIT_BONUS = 0.06
     _SENTENCE_LIKE_TOKEN_LIMIT = 9
     _SENTENCE_LIKE_CHAR_LIMIT = 80
+    _ALNUM_LOWER_RE = re.compile(r"[0-9a-z]")
+    _JSON_ARRAY_RE = re.compile(r"\[[\s\S]*?\]")
 
     def __init__(self, vector_store: VectorStore, glossary_manager: GlossaryManager,
                  config_manager, llm_client, embedding_cache: Optional[EmbeddingCache] = None):
@@ -392,15 +394,14 @@ class RAGSearcher:
             snippet = snippet + "..."
         return snippet
 
-    @staticmethod
-    def _raw_term_appears_in_source(term: str, source_text: Optional[str]) -> bool:
+    @classmethod
+    def _raw_term_appears_in_source(cls, term: str, source_text: Optional[str]) -> bool:
         if not term or not source_text:
             return False
         term_lower = term.lower()
         src_lower = source_text.lower()
-        if re.search(r"[0-9a-z]", term_lower):
-            pattern = re.compile(r"(?<![0-9a-z]){}(?![0-9a-z])".format(re.escape(term_lower)))
-            return bool(pattern.search(src_lower))
+        if cls._ALNUM_LOWER_RE.search(term_lower):
+            return bool(re.search(r"(?<![0-9a-z]){}(?![0-9a-z])".format(re.escape(term_lower)), src_lower))
         return term_lower in src_lower
 
     def _is_sentence_like_term(self, term: str) -> bool:
@@ -443,8 +444,8 @@ class RAGSearcher:
             return candidate
         return None
 
-    @staticmethod
-    def _parse_string_array_response(response: str) -> list[str]:
+    @classmethod
+    def _parse_string_array_response(cls, response: str) -> list[str]:
         if not isinstance(response, str):
             return []
         response = response.strip()
@@ -462,7 +463,7 @@ class RAGSearcher:
                 if isinstance(value, list):
                     return [x for x in value if isinstance(x, str)]
 
-        array_match = re.search(r"\[[\s\S]*?\]", response)
+        array_match = cls._JSON_ARRAY_RE.search(response)
         if array_match:
             try:
                 data = json.loads(array_match.group(0))

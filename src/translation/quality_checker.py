@@ -27,6 +27,8 @@ class QualityChecker:
 
     _CJK_CHAR_RE = re.compile(r'[\u4e00-\u9fff]')
     _ALPHA_RE = re.compile(r'[a-zA-Z]')
+    _XML_TAG_RE = re.compile(r'<[^>]+>')
+    _PLACEHOLDER_RE = re.compile(r'%\w+|\{\d+\}')
 
     def __init__(self):
         self._text_analyzer = TextAnalyzer()
@@ -125,8 +127,7 @@ class QualityChecker:
             if term.lower() in (expected_tl or "").lower():
                 continue
             # Check if the English term still appears verbatim in translation
-            pattern = re.compile(r'(?<![a-zA-Z])' + re.escape(term) + r'(?![a-zA-Z])', re.IGNORECASE)
-            if pattern.search(translation):
+            if re.search(r'(?<![a-zA-Z])' + re.escape(term) + r'(?![a-zA-Z])', translation, re.IGNORECASE):
                 untranslated.append(term)
 
         if untranslated:
@@ -145,8 +146,8 @@ class QualityChecker:
         issues = []
 
         # Check XML tags
-        source_tags = set(re.findall(r'<[^>]+>', source))
-        translation_tags = set(re.findall(r'<[^>]+>', translation))
+        source_tags = set(self._XML_TAG_RE.findall(source))
+        translation_tags = set(self._XML_TAG_RE.findall(translation))
         missing_tags = source_tags - translation_tags
         if missing_tags:
             issues.append(QualityIssue(
@@ -157,8 +158,8 @@ class QualityChecker:
             ))
 
         # Check placeholders (%s, %d, {0}, etc.)
-        source_placeholders = re.findall(r'%\w+|\{\d+\}', source)
-        translation_placeholders = re.findall(r'%\w+|\{\d+\}', translation)
+        source_placeholders = self._PLACEHOLDER_RE.findall(source)
+        translation_placeholders = self._PLACEHOLDER_RE.findall(translation)
         if sorted(source_placeholders) != sorted(translation_placeholders):
             missing = set(source_placeholders) - set(translation_placeholders)
             if missing:

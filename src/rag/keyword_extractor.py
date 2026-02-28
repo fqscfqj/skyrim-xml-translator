@@ -18,6 +18,7 @@ class KeywordExtractor:
     _WHITESPACE_RE = re.compile(r"\s+")
     _WORD_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9'\-]*")
     _STRIP_PUNCT_RE = re.compile(r"^[^\w\u4e00-\u9fff]+|[^\w\u4e00-\u9fff]+$")
+    _JSON_ARRAY_RE = re.compile(r"\[[\s\S]*?\]")
     _KW_CACHE_VERSION = "kw_v9"
     _LOW_SIGNAL_SINGLE_TOKENS = frozenset({
         "honestly", "kinda", "kindof", "sorta", "sortof",
@@ -375,7 +376,7 @@ class KeywordExtractor:
                 if isinstance(value, list):
                     return value
 
-        array_match = re.search(r"\[[\s\S]*?\]", response)
+        array_match = self._JSON_ARRAY_RE.search(response)
         if array_match:
             try:
                 return json.loads(array_match.group(0))
