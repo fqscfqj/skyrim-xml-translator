@@ -2,18 +2,24 @@ import sys
 import os
 import threading
 import shutil
+import datetime
+import re
 from typing import Optional, cast
 import csv
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-                             QLabel, QLineEdit, QPushButton, QTextEdit, 
+                             QLabel, QLineEdit, QPushButton, QTextEdit, QPlainTextEdit,
                              QTabWidget, QFileDialog, QCheckBox, QProgressBar, 
                              QListWidget, QMessageBox, QGroupBox, QFormLayout, QSpinBox,
                              QTableWidget, QTableWidgetItem, QHeaderView, QSplitter, QDoubleSpinBox,
                              QComboBox, QAbstractSpinBox, QScrollArea, QDialog, QTreeWidget, QTreeWidgetItem,
                              QAbstractItemView)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QWheelEvent, QGuiApplication, QCloseEvent, QColor
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt6.QtGui import (
+    QDragEnterEvent, QDropEvent, QIcon, QWheelEvent, QGuiApplication, QCloseEvent,
+    QColor, QSyntaxHighlighter, QTextCharFormat, QFont,
+)
 
 from src.config_manager import ConfigManager
 from src.llm_client import LLMClient
@@ -355,6 +361,77 @@ class NoWheelComboBox(QComboBox):
             # If we cannot determine state, ignore wheel to be safe
             pass
         cast(QWheelEvent, e).ignore()
+
+
+class LogHighlighter(QSyntaxHighlighter):
+    STATE_NONE = 0
+    STATE_DEBUG = 1
+    STATE_INFO = 2
+    STATE_WARNING = 3
+    STATE_ERROR = 4
+
+    _LOG_PREFIX_RE = re.compile(
+        r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]\s+\[(DEBUG|INFO|WARNING|ERROR)\]"
+    )
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self._timestamp_format = QTextCharFormat()
+        self._timestamp_format.setForeground(QColor("#7f8c8d"))
+
+        self._level_formats: dict[str, QTextCharFormat] = {}
+        self._level_formats["DEBUG"] = self._build_level_format("#7f8c8d", bold=False)
+        self._level_formats["INFO"] = self._build_level_format("#1f9d8b", bold=False)
+        self._level_formats["WARNING"] = self._build_level_format("#d17b0f", bold=False)
+        self._level_formats["ERROR"] = self._build_level_format("#c0392b", bold=True)
+
+        self._error_continuation_format = QTextCharFormat()
+        self._error_continuation_format.setForeground(QColor("#c0392b"))
+
+    @staticmethod
+    def _build_level_format(color: str, bold: bool) -> QTextCharFormat:
+        fmt = QTextCharFormat()
+        fmt.setForeground(QColor(color))
+        if bold:
+            fmt.setFontWeight(QFont.Weight.Bold)
+        return fmt
+
+    @classmethod
+    def _state_for_level(cls, level: str) -> int:
+        normalized = str(level).upper()
+        if normalized == "DEBUG":
+            return cls.STATE_DEBUG
+        if normalized == "INFO":
+            return cls.STATE_INFO
+        if normalized == "WARNING":
+            return cls.STATE_WARNING
+        if normalized == "ERROR":
+            return cls.STATE_ERROR
+        return cls.STATE_NONE
+
+    def highlightBlock(self, text: str) -> None:
+        self.setCurrentBlockState(self.STATE_NONE)
+
+        match = self._LOG_PREFIX_RE.match(text or "")
+        if match:
+            ts_end = text.find("]")
+            if ts_end >= 0:
+                self.setFormat(0, ts_end + 1, self._timestamp_format)
+
+            level_start = text.find("[", ts_end + 1)
+            level_end = text.find("]", level_start + 1) if level_start >= 0 else -1
+            level = match.group(2).upper()
+            level_fmt = self._level_formats.get(level)
+            if level_start >= 0 and level_end > level_start and level_fmt is not None:
+                self.setFormat(level_start, level_end - level_start + 1, level_fmt)
+            self.setCurrentBlockState(self._state_for_level(level))
+            return
+
+        # Traceback continuation lines should inherit ERROR color.
+        if self.previousBlockState() == self.STATE_ERROR:
+            if text:
+                self.setFormat(0, len(text), self._error_continuation_format)
+            self.setCurrentBlockState(self.STATE_ERROR)
 
 
 class RAGVisualizationDialog(QDialog):
@@ -822,6 +899,10 @@ class MainWindow(QMainWindow):
     ROW_STATUS_UNTRANSLATED = "untranslated"
     ROW_STATUS_SUCCESS = "success"
     ROW_STATUS_FAILED = "failed"
+    LOG_MAX_BLOCKS = 1000
+    LOG_FLUSH_INTERVAL_MS = 50
+    LOG_FLUSH_BATCH_SIZE = 200
+    LOG_QUEUE_MAX_LINES = 5000
 
     def __init__(self):
         super().__init__()
@@ -837,6 +918,13 @@ class MainWindow(QMainWindow):
         icon_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'assets', 'logo.png')
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
+
+        self._log_queue: deque[str] = deque()
+        self._log_dropped_count = 0
+        self._log_highlighter: Optional[LogHighlighter] = None
+        self._log_flush_timer = QTimer(self)
+        self._log_flush_timer.setInterval(self.LOG_FLUSH_INTERVAL_MS)
+        self._log_flush_timer.timeout.connect(self._flush_log_buffer)
 
         self.llm_client = LLMClient(self.config_manager, log_callback=self.log)
         self.rag_engine = RAGEngine(self.config_manager, self.llm_client)
@@ -890,6 +978,13 @@ class MainWindow(QMainWindow):
                 self.glossary_worker.terminate()
                 self.glossary_worker.wait(2000)
 
+        try:
+            self._flush_log_buffer()
+            if self._log_flush_timer.isActive():
+                self._log_flush_timer.stop()
+        except Exception:
+            pass
+
         if a0 is not None:
             a0.accept()
 
@@ -939,8 +1034,16 @@ class MainWindow(QMainWindow):
         log_group = QGroupBox(i18n.t("group_log"))
         log_group.setMinimumHeight(100)  # Ensure log area can be resized smaller
         log_layout = QVBoxLayout()
-        self.log_output = QTextEdit()
+        self.log_output = QPlainTextEdit()
         self.log_output.setReadOnly(True)
+        self.log_output.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.log_output.setMaximumBlockCount(self.LOG_MAX_BLOCKS)
+        log_font = QFont("Consolas")
+        log_font.setStyleHint(QFont.StyleHint.Monospace)
+        log_font.setFixedPitch(True)
+        log_font.setPointSize(10)
+        self.log_output.setFont(log_font)
+        self._log_highlighter = LogHighlighter(self.log_output.document())
         log_layout.addWidget(self.log_output)
         log_group.setLayout(log_layout)
         splitter.addWidget(log_group)
@@ -953,6 +1056,7 @@ class MainWindow(QMainWindow):
         splitter.setHandleWidth(5)  # Make handle easier to grab
 
         main_layout.addWidget(splitter)
+        self._flush_log_buffer()
 
     def create_translate_tab(self):
         widget = QWidget()
@@ -1796,25 +1900,77 @@ class MainWindow(QMainWindow):
             self.file_path_input.setText(fname)
             self.load_xml_to_table()
 
-    def log(self, message):
-        # Keep compatibility: if someone forgot to format, we still append a timestamped INFO message
-        if message.startswith('['):
-            # A formatted message coming from logger
-            self.log_output.append(message)
+    def _format_compat_log_line(self, message: str) -> str:
+        text = str(message)
+        if text.startswith('['):
+            return text
+        ts = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        return f"[{ts}] [INFO] {text}"
+
+    def _enqueue_log_line(self, line: str) -> None:
+        self._log_queue.append(str(line))
+        while len(self._log_queue) > self.LOG_QUEUE_MAX_LINES:
+            self._log_queue.popleft()
+            self._log_dropped_count += 1
+
+    def _enqueue_log_text(self, text: str) -> None:
+        lines = str(text).splitlines()
+        if not lines:
+            lines = [""]
+        for line in lines:
+            self._enqueue_log_line(line)
+
+    def _is_scrolled_to_bottom(self) -> bool:
+        if not hasattr(self, "log_output") or self.log_output is None:
+            return False
+        scrollbar = self.log_output.verticalScrollBar()
+        return scrollbar.value() >= (scrollbar.maximum() - 2)
+
+    def _flush_log_buffer(self) -> None:
+        if not hasattr(self, "log_output") or self.log_output is None:
+            return
+
+        if not self._log_queue and self._log_dropped_count <= 0:
+            if self._log_flush_timer.isActive():
+                self._log_flush_timer.stop()
+            return
+
+        lines_to_append: list[str] = []
+        if self._log_dropped_count > 0:
+            dropped = self._log_dropped_count
+            self._log_dropped_count = 0
+            ts = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            lines_to_append.append(
+                f"[{ts}] [WARNING] GUI log buffer overflow: dropped {dropped} line(s)"
+            )
+
+        while self._log_queue and len(lines_to_append) < self.LOG_FLUSH_BATCH_SIZE:
+            lines_to_append.append(self._log_queue.popleft())
+
+        if not lines_to_append:
+            if self._log_flush_timer.isActive() and not self._log_queue:
+                self._log_flush_timer.stop()
+            return
+
+        scrollbar = self.log_output.verticalScrollBar()
+        keep_following = self._is_scrolled_to_bottom()
+        previous_value = scrollbar.value()
+
+        self.log_output.appendPlainText("\n".join(lines_to_append))
+
+        if keep_following:
+            scrollbar.setValue(scrollbar.maximum())
         else:
-            formatted = f"[{__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [INFO] {message}"
-            self.log_output.append(formatted)
-        
-        # Limit log size to prevent memory issues - reduced to 200 lines
-        max_lines = 200
-        doc = self.log_output.document()
-        if doc is not None and doc.blockCount() > max_lines:
-            cursor = self.log_output.textCursor()
-            cursor.movePosition(cursor.MoveOperation.Start)
-            cursor.movePosition(cursor.MoveOperation.Down, cursor.MoveMode.KeepAnchor, doc.blockCount() - max_lines)
-            cursor.removeSelectedText()
-            cursor.movePosition(cursor.MoveOperation.End)
-            self.log_output.setTextCursor(cursor)
+            scrollbar.setValue(previous_value)
+
+        if not self._log_queue and self._log_dropped_count <= 0 and self._log_flush_timer.isActive():
+            self._log_flush_timer.stop()
+
+    def log(self, message):
+        formatted = self._format_compat_log_line(str(message))
+        self._enqueue_log_text(formatted)
+        if not self._log_flush_timer.isActive():
+            self._log_flush_timer.start()
 
     def start_translation(self):
         # Ensure file is loaded
