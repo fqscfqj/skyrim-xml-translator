@@ -2,131 +2,113 @@
 
 ## 简介
 
-一个面向 Skyrim 模组 XML 文本的翻译与术语管理工具，结合 GUI 与 RAG（检索增强生成）流程，旨在通过向量检索和术语库确保专有名词和术语的一致性与可控性，加快本地化工作流。
+这是一个面向 Skyrim 模组文本的本地化工具，提供 PyQt6 图形界面、OpenAI 兼容 LLM 翻译、术语库检索和 XML/MCM 文件处理能力。
 
-这是一个基于 PyQt6 和 LLM (大语言模型) 的 Skyrim XML 文件翻译工具。它利用 RAG (检索增强生成) 技术来确保术语的一致性，特别适合用于翻译 Skyrim 模组的 XML 文本文件。
-这是一个基于 PyQt6 和 LLM (大语言模型) 的 Skyrim XML 文件翻译工具。它利用 RAG (检索增强生成) 技术来确保术语的一致性，特别适合用于翻译 Skyrim 模组的 XML 文本文件。
+当前版本的 RAG 流程以关键词拆解、向量召回和关键词加权为主，召回强度主要由以下参数控制：
+
+- `rag.short_term_max_results`
+- `rag.long_term_max_results`
+- `rag.short_term_max_chars`
+- `rag.min_vector_score`
+
 ## 功能特点
 
-* **图形用户界面 (GUI)**: 直观的 PyQt6 界面，方便操作。
-* **智能翻译**: 集成 OpenAI 兼容的 LLM API 进行高质量翻译。
-* **RAG 术语库支持**:
-  * 使用向量嵌入 (Embeddings) 检索相关术语，确保专有名词翻译一致。
-  * 支持导入 CSV 格式的术语表。
-  * 支持手动添加、删除和搜索术语。
-  * 支持重建向量索引。
-* **XML 文件处理**: 专门针对 Skyrim 模组的 XML 格式进行解析和保存。
-* **多线程处理**: 支持多线程翻译和向量化，提高处理速度。
-* **高度可配置**:
-  * 自定义 LLM 模型参数 (Temperature, Top-p 等)。
-  * 自定义 Embedding 模型参数。
-  * 支持 "Default" 和 "NSFW" 等不同的提示词风格。
-  * 可调整并发线程数。
-   * 可按短/长词典分别设置单次召回上限（`rag.short_term_max_results`、`rag.long_term_max_results`）。
+- 图形用户界面：提供翻译任务、术语管理、配置管理和 RAG 调试可视化。
+- 智能翻译：接入 OpenAI 兼容接口，支持主翻译模型、搜索模型和后备搜索模型。
+- RAG 术语库：支持 CSV 导入、手动维护术语、向量索引重建和术语一致性检索。
+- 文件处理：支持 Skyrim XML 文件和 MCM 文本文件。
+- 多线程：翻译和向量化均支持并发执行。
+- 可配置：支持模型参数、Embedding 参数、提示词风格、语言选项和缓存设置。
 
 ## 安装
-## Recent Fixes
-- Fixed: LLM optional parameters could be enabled but became unchangeable in the UI on some platforms; the checkbox now uses the boolean `toggled` signal to enable and disable the related parameter controls reliably (see `src/gui_main.py`).
-- Updated: RAG advanced flow is flattened to per-keyword vector retrieval + optional keyword weighting, then constrained by `rag.short_term_max_results` and `rag.long_term_max_results`.
-- Updated: Short/long bucket split now uses pure character length via `rag.short_term_max_chars` (default `32`).
-- Updated: AI candidate selection path is currently disabled at runtime (kept in config/UI for forward compatibility) and will be replaced by reranker.
 
-1.  确保已安装 Python 3.8 或更高版本。
-2.  克隆或下载本项目。
-3.  安装依赖库：
+1. 安装 Python 3.8 或更高版本。
+2. 安装依赖：
 
 ```bash
 pip install -r requirements.txt
 ```
 
-依赖列表:
-* PyQt6
-* openai
-* lxml
-* numpy
-* scikit-learn
+主要依赖：
+
+- `PyQt6`
+- `openai`
+- `lxml`
+- `numpy`
+- `scikit-learn`
+- `pyinstaller`
 
 ## 使用说明
 
-1. **启动程序**:
-   运行 `main.py` 启动应用程序：
+启动程序：
 
-   ```bash
-   python main.py
-   ```
-## 注意事项
+```bash
+python main.py
+```
 
-* 默认安装包不包含向量索引文件；需要时用户可放到可执行文件同目录或在软件内重建索引。
+基本流程：
 
-2. **配置设置**:
-   * 进入 "设置" 标签页。
-   * 配置 **LLM 设置** (Base URL, API Key, Model Name)。
-   * 配置 **Embedding 设置** (用于 RAG 功能)。
-   * 根据需要调整线程数和其他参数。
-   * 点击 "保存配置"。
+1. 在“设置”页填写 LLM、搜索模型和 Embedding 配置并保存。
+2. 在“术语管理”页导入或维护术语，必要时重建索引。
+3. 在“翻译任务”页加载 XML 或 MCM 文件，执行整页或选中翻译。
+4. 翻译完成后保存或另存为输出文件。
 
-3. **术语管理 (可选但推荐)**:
-   * 进入 "术语管理" 标签页。
-   * 可以导入现有的术语表 (CSV 格式) 或手动添加术语。
-   * 点击 "重建/更新向量索引" 以确保 RAG 引擎生效。
+## 仓库结构
 
-4. **开始翻译**:
-   * 进入 "翻译任务" 标签页。
-   * 点击 "浏览" 选择要翻译的 XML 文件。
-   * 文件加载后，点击 "翻译全部" 或选中特定行点击 "翻译选中"。
-   * 翻译完成后，点击 "保存文件" 或 "另存为" 保存结果。
+- `main.py`：桌面程序入口。
+- `src/gui_main.py`：主界面和交互逻辑。
+- `src/config/manager.py`、`src/config/schema.py`：配置加载、迁移和 schema。
+- `src/llm/client.py`、`src/llm/retry.py`、`src/llm/cost_tracker.py`：LLM 客户端、重试和计费统计。
+- `src/rag/engine.py`、`src/rag/search.py`、`src/rag/vector_store.py`、`src/rag/keyword_extractor.py`、`src/rag/glossary_manager.py`：RAG 流程与索引管理。
+- `src/translation/translator.py` 及同目录辅助模块：翻译主流程、提示词构建、响应解析和质量检查。
+- `src/xml_processor.py`：XML 读写。
+- `src/mcm_processor.py`：MCM 文本读写。
+- `src/prompt/prompt_manager.py`：提示词模板加载。
+- `prompts/`：可编辑的提示词模板。
+- `locales/`：界面文案本地化。
+- `assets/`：图标和图片资源。
 
-## 文件结构
+运行期默认使用以下文件路径：
 
-* `main.py`: 程序入口点。
-* `src/`: 源代码目录。
-  * `gui_main.py`: 主界面逻辑。
-  * `llm_client.py`: LLM API 客户端。
-  * `rag_engine.py`: RAG 引擎和向量检索逻辑。
-  * `xml_processor.py`: XML 文件解析与处理。
-  * `translator.py`: 翻译核心逻辑。
-  * `config_manager.py`: 配置管理。
-* `config.json`: 配置文件 (自动生成)。
-* `glossary/glossary.json`: 术语库存储文件。
-* `glossary/vector_index.npy` & `glossary/terms_index.json`: 向量索引文件。
-* `prompts/`: 翻译提示词模板（可手动编辑；不区分语言，默认提供英文提示词）。
-   * `prompts/translator.system_prompts.json`: System prompt（可自行增加/删除风格条目）。
-   * `prompts/translator.templates.json`: 术语注入与 user 模板。
-   * `prompts/translator.retry.json`: 重试提示词。
+- `config.json`：用户配置文件，首次运行时自动生成。
+- `glossary/glossary.json`：术语表。
+- `glossary/vector_index.npy` 和 `glossary/terms_index.json`：向量索引。
+- `cache/`：翻译缓存和向量缓存。
 
 ## 打包为 Windows 可执行文件
 
-本项目使用 `PyInstaller` 打包为 Windows 可执行文件。仓库已包含用于打包的脚本:
+当前受支持的构建入口是 `build_exe.py`，`build_windows.ps1` 只是 Windows 下的辅助包装脚本。
 
-- `build_exe.py`: PyInstaller 构建脚本，会自动包含 `locales`、`config.json` 或 `config.example.json`、`glossary/`（含词典与索引文件）和 `logs`（若存在）。
-- `prompts` 目录也会被一并打包，用于自定义翻译提示词模板。
-- `build_windows.ps1`: Windows 下的构建辅助脚本（创建虚拟环境并安装依赖后运行 `build_exe.py`）。
+`build_exe.py` 会在存在时包含以下资源：
 
-快速打包步骤（PowerShell）:
+- `locales/`
+- `prompts/`
+- `config.json` 或 `config.example.json`
+- `assets/`
+
+默认不会把运行期生成的术语索引、缓存或日志目录打进包内；这些内容应由用户在运行后生成或放置。
+
+快速打包：
 
 ```powershell
-# 1. 在项目根目录运行（可选将 OneFile=:$false 改为目录模式）：
 ./build_windows.ps1 -OneFile:$true -Windowed:$true
-
-# 2. 打包完成后，在 dist 目录下找到 `SkyrimXMLTranslator.exe`（或同名文件夹，取决于 onefile/onedir 选项）。
 ```
 
-常见问题:
-
-- 如果 UI 无法正常加载，尝试使用 `--console` 打开控制台以查看错误信息：
+或直接运行：
 
 ```powershell
-python build_exe.py --onefile --console
+python build_exe.py --onedir --console
 ```
 
-- 如果需要自定义应用图标，可准备 `.ico` 文件并通过 `--icon=path\to\app.ico` 参数传递给 `build_exe.py` 或 `build_windows.ps1` 的 `-IconPath` 参数。
+## 日志说明
 
-- 注意：在通过 PyInstaller 打包后的 exe 版本中，程序不会将日志写入本地文件（不再生成 `logs/app.log`），日志仅在 GUI 中显示；若需要查看运行期日志，请使用 `--console` 参数以打开控制台输出或在开发模式下运行脚本以保留文件日志。
-
-提示：使用 `--onefile` 时可执行文件体积可能较大（包含所有依赖与资源），这是 PyInstaller 单文件打包的正常现象。
-
+- 应用会尝试把常规日志写入 `general.log_file` 指定路径，默认是 `logs/app.log`。
+- 当默认路径不可写时，会回退到用户目录或临时目录下的应用日志位置。
+- 崩溃日志会单独写入 `crash.log`，也会采用同样的回退策略。
+- 使用 `--console` 打包或直接以脚本方式运行时，更容易观察启动期错误。
 
 ## 注意事项
 
-* 首次使用前请务必配置正确的 API Key 和 Base URL。
-* RAG 功能依赖于 Embedding 模型，请确保 Embedding 服务可用。
+- 首次使用前请确认 API Key、Base URL 和模型名称配置正确。
+- RAG 功能依赖 Embedding 服务；若向量索引不存在，可在软件内重建。
+- `prompts/` 下的 JSON 模板是可编辑资源，修改后会在运行期自动重载。

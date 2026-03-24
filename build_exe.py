@@ -14,7 +14,6 @@ def collect_data_files():
         ('prompts', 'prompts'),
         ('config.json', '.'),
         ('config.example.json', '.'),
-        ('data', 'data'),
         ('assets', 'assets'),
     ]
     add_data = []
@@ -25,12 +24,12 @@ def collect_data_files():
 
 
 def copy_runtime_folders_to_dist(dist_root: str):
-    """Copy runtime folders (locales/prompts/data) next to the executable.
+    """Copy runtime folders (locales/prompts) next to the executable.
 
     PyInstaller may place bundled datas under the internal extraction directory.
     This ensures the end-user can edit/override JSON files directly in dist.
     """
-    folders = ['locales', 'prompts', 'data']
+    folders = ['locales', 'prompts']
     for folder in folders:
         src = os.path.abspath(folder)
         if not os.path.isdir(src):
@@ -102,7 +101,7 @@ def parse_args():
     p.add_argument('--incremental', action='store_true',
                    help='Faster iterative build: skip output cleanup and PyInstaller --clean')
     p.add_argument('--skip-runtime-copy', action='store_true',
-                   help='Skip copying locales/prompts/data folders next to dist artifacts')
+                   help='Skip copying locales/prompts folders next to dist artifacts')
     p.add_argument('--name', default='SkyrimXMLTranslator')
     p.add_argument('--icon', default='assets/logo.ico', help='Path to .ico file to use as application icon')
     return p.parse_args()

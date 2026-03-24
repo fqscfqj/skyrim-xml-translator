@@ -1,7 +1,7 @@
-"""Typed configuration schema with validation for trx2."""
+"""Typed configuration schema for Skyrim XML Translator."""
 
 from dataclasses import dataclass, field, fields, asdict
-from typing import Any, Optional
+from typing import Any
 
 
 @dataclass
@@ -42,10 +42,7 @@ class RAGConfig:
     keyword_max_queries: int = 8
     keyword_task_decompose_enabled: bool = True
     keyword_task_keep_original: bool = False
-    ai_candidate_selection_enabled: bool = True
-    ai_candidate_pool_size: int = 12
-    ai_candidate_context_chars: int = 320
-    ai_candidate_min_vector_score: float = 0.45
+    min_vector_score: float = 0.45
     keyword_weight_enabled: bool = True
     keyword_weight_candidate_pool_size: int = 24
     keyword_weight_keep_k: int = 24

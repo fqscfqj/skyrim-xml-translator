@@ -9,7 +9,7 @@ from typing import Optional
 from PyQt6.QtWidgets import QApplication, QMessageBox
 from src.gui_main import MainWindow
 from src.logging_helper import emit as log_emit
-from src.config_manager import ConfigManager
+from src.config.manager import ConfigManager
 
 
 _FAULT_LOG_STREAM: Optional[object] = None

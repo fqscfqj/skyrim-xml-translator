@@ -24,6 +24,10 @@ class ConfigManager:
         ("rag", "keyword_task_min_token_len"),
         ("rag", "keyword_task_max_tokens"),
         ("rag", "keyword_task_token_budget"),
+        ("rag", "ai_candidate_selection_enabled"),
+        ("rag", "ai_candidate_pool_size"),
+        ("rag", "ai_candidate_context_chars"),
+        ("rag", "ai_candidate_min_vector_score"),
         ("rag", "ai_candidate_max_select"),
         ("rag", "ai_candidate_max_tokens"),
         ("rag", "keyword_weight_token_budget"),
@@ -35,9 +39,10 @@ class ConfigManager:
     def __init__(self, config_path: str = "config.json"):
         self.config_path = config_path
         self.config: dict = self._load_config()
+        migrated_changed = self._migrate_legacy_keys()
         defaults_changed = self._ensure_defaults()
         deprecated_changed = self._cleanup_deprecated_keys()
-        if defaults_changed or deprecated_changed:
+        if migrated_changed or defaults_changed or deprecated_changed:
             self.save_config()
 
     def _load_config(self) -> dict:
@@ -53,6 +58,26 @@ class ConfigManager:
 
     def _get_default_config(self) -> dict:
         return dataclass_to_dict(AppConfig())
+
+    def _migrate_legacy_keys(self) -> bool:
+        changed = False
+        migrated: list[str] = []
+        rag_section = self.config.get("rag")
+        if isinstance(rag_section, dict):
+            if "ai_candidate_min_vector_score" in rag_section and "min_vector_score" not in rag_section:
+                rag_section["min_vector_score"] = rag_section["ai_candidate_min_vector_score"]
+                changed = True
+                migrated.append("rag.ai_candidate_min_vector_score -> rag.min_vector_score")
+        if migrated:
+            log_emit(
+                None,
+                self,
+                "INFO",
+                f"Migrated legacy config keys: {', '.join(migrated)}",
+                module="config_manager",
+                func="_migrate_legacy_keys",
+            )
+        return changed
 
     def _ensure_defaults(self) -> bool:
         defaults = self._get_default_config()

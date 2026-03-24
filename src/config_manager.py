@@ -1,4 +1,0 @@
-"""Backward-compatible shim. Import from src.config.manager instead."""
-from src.config.manager import ConfigManager
-
-__all__ = ["ConfigManager"]

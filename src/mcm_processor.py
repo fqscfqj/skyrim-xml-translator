@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from src.config_manager import ConfigManager
+from src.config.manager import ConfigManager
 from src.logging_helper import emit as log_emit
 
 

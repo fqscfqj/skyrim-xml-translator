@@ -5,9 +5,11 @@ The app loads a single prompt set (English by default), and users can edit
 the templates to any language they prefer.
 
 Supported layouts:
-- Category-based (preferred): prompts/<category>/**/*.json
+- Root-level category files (current default): prompts/<category>.<name>.json
+  Each JSON file is merged into the prompt tree under that category.
+  Example: prompts/translator.system_prompts.json -> prompts["translator"].
+- Nested category files (also supported): prompts/<category>/**/*.json
   Each JSON file is merged into the prompt tree at its directory path.
-  Example: prompts/translator/system_prompts.json -> prompts["translator"].
 - Legacy fallback: prompts/en.json (only used if no category files found)
 
 This is intentionally lightweight so end users can edit prompt JSON files.

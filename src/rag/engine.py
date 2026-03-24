@@ -1,7 +1,6 @@
 """RAG Engine facade - backward-compatible API delegating to sub-modules."""
 
 import os
-from typing import Optional, Callable
 
 from src.logging_helper import emit as log_emit
 from .glossary_manager import GlossaryManager
@@ -35,7 +34,6 @@ class RAGEngine:
         self._vector_store = VectorStore(vector_path, terms_path, embed_dim, config_manager)
 
         # Caches
-        cache_config = self.config.get("cache", "cache_persist_dir", "cache")
         kw_cache_size = self.config.get("cache", "translation_cache_size", 50000)
         embed_cache_size = self.config.get("cache", "embedding_cache_size", 100000)
 
@@ -189,32 +187,6 @@ class RAGEngine:
             return_debug=return_debug,
             log_callback=log_callback,
         )
-
-    def match_terms_regex(self, text, log_callback=None, max_matches_per_term=5):
-        """[Deprecated] Returns empty dict."""
-        return {}
-
-    def _normalize_term_key(self, text):
-        return self._glossary_mgr.normalize_term_key(text)
-
-    def _rebuild_glossary_lookup(self):
-        self._glossary_mgr.rebuild_lookup()
-
-    def _is_signal_token(self, token_norm):
-        return self._glossary_mgr.is_signal_token(token_norm)
-
-    def _extract_titlecase_phrases(self, text):
-        return self._keyword_extractor.extract_titlecase_phrases(text)
-
-    def _keyword_appears_in_text(self, keyword, source_text):
-        return KeywordExtractor._keyword_appears_in_text(keyword, source_text)
-
-    def _normalize_for_source_match(self, text):
-        return KeywordExtractor._normalize_for_source_match(text)
-
-    def _estimate_tokens(self, text):
-        from src.llm.cost_tracker import estimate_tokens
-        return estimate_tokens(text)
 
     def _sync_stop_flags(self):
         """Sync facade flags to vector store."""

@@ -10,7 +10,7 @@ except Exception:
 import os
 from typing import Optional, Any
 from src.logging_helper import emit as log_emit
-from src.config_manager import ConfigManager
+from src.config.manager import ConfigManager
 
 class XMLProcessor:
     def __init__(self):

@@ -1,6 +1,5 @@
 """RAG search orchestration with flattened, per-keyword recall flow."""
 
-import json
 import re
 from typing import Optional, Callable, Dict, List, Any
 
@@ -362,37 +361,6 @@ class RAGSearcher:
     # --- Matching helpers ---
 
     @staticmethod
-    def _build_query_context_window(source_text: Optional[str], query: str, max_chars: int) -> str:
-        """Trim source text to a focused window around query for lower token usage."""
-        if not source_text:
-            return ""
-        text = source_text.strip()
-        if not text:
-            return ""
-        if len(text) <= max_chars:
-            return text
-
-        query = (query or "").strip()
-        if not query:
-            return text[:max_chars].rstrip() + "..."
-
-        lower_text = text.lower()
-        lower_query = query.lower()
-        idx = lower_text.find(lower_query)
-        if idx < 0:
-            return text[:max_chars].rstrip() + "..."
-
-        half = max(20, max_chars // 2)
-        start = max(0, idx - half)
-        end = min(len(text), idx + len(query) + half)
-        snippet = text[start:end].strip()
-        if start > 0:
-            snippet = "..." + snippet
-        if end < len(text):
-            snippet = snippet + "..."
-        return snippet
-
-    @staticmethod
     def _raw_term_appears_in_source(term: str, source_text: Optional[str]) -> bool:
         if not term or not source_text:
             return False
@@ -443,147 +411,6 @@ class RAGSearcher:
             return candidate
         return None
 
-    @staticmethod
-    def _parse_string_array_response(response: str) -> list[str]:
-        if not isinstance(response, str):
-            return []
-        response = response.strip()
-        parsed = None
-        try:
-            parsed = json.loads(response)
-        except Exception:
-            parsed = None
-
-        if isinstance(parsed, list):
-            return [x for x in parsed if isinstance(x, str)]
-        if isinstance(parsed, dict):
-            for key in ("terms", "candidates", "matches", "selected"):
-                value = parsed.get(key)
-                if isinstance(value, list):
-                    return [x for x in value if isinstance(x, str)]
-
-        array_match = re.search(r"\[[\s\S]*?\]", response)
-        if array_match:
-            try:
-                data = json.loads(array_match.group(0))
-                if isinstance(data, list):
-                    return [x for x in data if isinstance(x, str)]
-            except Exception:
-                pass
-        return []
-
-    # Legacy AI selection path kept for future reranker replacement reference.
-    # It is intentionally not used by search() in the current flat recall flow.
-    def _ai_select_candidates_for_query(
-            self,
-            query: str,
-            source_text: Optional[str],
-            ranked_candidates: list[tuple[str, float]],
-            max_select: int,
-            log_callback: Optional[Callable]) -> list[str]:
-        """Use search LLM to pick final glossary terms from candidate pool."""
-        if not self._get_rag_bool("ai_candidate_selection_enabled", True):
-            return []
-        if not query or not source_text or not ranked_candidates:
-            return []
-
-        max_pool = self._get_rag_int("ai_candidate_pool_size", 12, min_value=2, max_value=40)
-        pool_terms: list[str] = []
-        seen: set[str] = set()
-        for term, _score in ranked_candidates:
-            if not isinstance(term, str):
-                continue
-            t = term.strip()
-            if not t or t.lower() in seen:
-                continue
-            if len(t) > 220:
-                continue
-            seen.add(t.lower())
-            pool_terms.append(t)
-            if len(pool_terms) >= max_pool:
-                break
-
-        if not pool_terms:
-            return []
-
-        numbered = "\n".join(f"{i+1}. {t}" for i, t in enumerate(pool_terms))
-        max_select = max(1, min(max_select, 50))
-        context_chars = self._get_rag_int("ai_candidate_context_chars", 320, min_value=120, max_value=2000)
-        source_snippet = self._build_query_context_window(source_text, query, context_chars)
-        prompt = (
-            "你在做术语候选筛选，用于翻译一致性。\n\n"
-            f"原文片段：\"{source_snippet}\"\n"
-            f"查询词：\"{query}\"\n\n"
-            "候选术语：\n"
-            f"{numbered}\n\n"
-            "任务：\n"
-            "最多选 {max_select} 个与该查询在此原文里真正相关的候选。\n"
-            "优先实体/名称拼写完全一致；拒绝形近但不同名（如 Wulfur != Wulf）。\n"
-            "若存在包含查询原拼写的候选，只能从这些候选中选择。\n"
-            "若候选与查询词不存在词形重合（同词、包含关系、常见屈折变化），必须返回 []。\n"
-            "语气词/感叹词默认不做术语映射；除非候选与原文拼写基本一致。\n"
-            "优先简短实体词条，不选整句任务/对白。\n"
-            "只返回 JSON 字符串数组，元素必须原样复制自候选列表；无匹配返回 []。"
-        ).replace("{max_select}", str(max_select))
-
-        try:
-            response = self.llm_client.chat_completion_search(
-                [{"role": "user", "content": prompt}],
-                temperature=0.0,
-                max_tokens=None,
-                log_callback=log_callback,
-                operation="candidate_select",
-            )
-            picked = self._parse_string_array_response(response)
-            if not picked:
-                return []
-            allowed = set(pool_terms)
-            result: list[str] = []
-            for term in picked:
-                if term in allowed and term not in result:
-                    result.append(term)
-                if len(result) >= max_select:
-                    break
-
-            if result:
-                try:
-                    log_emit(log_callback, self.config, "DEBUG",
-                             f"[RAG] AI selected {len(result)} candidate(s) for '{query}': {result}",
-                             module="rag_search", func="_ai_select_candidates_for_query")
-                except Exception:
-                    pass
-            return result
-        except Exception as e:
-            log_emit(log_callback, self.config, "WARNING",
-                     f"[RAG] AI candidate selection failed for '{query}': {e}",
-                     exc=e, module="rag_search", func="_ai_select_candidates_for_query")
-            return []
-
-    def _should_use_ai_selection(
-            self,
-            query: str,
-            source_text: Optional[str],
-            ranked_candidates: list[tuple[str, float]]) -> bool:
-        """Gate AI selection to ambiguous cases to reduce token usage."""
-        if not source_text or not ranked_candidates or len(ranked_candidates) <= 1:
-            return False
-
-        query_norm = self.glossary_manager.normalize_term_key(query)
-        top_term, top_score = ranked_candidates[0]
-        top_norm = self.glossary_manager.normalize_term_key(top_term)
-        second_score = ranked_candidates[1][1] if len(ranked_candidates) > 1 else 0.0
-
-        # Clear exact win -> skip AI.
-        if query_norm and top_norm == query_norm and (top_score - second_score) >= 0.10:
-            return False
-
-        # Strong direct match with enough margin -> skip AI.
-        if top_score >= 1.0 and (top_score - second_score) >= 0.12:
-            return False
-
-        # Otherwise this is likely ambiguous; let AI choose.
-        return True
-
     # --- Public API ---
 
     def search(self, keywords: list[str], source_text: Optional[str] = None,
@@ -623,14 +450,7 @@ class RAGSearcher:
                 return {}, []
             return {}
         short_term_max_chars = self._get_short_term_max_chars()
-        min_vector_score = self._get_rag_float("ai_candidate_min_vector_score", 0.45, 0.0, 1.0)
-
-        try:
-            log_emit(log_callback, self.config, "DEBUG",
-                     "[RAG] AI candidate selection path is disabled in current build; using flat ranked flow",
-                     module="rag_search", func="search")
-        except Exception:
-            pass
+        min_vector_score = self._get_rag_float("min_vector_score", 0.45, 0.0, 1.0)
 
         query_embeddings = self._batch_embed_keywords(keywords, log_callback)
 
@@ -647,9 +467,6 @@ class RAGSearcher:
                 "long_limit": long_limit,
                 "direct_match": None,
                 "vector_matches": [],
-                "ai_path_disabled": True,
-                "ai_selection_attempted": False,
-                "ai_selected": [],
                 "low_signal_skipped": skip_semantic_recall,
                 "selected_terms": query_selected_terms,
                 "selected_short_count": 0,

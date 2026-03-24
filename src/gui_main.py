@@ -21,12 +21,12 @@ from PyQt6.QtGui import (
     QColor, QSyntaxHighlighter, QTextCharFormat, QFont,
 )
 
-from src.config_manager import ConfigManager
-from src.llm_client import LLMClient
-from src.rag_engine import RAGEngine
+from src.config.manager import ConfigManager
+from src.llm.client import LLMClient
+from src.rag.engine import RAGEngine
 from src.xml_processor import XMLProcessor
 from src.mcm_processor import MCMProcessor
-from src.translator import Translator
+from src.translation.translator import Translator
 from src.logging_helper import emit as log_emit
 from src.i18n import i18n
 
@@ -621,7 +621,6 @@ class RAGVisualizationDialog(QDialog):
                                 "long_limit": query_result.get("long_limit"),
                                 "selected_short_count": query_result.get("selected_short_count"),
                                 "selected_long_count": query_result.get("selected_long_count"),
-                                "ai_path_disabled": query_result.get("ai_path_disabled"),
                             }
             if rag_tasks:
                 for keyword in rag_tasks:
@@ -639,8 +638,6 @@ class RAGVisualizationDialog(QDialog):
                     selected_long_count = limit_info.get("selected_long_count")
                     if isinstance(selected_short_count, int) and isinstance(selected_long_count, int):
                         suffix_parts.append(f"selected={selected_short_count}+{selected_long_count}")
-                    if bool(limit_info.get("ai_path_disabled")):
-                        suffix_parts.append("ai=off")
                     if suffix_parts:
                         label = f"{label} ({'; '.join(suffix_parts)})"
                     self._create_tree_item(keywords_item, label, full_text=str(keyword))
@@ -665,8 +662,6 @@ class RAGVisualizationDialog(QDialog):
                     selected_long_count = query_result.get("selected_long_count")
                     if isinstance(selected_short_count, int) and isinstance(selected_long_count, int):
                         query_meta_parts.append(f"selected={selected_short_count}+{selected_long_count}")
-                    if bool(query_result.get("ai_path_disabled")):
-                        query_meta_parts.append("ai=off")
                     query_label = f"Query: {query}"
                     if query_meta_parts:
                         query_label += f" ({'; '.join(query_meta_parts)})"
@@ -765,7 +760,6 @@ class RAGVisualizationDialog(QDialog):
                                 "long_limit": qr.get("long_limit"),
                                 "selected_short_count": qr.get("selected_short_count"),
                                 "selected_long_count": qr.get("selected_long_count"),
-                                "ai_path_disabled": qr.get("ai_path_disabled"),
                             }
             for task in rag_tasks:
                 label = str(task)
@@ -782,8 +776,6 @@ class RAGVisualizationDialog(QDialog):
                 selected_long_count = limit_info.get("selected_long_count")
                 if isinstance(selected_short_count, int) and isinstance(selected_long_count, int):
                     suffix_parts.append(f"selected={selected_short_count}+{selected_long_count}")
-                if bool(limit_info.get("ai_path_disabled")):
-                    suffix_parts.append("ai=off")
                 if suffix_parts:
                     lines.append(f"- {label} ({'; '.join(suffix_parts)})")
                 else:
@@ -809,8 +801,6 @@ class RAGVisualizationDialog(QDialog):
                 selected_long_count = qr.get("selected_long_count") if isinstance(qr, dict) else None
                 if isinstance(selected_short_count, int) and isinstance(selected_long_count, int):
                     meta_parts.append(f"selected={selected_short_count}+{selected_long_count}")
-                if isinstance(qr, dict) and bool(qr.get("ai_path_disabled")):
-                    meta_parts.append("ai=off")
                 if meta_parts:
                     lines.append(f"Query: {query} ({'; '.join(meta_parts)})")
                 else:
@@ -1646,43 +1636,12 @@ class MainWindow(QMainWindow):
         ))
         form_layout.addRow(self.rag_keyword_weight_enabled)
 
-        ai_disabled_note = QLabel(i18n.t(
-            "label_rag_ai_path_disabled_note",
-            "AI candidate path is disabled in this version and will be replaced by reranker."
-        ))
-        ai_disabled_note.setWordWrap(True)
-        form_layout.addRow(ai_disabled_note)
-
-        self.rag_ai_candidate_selection_enabled = QCheckBox(i18n.t(
-            "label_rag_ai_candidate_selection_enabled", "Enable AI candidate selection"
-        ))
-        self.rag_ai_candidate_selection_enabled.setChecked(bool(
-            self.config_manager.get("rag", "ai_candidate_selection_enabled", True)
-        ))
-        self.rag_ai_candidate_selection_enabled.setEnabled(False)
-        form_layout.addRow(self.rag_ai_candidate_selection_enabled)
-
-        self.rag_ai_candidate_pool_size = NoWheelSpinBox()
-        self.rag_ai_candidate_pool_size.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        self.rag_ai_candidate_pool_size.setRange(2, 128)
-        self.rag_ai_candidate_pool_size.setValue(self.config_manager.get("rag", "ai_candidate_pool_size", 12))
-        self.rag_ai_candidate_pool_size.setEnabled(False)
-        form_layout.addRow(i18n.t("label_rag_ai_candidate_pool_size", "AI candidate pool size:"), self.rag_ai_candidate_pool_size)
-
-        self.rag_ai_candidate_context_chars = NoWheelSpinBox()
-        self.rag_ai_candidate_context_chars.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        self.rag_ai_candidate_context_chars.setRange(64, 8000)
-        self.rag_ai_candidate_context_chars.setValue(self.config_manager.get("rag", "ai_candidate_context_chars", 320))
-        self.rag_ai_candidate_context_chars.setEnabled(False)
-        form_layout.addRow(i18n.t("label_rag_ai_candidate_context_chars", "AI candidate context chars:"), self.rag_ai_candidate_context_chars)
-
-        self.rag_ai_candidate_min_vector_score = NoWheelDoubleSpinBox()
-        self.rag_ai_candidate_min_vector_score.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        self.rag_ai_candidate_min_vector_score.setRange(0.0, 1.0)
-        self.rag_ai_candidate_min_vector_score.setSingleStep(0.01)
-        self.rag_ai_candidate_min_vector_score.setValue(self.config_manager.get("rag", "ai_candidate_min_vector_score", 0.45))
-        self.rag_ai_candidate_min_vector_score.setEnabled(False)
-        form_layout.addRow(i18n.t("label_rag_ai_candidate_min_vector_score", "AI candidate min vector score:"), self.rag_ai_candidate_min_vector_score)
+        self.rag_min_vector_score = NoWheelDoubleSpinBox()
+        self.rag_min_vector_score.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_min_vector_score.setRange(0.0, 1.0)
+        self.rag_min_vector_score.setSingleStep(0.01)
+        self.rag_min_vector_score.setValue(self.config_manager.get("rag", "min_vector_score", 0.45))
+        form_layout.addRow(i18n.t("label_rag_min_vector_score", "Minimum semantic recall score:"), self.rag_min_vector_score)
 
         self.rag_expert_toggle = QCheckBox(i18n.t(
             "label_rag_expert_params", "Show expert parameters"
@@ -2520,10 +2479,7 @@ class MainWindow(QMainWindow):
                 "keyword_max_queries": self.rag_keyword_max_queries.value(),
                 "keyword_task_decompose_enabled": bool(self.rag_keyword_task_decompose_enabled.isChecked()),
                 "keyword_task_keep_original": bool(self.rag_keyword_task_keep_original.isChecked()),
-                "ai_candidate_selection_enabled": bool(self.rag_ai_candidate_selection_enabled.isChecked()),
-                "ai_candidate_pool_size": self.rag_ai_candidate_pool_size.value(),
-                "ai_candidate_context_chars": self.rag_ai_candidate_context_chars.value(),
-                "ai_candidate_min_vector_score": self.rag_ai_candidate_min_vector_score.value(),
+                "min_vector_score": self.rag_min_vector_score.value(),
                 "keyword_weight_enabled": bool(self.rag_keyword_weight_enabled.isChecked()),
                 "keyword_weight_candidate_pool_size": self.rag_keyword_weight_candidate_pool_size.value(),
                 "keyword_weight_keep_k": self.rag_keyword_weight_keep_k.value(),
