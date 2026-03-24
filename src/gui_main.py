@@ -409,17 +409,18 @@ class LogHighlighter(QSyntaxHighlighter):
             return cls.STATE_ERROR
         return cls.STATE_NONE
 
-    def highlightBlock(self, text: str) -> None:
+    def highlightBlock(self, text: str | None) -> None:
         self.setCurrentBlockState(self.STATE_NONE)
 
-        match = self._LOG_PREFIX_RE.match(text or "")
+        safe_text = text or ""
+        match = self._LOG_PREFIX_RE.match(safe_text)
         if match:
-            ts_end = text.find("]")
+            ts_end = safe_text.find("]")
             if ts_end >= 0:
                 self.setFormat(0, ts_end + 1, self._timestamp_format)
 
-            level_start = text.find("[", ts_end + 1)
-            level_end = text.find("]", level_start + 1) if level_start >= 0 else -1
+            level_start = safe_text.find("[", ts_end + 1)
+            level_end = safe_text.find("]", level_start + 1) if level_start >= 0 else -1
             level = match.group(2).upper()
             level_fmt = self._level_formats.get(level)
             if level_start >= 0 and level_end > level_start and level_fmt is not None:
@@ -429,8 +430,8 @@ class LogHighlighter(QSyntaxHighlighter):
 
         # Traceback continuation lines should inherit ERROR color.
         if self.previousBlockState() == self.STATE_ERROR:
-            if text:
-                self.setFormat(0, len(text), self._error_continuation_format)
+            if safe_text:
+                self.setFormat(0, len(safe_text), self._error_continuation_format)
             self.setCurrentBlockState(self.STATE_ERROR)
 
 
@@ -1883,6 +1884,8 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "log_output") or self.log_output is None:
             return False
         scrollbar = self.log_output.verticalScrollBar()
+        if scrollbar is None:
+            return True
         return scrollbar.value() >= (scrollbar.maximum() - 2)
 
     def _flush_log_buffer(self) -> None:
@@ -1912,6 +1915,11 @@ class MainWindow(QMainWindow):
             return
 
         scrollbar = self.log_output.verticalScrollBar()
+        if scrollbar is None:
+            self.log_output.appendPlainText("\n".join(lines_to_append))
+            if not self._log_queue and self._log_dropped_count <= 0 and self._log_flush_timer.isActive():
+                self._log_flush_timer.stop()
+            return
         keep_following = self._is_scrolled_to_bottom()
         previous_value = scrollbar.value()
 
