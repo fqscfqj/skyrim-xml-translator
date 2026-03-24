@@ -5,14 +5,14 @@ import datetime
 import threading
 import tempfile
 import faulthandler
-from typing import Optional
+from typing import Optional, TextIO
 from PyQt6.QtWidgets import QApplication, QMessageBox
 from src.gui_main import MainWindow
 from src.logging_helper import emit as log_emit
 from src.config.manager import ConfigManager
 
 
-_FAULT_LOG_STREAM: Optional[object] = None
+_FAULT_LOG_STREAM: Optional[TextIO] = None
 
 
 def _resolve_configured_log_path(config_manager: Optional[ConfigManager]) -> Optional[str]:
