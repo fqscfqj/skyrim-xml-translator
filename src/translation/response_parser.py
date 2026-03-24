@@ -12,7 +12,7 @@ class ResponseParser:
     _MARKDOWN_CODE_RE = re.compile(r'```(?:json)?')
     _CJK_CHAR_RE = re.compile(r'[\u4e00-\u9fff]')
     _TRANSLATION_KV_RE = re.compile(
-        r"""["']?translation["']?\s*[:：]\s*["'](.+?)["']\s*[,}]?""",
+        r"""["']?translation["']?\s*[:：]\s*(?P<q>["'])(?P<value>.*?)(?P=q)\s*[,}]?""",
         flags=re.DOTALL | re.IGNORECASE,
     )
     _BARE_TRANSLATION_RE = re.compile(
@@ -106,7 +106,7 @@ class ResponseParser:
         # Match "translation": "value" or 'translation': 'value' pattern
         m = self._TRANSLATION_KV_RE.search(clean)
         if m:
-            result = m.group(1).strip()
+            result = m.group("value").strip()
             if result:
                 log_emit(log_callback, self.config, "DEBUG",
                          "Recovered translation via KV regex",
