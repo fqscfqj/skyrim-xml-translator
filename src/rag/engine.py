@@ -1,6 +1,7 @@
 """RAG Engine facade - backward-compatible API delegating to sub-modules."""
 
 import os
+import re
 
 from src.logging_helper import emit as log_emit
 from .glossary_manager import GlossaryManager
@@ -187,6 +188,52 @@ class RAGEngine:
             return_debug=return_debug,
             log_callback=log_callback,
         )
+
+    def quick_glossary_match(self, text: str, log_callback=None) -> dict[str, str]:
+        """Lightweight glossary lookup for short texts — no LLM, no vectors.
+
+        Uses regex-based proper noun extraction + direct/normalized glossary match.
+        Returns {term: translation}.
+        """
+        results: dict[str, str] = {}
+        candidates: list[str] = []
+
+        # 1) Try the whole text as a direct glossary key
+        normalized_full = self._glossary_mgr.normalize_term_key(text)
+        if normalized_full:
+            canonical = self._glossary_mgr.lookup_normalized(normalized_full)
+            if canonical and canonical in self._glossary_mgr.glossary:
+                results[canonical] = self._glossary_mgr.glossary[canonical]
+
+        # 2) Extract words/phrases via regex and try each
+        words = re.findall(r"[A-Za-z][A-Za-z0-9'\-]*(?:\s+[A-Za-z][A-Za-z0-9'\-]*)*", text)
+        for word in words:
+            word_stripped = word.strip()
+            if not word_stripped or len(word_stripped) < 2:
+                continue
+            candidates.append(word_stripped)
+
+        # 3) Also try individual words from multi-word candidates
+        individual_words = re.findall(r"\b[A-Z][a-z]{2,}\b", text)
+        for w in individual_words:
+            if w not in candidates:
+                candidates.append(w)
+
+        for candidate in candidates:
+            if candidate in self._glossary_mgr.glossary:
+                results[candidate] = self._glossary_mgr.glossary[candidate]
+                continue
+            norm = self._glossary_mgr.normalize_term_key(candidate)
+            if norm:
+                canonical = self._glossary_mgr.lookup_normalized(norm)
+                if canonical and canonical in self._glossary_mgr.glossary:
+                    results[canonical] = self._glossary_mgr.glossary[canonical]
+
+        if results:
+            log_emit(log_callback, self.config, "DEBUG",
+                     f"[RAG] Quick glossary match found {len(results)} terms: {list(results.keys())}",
+                     module="rag_engine", func="quick_glossary_match")
+        return results
 
     def _sync_stop_flags(self):
         """Sync facade flags to vector store."""

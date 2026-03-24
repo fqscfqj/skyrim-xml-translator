@@ -132,7 +132,7 @@ class QualityChecker:
         if untranslated:
             return QualityIssue(
                 issue_type=QualityIssueType.UNTRANSLATED,
-                severity="warning",
+                severity="error",
                 details=f"Possible untranslated glossary fragments: {untranslated}",
                 fragments=untranslated,
             )

@@ -11,6 +11,14 @@ class ResponseParser:
     _JSON_EXTRACT_RE = re.compile(r"\{.*\}", flags=re.DOTALL)
     _MARKDOWN_CODE_RE = re.compile(r'```(?:json)?')
     _CJK_CHAR_RE = re.compile(r'[\u4e00-\u9fff]')
+    _TRANSLATION_KV_RE = re.compile(
+        r"""["']?translation["']?\s*[:：]\s*["'](.+?)["']\s*[,}]?""",
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    _BARE_TRANSLATION_RE = re.compile(
+        r"""translation\s*[:：]\s*(.+)""",
+        flags=re.IGNORECASE,
+    )
 
     def __init__(self, config_manager=None):
         self.config = config_manager
@@ -40,6 +48,11 @@ class ResponseParser:
         except Exception:
             pass
 
+        # Try relaxed JSON extraction (trailing commas, single quotes, bare KV)
+        result = self._try_relaxed_json_extract(response, log_callback)
+        if result is not None:
+            return result
+
         # Try asking LLM to reformat as JSON
         if llm_client:
             result = self._try_followup_reformat(response, messages, llm_client, log_callback)
@@ -52,6 +65,65 @@ class ResponseParser:
             return result
 
         return str(response.strip())
+
+    def _try_relaxed_json_extract(self, response: str,
+                                  log_callback: Optional[Callable] = None) -> Optional[str]:
+        """Try to extract translation from malformed JSON-like responses."""
+        clean = response.strip()
+
+        # Fix trailing commas: {"translation": "text",} -> {"translation": "text"}
+        fixed = re.sub(r',\s*}', '}', clean)
+        fixed = re.sub(r',\s*]', ']', fixed)
+        try:
+            m = self._JSON_EXTRACT_RE.search(fixed)
+            if m:
+                data = json.loads(m.group(0))
+                result = str(data.get("translation", "")).strip()
+                if result:
+                    log_emit(log_callback, self.config, "DEBUG",
+                             "Recovered translation via trailing-comma fix",
+                             module="response_parser", func="_try_relaxed_json_extract")
+                    return result
+        except Exception:
+            pass
+
+        # Fix single quotes: {'translation': 'text'}
+        if "'" in clean:
+            single_q_fixed = clean.replace("'", '"')
+            try:
+                m = self._JSON_EXTRACT_RE.search(single_q_fixed)
+                if m:
+                    data = json.loads(m.group(0))
+                    result = str(data.get("translation", "")).strip()
+                    if result:
+                        log_emit(log_callback, self.config, "DEBUG",
+                                 "Recovered translation via single-quote fix",
+                                 module="response_parser", func="_try_relaxed_json_extract")
+                        return result
+            except Exception:
+                pass
+
+        # Match "translation": "value" or 'translation': 'value' pattern
+        m = self._TRANSLATION_KV_RE.search(clean)
+        if m:
+            result = m.group(1).strip()
+            if result:
+                log_emit(log_callback, self.config, "DEBUG",
+                         "Recovered translation via KV regex",
+                         module="response_parser", func="_try_relaxed_json_extract")
+                return result
+
+        # Match bare translation: value (no quotes, Chinese text)
+        m = self._BARE_TRANSLATION_RE.search(clean)
+        if m:
+            result = m.group(1).strip().strip('"').strip("'").strip()
+            if result and self._CJK_CHAR_RE.search(result):
+                log_emit(log_callback, self.config, "DEBUG",
+                         "Recovered translation via bare-value regex",
+                         module="response_parser", func="_try_relaxed_json_extract")
+                return result
+
+        return None
 
     def _try_followup_reformat(self, response: str, messages: list,
                                llm_client, log_callback) -> Optional[str]:

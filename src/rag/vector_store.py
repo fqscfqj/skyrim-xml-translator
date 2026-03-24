@@ -346,7 +346,11 @@ class VectorStore:
             similarities[start_idx:end_idx] = batch_vectors @ query_vec
             del batch_vectors
 
-        ranked_idx = np.argsort(similarities)[::-1][:top_k]
+        if top_k >= len(similarities):
+            ranked_idx = np.argsort(similarities)[::-1]
+        else:
+            part_idx = np.argpartition(similarities, -top_k)[-top_k:]
+            ranked_idx = part_idx[np.argsort(similarities[part_idx])[::-1]]
         results = []
         for idx in ranked_idx:
             if idx < len(self.terms):

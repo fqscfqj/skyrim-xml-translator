@@ -160,48 +160,67 @@ class Translator:
         search_debug = []
 
         if use_rag:
-            threshold = self.rag_engine.config.get("rag", "similarity_threshold", 0.75)
+            # Short text optimization: skip LLM keyword extraction for brief texts
+            words = str(text).split()
+            is_short_text = len(words) <= 3 and len(str(text).strip()) <= 20
 
-            log_emit(log_callback, self.rag_engine.config, "DEBUG",
-                     f"[RAG] Starting keyword extraction for text (length={len(text)}): {text[:200]}{'...' if len(text) > 200 else ''}",
-                     module="translator", func="translate_text")
-
-            keywords = self.rag_engine.extract_keywords(text, log_callback=log_callback)
-
-            try:
+            if is_short_text:
                 log_emit(log_callback, self.rag_engine.config, "DEBUG",
-                         f"[RAG] Translator received {len(keywords)} keywords: {keywords}",
-                         module="translator", func="translate_text",
-                         extra={"keywords": keywords})
-            except Exception:
-                pass
+                         f"[RAG] Short text detected ({len(words)} words, {len(str(text).strip())} chars), using quick glossary match",
+                         module="translator", func="translate_text")
+                matched_terms = self.rag_engine.quick_glossary_match(text, log_callback=log_callback)
 
-            search_result = self.rag_engine.search_terms(
-                keywords, threshold=threshold, log_callback=log_callback,
-                source_text=text, return_debug=True,
-            )
-
-            if isinstance(search_result, tuple):
-                matched_terms, search_debug = search_result
+                # Best-effort cache for visualization
+                self._last_rag_debug_info = {
+                    "original_text": text,
+                    "keywords": [],
+                    "rag_tasks": [],
+                    "search_results": [],
+                    "matched_terms": matched_terms,
+                }
             else:
-                matched_terms = search_result
+                threshold = self.rag_engine.config.get("rag", "similarity_threshold", 0.75)
 
-            # Best-effort cache for visualization
-            self._last_rag_debug_info = {
-                "original_text": text,
-                "keywords": keywords,
-                "rag_tasks": keywords,
-                "search_results": search_debug if isinstance(search_debug, list) else [],
-                "matched_terms": matched_terms,
-            }
-
-            try:
                 log_emit(log_callback, self.rag_engine.config, "DEBUG",
-                         f"[RAG] Translator received {len(matched_terms)} matched glossary terms: {list(matched_terms.keys())}",
-                         module="translator", func="translate_text",
-                         extra={"rag_matches": list(matched_terms.keys())})
-            except Exception:
-                pass
+                         f"[RAG] Starting keyword extraction for text (length={len(text)}): {text[:200]}{'...' if len(text) > 200 else ''}",
+                         module="translator", func="translate_text")
+
+                keywords = self.rag_engine.extract_keywords(text, log_callback=log_callback)
+
+                try:
+                    log_emit(log_callback, self.rag_engine.config, "DEBUG",
+                             f"[RAG] Translator received {len(keywords)} keywords: {keywords}",
+                             module="translator", func="translate_text",
+                             extra={"keywords": keywords})
+                except Exception:
+                    pass
+
+                search_result = self.rag_engine.search_terms(
+                    keywords, threshold=threshold, log_callback=log_callback,
+                    source_text=text, return_debug=True,
+                )
+
+                if isinstance(search_result, tuple):
+                    matched_terms, search_debug = search_result
+                else:
+                    matched_terms = search_result
+
+                # Best-effort cache for visualization
+                self._last_rag_debug_info = {
+                    "original_text": text,
+                    "keywords": keywords,
+                    "rag_tasks": keywords,
+                    "search_results": search_debug if isinstance(search_debug, list) else [],
+                    "matched_terms": matched_terms,
+                }
+
+                try:
+                    log_emit(log_callback, self.rag_engine.config, "DEBUG",
+                             f"[RAG] Translator received {len(matched_terms)} matched glossary terms: {list(matched_terms.keys())}",
+                             module="translator", func="translate_text",
+                             extra={"rag_matches": list(matched_terms.keys())})
+                except Exception:
+                    pass
 
             if matched_terms:
                 glossary_context = self._prompt_builder.build_glossary_context(text, matched_terms)
@@ -318,29 +337,40 @@ class Translator:
         }
 
     def _build_retry_prompt(self, target_lang: str, retry_context: Optional[dict] = None) -> str:
-        """Build a retry prompt, optionally with specific fragment info."""
+        """Build a retry prompt, selecting template by primary issue type."""
         prompt_vars = {
             "target_language": self._text_analyzer.language_display_name(target_lang),
         }
-        retry_template = self.prompt_manager.get(
-            "translator.retry.generic",
+
+        # Determine which typed template to use based on issue classification
+        template_key = "translator.retry.generic"
+        issue_types = retry_context.get("issue_types", []) if retry_context else []
+        fragments = retry_context.get("fragments", []) if retry_context else []
+        details = retry_context.get("details", []) if retry_context else []
+
+        if "format" in issue_types or "placeholder" in issue_types:
+            template_key = "translator.retry.format_error"
+            prompt_vars["error_details"] = "; ".join(
+                d for d in details
+                if "tag" in d.lower() or "placeholder" in d.lower() or "Missing" in d
+            ) or "; ".join(details)
+        elif fragments:
+            template_key = "translator.retry.fragment_retention"
+            prompt_vars["error_fragments"] = ", ".join(fragments)
+        elif "untranslated" in issue_types:
+            template_key = "translator.retry.untranslated"
+
+        default_retry = (
             "上次结果存在质量问题。请重新翻译为{target_language}，并确保："
             "1) 完整翻译，不混入源语言词；"
             "2) 保留全部 XML/HTML 标签和占位符；"
             "3) 术语表仅作参考，按当前语义决定是否采用词典译法；"
             "4) 标点与引号用法保持与原文结构一致，不得擅自添加书名号《》；"
             "5) 原文表层词形优先于术语表：简称不得扩写为全称/头衔，短词不得扩写为整句；"
-            "6) 仅输出 JSON。",
+            "6) 仅输出 JSON。"
         )
+        retry_template = self.prompt_manager.get(template_key, default_retry)
         prompt = PromptBuilder.apply_prompt_vars(retry_template, prompt_vars)
-
-        # Append specific untranslated fragments if available
-        if retry_context and retry_context.get("fragments"):
-            frags = retry_context["fragments"]
-            prompt += (
-                "\n\n以下词在上次译文中保留了原文，请结合当前语义判断是否应采用术语表译法："
-                f"{', '.join(frags)}"
-            )
 
         return prompt
 

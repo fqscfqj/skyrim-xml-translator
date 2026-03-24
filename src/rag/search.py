@@ -552,8 +552,12 @@ class RAGSearcher:
                         total_limit * 2,
                         24,
                     )
-                    ranked_idx = np.argsort(similarities)[::-1]
-                    for idx in ranked_idx[:desired_top_k]:
+                    if desired_top_k >= len(similarities):
+                        ranked_idx = np.argsort(similarities)[::-1]
+                    else:
+                        part_idx = np.argpartition(similarities, -desired_top_k)[-desired_top_k:]
+                        ranked_idx = part_idx[np.argsort(similarities[part_idx])[::-1]]
+                    for idx in ranked_idx:
                         if idx < len(self.vector_store.terms):
                             score = float(similarities[idx])
                             if score >= min_vector_score:
