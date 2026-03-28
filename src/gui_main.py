@@ -459,6 +459,8 @@ class RAGVisualizationDialog(QDialog):
         layout.setSpacing(10)
 
         main_splitter = QSplitter(Qt.Orientation.Vertical)
+        main_splitter.setChildrenCollapsible(False)
+        main_splitter.setHandleWidth(5)
         layout.addWidget(main_splitter)
 
         # 顶部：原文/译文并排
@@ -499,10 +501,12 @@ class RAGVisualizationDialog(QDialog):
         steps_layout = QVBoxLayout()
         self.rag_tree = QTreeWidget()
         self.rag_tree.setHeaderLabels([i18n.t("group_rag_steps"), i18n.t("label_similarity_score")])
-        self.rag_tree.setWordWrap(True)
-        self.rag_tree.setTextElideMode(Qt.TextElideMode.ElideNone)
+        self.rag_tree.setWordWrap(False)
+        self.rag_tree.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.rag_tree.setAlternatingRowColors(True)
-        self.rag_tree.setUniformRowHeights(False)
+        self.rag_tree.setUniformRowHeights(True)
+        self.rag_tree.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.rag_tree.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         header = self.rag_tree.header()
         assert header is not None
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
@@ -512,24 +516,29 @@ class RAGVisualizationDialog(QDialog):
         steps_group.setLayout(steps_layout)
 
         detail_group = QGroupBox(i18n.t("label_details"))
+        detail_group.setMinimumWidth(360)
         detail_layout = QVBoxLayout()
         self.detail_title = QLabel("")
+        self.detail_title.setTextFormat(Qt.TextFormat.PlainText)
         self.detail_title.setWordWrap(True)
         self.detail_score = QLabel("")
+        self.detail_score.setTextFormat(Qt.TextFormat.PlainText)
         self.detail_text = QTextEdit()
         self.detail_text.setReadOnly(True)
         self.detail_text.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        self.detail_text.setMinimumHeight(240)
         detail_layout.addWidget(self.detail_title)
         detail_layout.addWidget(self.detail_score)
         detail_layout.addWidget(self.detail_text, 1)
         detail_group.setLayout(detail_layout)
 
-        bottom_layout.addWidget(steps_group, 2)
-        bottom_layout.addWidget(detail_group, 1)
+        bottom_layout.addWidget(steps_group, 3)
+        bottom_layout.addWidget(detail_group, 2)
         main_splitter.addWidget(bottom_widget)
 
         main_splitter.setStretchFactor(0, 1)
         main_splitter.setStretchFactor(1, 3)
+        main_splitter.setSizes([220, 580])
 
         # 底部操作按钮
         btn_row = QHBoxLayout()
@@ -547,7 +556,14 @@ class RAGVisualizationDialog(QDialog):
 
         self.rag_tree.currentItemChanged.connect(self._update_detail_view)
 
+    def _summarize_tree_label(self, value, max_length=96):
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        if len(text) <= max_length:
+            return text
+        return f"{text[:max_length - 3].rstrip()}..."
+
     def _create_tree_item(self, parent, label, score=None, full_text=None):
+        display_label = self._summarize_tree_label(label)
         score_text = ""
         if score is not None:
             try:
@@ -555,15 +571,18 @@ class RAGVisualizationDialog(QDialog):
             except Exception:
                 score_text = str(score)
 
-        item = QTreeWidgetItem([label, score_text])
+        item = QTreeWidgetItem([display_label, score_text])
         if parent is None:
             self.rag_tree.addTopLevelItem(item)
         else:
             parent.addChild(item)
 
-        full_value = full_text if full_text is not None else label
-        item.setData(0, Qt.ItemDataRole.UserRole, full_value)
-        item.setToolTip(0, full_value)
+        full_value = str(full_text if full_text is not None else label)
+        item.setData(0, Qt.ItemDataRole.UserRole, {
+            "detail_title": display_label,
+            "full_text": full_value,
+        })
+        item.setToolTip(0, self._summarize_tree_label(full_value, max_length=180))
         if score is not None:
             item.setData(1, Qt.ItemDataRole.UserRole, score)
             item.setToolTip(1, score_text)
@@ -577,9 +596,14 @@ class RAGVisualizationDialog(QDialog):
             self.detail_text.setPlainText("")
             return
 
-        full_text = current.data(0, Qt.ItemDataRole.UserRole)
-        if full_text is None:
-            full_text = current.text(0)
+        detail_title = current.text(0)
+        full_text = current.text(0)
+        payload = current.data(0, Qt.ItemDataRole.UserRole)
+        if isinstance(payload, dict):
+            detail_title = str(payload.get("detail_title") or detail_title)
+            full_text = str(payload.get("full_text") or full_text)
+        elif payload is not None:
+            full_text = str(payload)
         score_value = current.data(1, Qt.ItemDataRole.UserRole)
         score_text = ""
         if score_value is not None and score_value != "":
@@ -588,7 +612,7 @@ class RAGVisualizationDialog(QDialog):
             except Exception:
                 score_text = str(score_value)
 
-        self.detail_title.setText(full_text)
+        self.detail_title.setText(detail_title)
         self.detail_score.setText(f"{i18n.t('label_similarity_score')}: {score_text}" if score_text else i18n.t('label_similarity_score'))
         self.detail_text.setPlainText(full_text)
     
