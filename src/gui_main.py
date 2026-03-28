@@ -4,6 +4,7 @@ import threading
 import shutil
 import datetime
 import re
+import xml.etree.ElementTree as stdlib_etree
 from typing import Optional, cast
 import csv
 from collections import deque
@@ -24,6 +25,7 @@ from PyQt6.QtGui import (
 from src.config.manager import ConfigManager
 from src.llm.client import LLMClient
 from src.rag.engine import RAGEngine
+from src.esp_xml_processor import ESPXMLProcessor
 from src.xml_processor import XMLProcessor
 from src.mcm_processor import MCMProcessor
 from src.translation.translator import Translator
@@ -944,6 +946,7 @@ class MainWindow(QMainWindow):
         self.llm_client = LLMClient(self.config_manager, log_callback=self.log)
         self.rag_engine = RAGEngine(self.config_manager, self.llm_client)
         self.xml_processor = XMLProcessor()
+        self.esp_xml_processor = ESPXMLProcessor()
         self.mcm_processor = MCMProcessor()
         self.current_processor = self.xml_processor
         self.current_file_type = "xml"
@@ -1918,7 +1921,10 @@ class MainWindow(QMainWindow):
     # Note: prompts are intentionally not localized; language changes only affect UI (i18n).
 
     def browse_file(self):
-        file_filter = i18n.t("filter_translation_files", "Translation files (*.xml *.txt);;XML files (*.xml);;MCM text files (*.txt)")
+        file_filter = i18n.t(
+            "filter_translation_files",
+            "Translation files (*.xml *.txt);;XML files (xTranslator, ESP-ESM Translator) (*.xml);;MCM text files (*.txt)",
+        )
         fname, _ = QFileDialog.getOpenFileName(
             self,
             i18n.t("title_open_translation_file", i18n.t("title_open_xml")),
@@ -2056,10 +2062,53 @@ class MainWindow(QMainWindow):
 
     def _detect_file_type(self, file_path: str) -> str:
         ext = os.path.splitext(file_path)[1].lower()
-        if ext == ".xml":
-            return "xml"
         if ext == ".txt":
             return "mcm"
+        if ext == ".xml":
+            return self._detect_xml_variant(file_path)
+        return "xml"
+
+    @staticmethod
+    def _strip_xml_tag(tag_name: str) -> str:
+        if not tag_name:
+            return ""
+        if "}" in tag_name:
+            return tag_name.rsplit("}", 1)[-1]
+        return tag_name
+
+    def _detect_xml_variant(self, file_path: str) -> str:
+        try:
+            tree = stdlib_etree.parse(file_path)
+            root = tree.getroot()
+        except Exception:
+            return "xml"
+
+        has_string = False
+        has_source = False
+        has_esp = False
+        has_original = False
+        has_traduit = False
+
+        for node in root.iter():
+            tag_name = self._strip_xml_tag(getattr(node, "tag", ""))
+            if tag_name == "String":
+                has_string = True
+            elif tag_name == "Source":
+                has_source = True
+            elif tag_name == "ESP":
+                has_esp = True
+            elif tag_name == "ORIGINAL":
+                has_original = True
+            elif tag_name == "TRADUIT":
+                has_traduit = True
+
+            if has_esp and has_original and has_traduit:
+                return "esp_xml"
+            if has_string and has_source:
+                return "xml"
+
+        if has_esp and has_original:
+            return "esp_xml"
         return "xml"
 
     def _set_active_file_type(self, file_type: str) -> None:
@@ -2067,6 +2116,9 @@ class MainWindow(QMainWindow):
         if file_type == "mcm":
             self.current_processor = self.mcm_processor
             self.translator.set_runtime_flags({"mcm_ui_mode": True})
+        elif file_type == "esp_xml":
+            self.current_processor = self.esp_xml_processor
+            self.translator.set_runtime_flags({"mcm_ui_mode": False})
         else:
             self.current_processor = self.xml_processor
             self.translator.set_runtime_flags({"mcm_ui_mode": False})
@@ -2112,10 +2164,7 @@ class MainWindow(QMainWindow):
         file_type = self._detect_file_type(file_path)
         self._set_active_file_type(file_type)
         self.log(i18n.t("msg_loading_file").format(path=file_path))
-        if file_type == "mcm":
-            loaded = self.mcm_processor.load_file(file_path)
-        else:
-            loaded = self.xml_processor.load_file(file_path)
+        loaded = self.current_processor.load_file(file_path)
 
         if not loaded:
             if file_type == "mcm":
@@ -2213,7 +2262,8 @@ class MainWindow(QMainWindow):
                 output_path = self._save_mcm_with_configured_suffix()
                 self.log(i18n.t("msg_mcm_saved_path").format(path=output_path))
             else:
-                self.xml_processor.save_file()
+                if not self.current_processor.save_file():
+                    raise RuntimeError(i18n.t("msg_failed_save").format(error="save failed"))
             self.log(i18n.t("msg_file_saved"))
             QMessageBox.information(self, i18n.t("title_success"), i18n.t("msg_file_saved_short"))
         except Exception as e:
@@ -2226,14 +2276,20 @@ class MainWindow(QMainWindow):
             title = i18n.t("title_save_mcm", i18n.t("title_save_xml"))
             fname, _ = QFileDialog.getSaveFileName(self, title, '', save_filter)
         else:
-            fname, _ = QFileDialog.getSaveFileName(self, i18n.t("title_save_xml"), '', "XML files (*.xml)")
+            fname, _ = QFileDialog.getSaveFileName(
+                self,
+                i18n.t("title_save_xml"),
+                '',
+                "XML files (xTranslator, ESP-ESM Translator) (*.xml)",
+            )
         if fname:
             self.log(i18n.t("msg_saving_as").format(path=fname))
             try:
                 if self.current_file_type == "mcm":
                     self.mcm_processor.save_file(fname)
                 else:
-                    self.xml_processor.save_file(fname)
+                    if not self.current_processor.save_file(fname):
+                        raise RuntimeError(i18n.t("msg_failed_save").format(error="save failed"))
                 self.log(i18n.t("msg_file_saved"))
                 QMessageBox.information(self, i18n.t("title_success"), i18n.t("msg_file_saved_short"))
             except Exception as e:
