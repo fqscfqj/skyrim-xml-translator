@@ -2061,10 +2061,15 @@ class MainWindow(QMainWindow):
         self.row_error_map.clear()
 
         strings = list(self.current_processor.get_strings())
-        self.trans_table.setRowCount(len(strings))
+        display_strings = [
+            item for item in strings
+            if str(item[2] if item[2] is not None else "").strip()
+        ]
+        hidden_blank_count = len(strings) - len(display_strings)
+        self.trans_table.setRowCount(len(display_strings))
         
         cleared_same_count = 0
-        for i, (node, id_text, source, dest) in enumerate(strings):
+        for i, (node, id_text, source, dest) in enumerate(display_strings):
             # ID
             id_item = QTableWidgetItem(id_text)
             id_item.setFlags(id_item.flags() ^ Qt.ItemFlag.ItemIsEditable) # Read-only
@@ -2098,7 +2103,23 @@ class MainWindow(QMainWindow):
 
         self.trans_table.blockSignals(False)
         self._apply_status_filter()
-        log_emit(self.log, self.config_manager, 'INFO', i18n.t("msg_loaded_strings").format(count=len(strings)), module='gui_main', func='load_xml_to_table')
+        log_emit(
+            self.log,
+            self.config_manager,
+            'INFO',
+            i18n.t("msg_loaded_strings").format(count=len(display_strings)),
+            module='gui_main',
+            func='load_xml_to_table'
+        )
+        if hidden_blank_count > 0:
+            log_emit(
+                self.log,
+                self.config_manager,
+                'INFO',
+                f"Hidden {hidden_blank_count} blank source entries from the table view.",
+                module='gui_main',
+                func='load_xml_to_table'
+            )
         if cleared_same_count > 0:
             log_emit(
                 self.log,
