@@ -189,7 +189,7 @@
     "msg_restart_for_language": "Restart the application to apply the new language setting.",
     "label_rag_recall_limit_note": "Recall count is controlled only by short/long glossary max results.",
     "group_rag_advanced_settings": "RAG Advanced Settings",
-    "label_rag_keyword_max_queries": "Keyword max queries:",
+    "label_rag_keyword_max_queries": "Keyword safety limit:",
     "label_rag_keyword_task_decompose_enabled": "Enable keyword task decomposition",
     "label_rag_keyword_task_keep_original": "Keep original phrase task",
     "label_rag_short_term_max_chars": "Short-term length threshold (chars):",

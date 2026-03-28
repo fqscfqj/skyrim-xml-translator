@@ -18,7 +18,7 @@ class KeywordExtractor:
     _WHITESPACE_RE = re.compile(r"\s+")
     _WORD_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9'\-]*")
     _STRIP_PUNCT_RE = re.compile(r"^[^\w\u4e00-\u9fff]+|[^\w\u4e00-\u9fff]+$")
-    _KW_CACHE_VERSION = "kw_v9"
+    _KW_CACHE_VERSION = "kw_v10"
     _LOW_SIGNAL_SINGLE_TOKENS = frozenset({
         "honestly", "kinda", "kindof", "sorta", "sortof",
         "really", "actually", "basically", "seriously", "literally",
@@ -187,6 +187,9 @@ class KeywordExtractor:
         long_limit = self._get_rag_int("long_term_max_results", 2, min_value=0, max_value=500)
         return max(0, short_limit) + max(0, long_limit)
 
+    def _get_keyword_safety_limit(self) -> int:
+        return self._get_rag_int("keyword_max_queries", 128, min_value=1, max_value=512)
+
     def _get_rag_bool(self, key: str, default: bool) -> bool:
         try:
             value = self.config.get("rag", key, default)
@@ -238,11 +241,10 @@ class KeywordExtractor:
     def _extract_via_llm(self, text: str, log_callback) -> list[str]:
         """Use LLM to extract fine-grained glossary lookup keywords."""
         prompt_template = self.prompt_manager.get("rag.keywords.prompt")
-        max_terms = self._get_rag_int("keyword_max_queries", 8, min_value=1, max_value=32)
         if not prompt_template:
             prompt_template = (
                 "从原文中提取术语查询词。\n"
-                "只返回 JSON 字符串数组，最多 {max_terms} 项。\n\n"
+                "只返回 JSON 字符串数组。\n\n"
                 "规则：\n"
                 "1) 每项必须是原文中的连续片段。\n"
                 "2) 优先专有名词：人名、地名、阵营、称号、任务、怪物、法术、物品、世界观术语。\n"
@@ -254,7 +256,7 @@ class KeywordExtractor:
 
         prompt = self._apply_prompt_vars(
             prompt_template,
-            {"text": text, "max_terms": max_terms},
+            {"text": text},
         )
         messages = [{"role": "user", "content": prompt}]
 
@@ -464,16 +466,16 @@ class KeywordExtractor:
                 pass
         return present
 
-    def _limit_keywords(self, keywords: list[str], log_callback) -> list[str]:
-        limit = self._get_rag_int("keyword_max_queries", 8, min_value=1, max_value=32)
+    def _apply_keyword_safety_limit(self, keywords: list[str], log_callback) -> list[str]:
+        limit = self._get_keyword_safety_limit()
         if len(keywords) <= limit:
             return keywords
         dropped = len(keywords) - limit
         limited = keywords[:limit]
         try:
-            log_emit(log_callback, self.config, "DEBUG",
-                     f"[RAG] Keyword list limited to {len(limited)} (dropped {dropped})",
-                     module="keyword_extractor", func="_limit_keywords")
+            log_emit(log_callback, self.config, "WARNING",
+                     f"[RAG] Keyword task list hit safety limit {limit} (dropped {dropped})",
+                     module="keyword_extractor", func="_apply_keyword_safety_limit")
         except Exception:
             pass
         return limited
@@ -635,7 +637,7 @@ class KeywordExtractor:
         keywords = self._filter_low_signal_keywords(keywords, log_callback)
         keywords = self._expand_keywords_into_tasks(keywords, log_callback)
         keywords = self._deduplicate(keywords)
-        keywords = self._limit_keywords(keywords, log_callback)
+        keywords = self._apply_keyword_safety_limit(keywords, log_callback)
         return keywords
 
     def _extract_proper_nouns_regex(self, text: str) -> list[str]:

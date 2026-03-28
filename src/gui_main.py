@@ -1660,9 +1660,9 @@ class MainWindow(QMainWindow):
 
         self.rag_keyword_max_queries = NoWheelSpinBox()
         self.rag_keyword_max_queries.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        self.rag_keyword_max_queries.setRange(1, 64)
-        self.rag_keyword_max_queries.setValue(self.config_manager.get("rag", "keyword_max_queries", 8))
-        rag_layout.addRow(i18n.t("label_rag_keyword_max_queries", "Keyword max queries:"), self.rag_keyword_max_queries)
+        self.rag_keyword_max_queries.setRange(1, 512)
+        self.rag_keyword_max_queries.setValue(self.config_manager.get("rag", "keyword_max_queries", 128))
+        rag_layout.addRow(i18n.t("label_rag_keyword_max_queries", "Keyword safety limit:"), self.rag_keyword_max_queries)
 
         self.rag_keyword_task_decompose_enabled = QCheckBox(i18n.t(
             "label_rag_keyword_task_decompose_enabled", "Enable keyword task decomposition"

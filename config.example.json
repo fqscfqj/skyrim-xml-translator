@@ -75,7 +75,7 @@
         "short_term_max_results": 5,
         "long_term_max_results": 2,
         "short_term_max_chars": 32,
-        "keyword_max_queries": 8,
+        "keyword_max_queries": 128,
         "keyword_task_decompose_enabled": true,
         "keyword_task_keep_original": false,
         "min_vector_score": 0.45,

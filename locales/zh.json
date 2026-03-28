@@ -188,7 +188,7 @@
     "msg_restart_for_language": "请重启应用以应用新的语言设置。"
     ,"label_rag_recall_limit_note": "召回数量仅由短/长词典上限控制。"
     ,"group_rag_advanced_settings": "RAG 高级设置"
-    ,"label_rag_keyword_max_queries": "关键词最大查询数:"
+    ,"label_rag_keyword_max_queries": "关键词安全阈值:"
     ,"label_rag_keyword_task_decompose_enabled": "启用关键词任务拆分"
     ,"label_rag_keyword_task_keep_original": "保留原短语任务"
     ,"label_rag_short_term_max_chars": "短词典长度阈值（字符）:"

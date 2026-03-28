@@ -8,10 +8,6 @@ from src.translation.text_analyzer import TextAnalyzer
 
 
 class PromptBuilder:
-    # Emergency circuit-breaker only — fires when keyword_weight_keep_k is set
-    # to an extreme value. Normal per-call budget is read from config at runtime.
-    _ABSOLUTE_MAX_TERMS = 60
-
     # Compile regex patterns once
     _ALNUM_UNDERSCORE_RE = re.compile(r"[a-z0-9_]", flags=re.IGNORECASE)
     _TERM_EDGE_PUNCT_RE = re.compile(
@@ -151,22 +147,9 @@ class PromptBuilder:
         return len(stripped.split()) <= 4
 
     def build_glossary_context(self, source_text: str, matched_terms: dict) -> str:
-        """Build flat glossary context with in-source vs reference grouping.
-
-        Total term count is capped by the RAG config value keyword_weight_keep_k
-        (default 24) so this layer stays consistent with the upstream RAG search
-        limits that the user can configure.  In-source terms consume the budget
-        first; reference-only terms fill the remainder.
-        """
+        """Build flat glossary context with in-source vs reference grouping."""
         if not matched_terms:
             return ""
-
-        # Derive total budget from the same RAG config knob that controls how
-        # many terms the search layer keeps, so both layers stay in sync.
-        total_budget = min(
-            self._ABSOLUTE_MAX_TERMS,
-            self.config.get("rag", "keyword_weight_keep_k", 24),
-        )
 
         in_source_lines: list[str] = []
         reference_lines: list[str] = []
@@ -176,8 +159,6 @@ class PromptBuilder:
                 continue
             if len(term) >= 100:
                 continue
-            if len(in_source_lines) + len(reference_lines) >= total_budget:
-                break
 
             v_str = "" if translation is None else str(translation)
             display_term = self._strip_term_edge_punct(term) or term
