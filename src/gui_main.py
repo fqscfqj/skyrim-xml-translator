@@ -1318,20 +1318,26 @@ class MainWindow(QMainWindow):
         scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
         form_widget = QWidget()
-        form_layout = QFormLayout(form_widget)
+        form_layout = QVBoxLayout(form_widget)
+        form_layout.setSpacing(10)
 
         # Wrap settings in a scroll area so controls remain usable on smaller windows.
-        form_layout.addRow(QLabel(f"<b>{i18n.t('group_llm_settings')}</b>"))
+        llm_group = QGroupBox(i18n.t('group_llm_settings'))
+        llm_layout = QFormLayout(llm_group)
+        llm_layout.setContentsMargins(12, 10, 12, 12)
+        llm_layout.setSpacing(8)
+
         self.llm_base = QLineEdit(self.config_manager.get("llm", "base_url"))
         self.llm_key = QLineEdit(self.config_manager.get("llm", "api_key"))
         self.llm_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.llm_model = QLineEdit(self.config_manager.get("llm", "model"))
         
-        form_layout.addRow(i18n.t("label_base_url"), self.llm_base)
-        form_layout.addRow(i18n.t("label_api_key"), self.llm_key)
-        form_layout.addRow(i18n.t("label_model_name"), self.llm_model)
+        llm_layout.addRow(i18n.t("label_base_url"), self.llm_base)
+        llm_layout.addRow(i18n.t("label_api_key"), self.llm_key)
+        llm_layout.addRow(i18n.t("label_model_name"), self.llm_model)
 
-        form_layout.addRow(QLabel(f"<b>{i18n.t('group_llm_params')}</b>"))
+        llm_param_title = QLabel(f"<b>{i18n.t('group_llm_params')}</b>")
+        llm_layout.addRow(llm_param_title)
         params = self.config_manager.get("llm", "parameters", {}) or {}
 
         def add_param_control(name, label_text, widget):
@@ -1347,7 +1353,7 @@ class MainWindow(QMainWindow):
             row_layout.addWidget(checkbox)
             row_layout.addWidget(widget)
             row_layout.addStretch()
-            form_layout.addRow(row_widget)
+            llm_layout.addRow(row_widget)
             self.model_param_controls[name] = (checkbox, widget)
             stored_value = params.get(name)
             if stored_value is not None:
@@ -1398,19 +1404,25 @@ class MainWindow(QMainWindow):
         thinking_combo.addItem(i18n.t("option_thinking_on"), True)
         thinking_combo.addItem(i18n.t("option_thinking_off"), False)
         add_param_control("enable_thinking", i18n.t("param_enable_thinking"), thinking_combo)
+        form_layout.addWidget(llm_group)
 
         # --- Search LLM Settings ---
-        form_layout.addRow(QLabel(f"<b>{i18n.t('group_search_llm_settings')}</b>"))
+        search_group = QGroupBox(i18n.t('group_search_llm_settings'))
+        search_layout = QFormLayout(search_group)
+        search_layout.setContentsMargins(12, 10, 12, 12)
+        search_layout.setSpacing(8)
+
         self.search_base = QLineEdit(self.config_manager.get("llm_search", "base_url"))
         self.search_key = QLineEdit(self.config_manager.get("llm_search", "api_key"))
         self.search_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.search_model = QLineEdit(self.config_manager.get("llm_search", "model"))
         
-        form_layout.addRow(i18n.t("label_search_base_url"), self.search_base)
-        form_layout.addRow(i18n.t("label_search_api_key"), self.search_key)
-        form_layout.addRow(i18n.t("label_search_model"), self.search_model)
+        search_layout.addRow(i18n.t("label_search_base_url"), self.search_base)
+        search_layout.addRow(i18n.t("label_search_api_key"), self.search_key)
+        search_layout.addRow(i18n.t("label_search_model"), self.search_model)
 
-        form_layout.addRow(QLabel(f"<b>{i18n.t('group_search_llm_params')}</b>"))
+        search_param_title = QLabel(f"<b>{i18n.t('group_search_llm_params')}</b>")
+        search_layout.addRow(search_param_title)
         search_params = self.config_manager.get("llm_search", "parameters", {}) or {}
 
         def add_search_param_control(name, label_text, widget):
@@ -1426,7 +1438,7 @@ class MainWindow(QMainWindow):
             row_layout.addWidget(checkbox)
             row_layout.addWidget(widget)
             row_layout.addStretch()
-            form_layout.addRow(row_widget)
+            search_layout.addRow(row_widget)
             self.search_param_controls[name] = (checkbox, widget)
             stored_value = search_params.get(name)
             if stored_value is not None:
@@ -1477,18 +1489,25 @@ class MainWindow(QMainWindow):
         s_thinking_combo.addItem(i18n.t("option_thinking_on"), True)
         s_thinking_combo.addItem(i18n.t("option_thinking_off"), False)
         add_search_param_control("enable_thinking", i18n.t("param_enable_thinking"), s_thinking_combo)
+        form_layout.addWidget(search_group)
+
         # --- Search Fallback LLM Settings ---
-        form_layout.addRow(QLabel(f"<b>{i18n.t('group_search_fallback_llm_settings')}</b>"))
+        search_fallback_group = QGroupBox(i18n.t('group_search_fallback_llm_settings'))
+        search_fallback_layout = QFormLayout(search_fallback_group)
+        search_fallback_layout.setContentsMargins(12, 10, 12, 12)
+        search_fallback_layout.setSpacing(8)
+
         self.search_fallback_base = QLineEdit(self.config_manager.get("llm_search_fallback", "base_url"))
         self.search_fallback_key = QLineEdit(self.config_manager.get("llm_search_fallback", "api_key"))
         self.search_fallback_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.search_fallback_model = QLineEdit(self.config_manager.get("llm_search_fallback", "model"))
 
-        form_layout.addRow(i18n.t("label_search_fallback_base_url"), self.search_fallback_base)
-        form_layout.addRow(i18n.t("label_search_fallback_api_key"), self.search_fallback_key)
-        form_layout.addRow(i18n.t("label_search_fallback_model"), self.search_fallback_model)
+        search_fallback_layout.addRow(i18n.t("label_search_fallback_base_url"), self.search_fallback_base)
+        search_fallback_layout.addRow(i18n.t("label_search_fallback_api_key"), self.search_fallback_key)
+        search_fallback_layout.addRow(i18n.t("label_search_fallback_model"), self.search_fallback_model)
 
-        form_layout.addRow(QLabel(f"<b>{i18n.t('group_search_fallback_llm_params')}</b>"))
+        search_fallback_param_title = QLabel(f"<b>{i18n.t('group_search_fallback_llm_params')}</b>")
+        search_fallback_layout.addRow(search_fallback_param_title)
         search_fallback_params = self.config_manager.get("llm_search_fallback", "parameters", {}) or {}
 
         def add_search_fallback_param_control(name, label_text, widget):
@@ -1503,7 +1522,7 @@ class MainWindow(QMainWindow):
             row_layout.addWidget(checkbox)
             row_layout.addWidget(widget)
             row_layout.addStretch()
-            form_layout.addRow(row_widget)
+            search_fallback_layout.addRow(row_widget)
             self.search_fallback_param_controls[name] = (checkbox, widget)
             stored_value = search_fallback_params.get(name)
             if stored_value is not None:
@@ -1554,9 +1573,14 @@ class MainWindow(QMainWindow):
         sf_thinking_combo.addItem(i18n.t("option_thinking_on"), True)
         sf_thinking_combo.addItem(i18n.t("option_thinking_off"), False)
         add_search_fallback_param_control("enable_thinking", i18n.t("param_enable_thinking"), sf_thinking_combo)
+        form_layout.addWidget(search_fallback_group)
         # ---------------------------
 
-        form_layout.addRow(QLabel(f"<b>{i18n.t('group_embedding_settings')}</b>"))
+        embedding_group = QGroupBox(i18n.t('group_embedding_settings'))
+        embedding_layout = QFormLayout(embedding_group)
+        embedding_layout.setContentsMargins(12, 10, 12, 12)
+        embedding_layout.setSpacing(8)
+
         self.embed_base = QLineEdit(self.config_manager.get("embedding", "base_url"))
         self.embed_key = QLineEdit(self.config_manager.get("embedding", "api_key"))
         self.embed_key.setEchoMode(QLineEdit.EchoMode.Password)
@@ -1568,12 +1592,17 @@ class MainWindow(QMainWindow):
         self.embed_dim.setValue(self.config_manager.get("embedding", "dimensions", 1536))
         self.embed_dim.setToolTip(i18n.t("tooltip_embed_dim"))
 
-        form_layout.addRow(i18n.t("label_base_url"), self.embed_base)
-        form_layout.addRow(i18n.t("label_api_key"), self.embed_key)
-        form_layout.addRow(i18n.t("label_model_name"), self.embed_model)
-        form_layout.addRow(i18n.t("label_dimensions"), self.embed_dim)
+        embedding_layout.addRow(i18n.t("label_base_url"), self.embed_base)
+        embedding_layout.addRow(i18n.t("label_api_key"), self.embed_key)
+        embedding_layout.addRow(i18n.t("label_model_name"), self.embed_model)
+        embedding_layout.addRow(i18n.t("label_dimensions"), self.embed_dim)
+        form_layout.addWidget(embedding_group)
 
-        form_layout.addRow(QLabel(f"<b>{i18n.t('group_threads')}</b>"))
+        threads_group = QGroupBox(i18n.t('group_threads'))
+        threads_layout = QFormLayout(threads_group)
+        threads_layout.setContentsMargins(12, 10, 12, 12)
+        threads_layout.setSpacing(8)
+
         self.trans_threads = NoWheelSpinBox()
         self.trans_threads.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.trans_threads.setRange(1, 99)
@@ -1584,10 +1613,15 @@ class MainWindow(QMainWindow):
         self.vec_threads.setRange(1, 99)
         self.vec_threads.setValue(self.config_manager.get("threads", "vectorization", 5))
 
-        form_layout.addRow(i18n.t("label_trans_threads"), self.trans_threads)
-        form_layout.addRow(i18n.t("label_vec_threads"), self.vec_threads)
+        threads_layout.addRow(i18n.t("label_trans_threads"), self.trans_threads)
+        threads_layout.addRow(i18n.t("label_vec_threads"), self.vec_threads)
+        form_layout.addWidget(threads_group)
 
-        form_layout.addRow(QLabel(f"<b>{i18n.t('group_rag_settings')}</b>"))
+        rag_group = QGroupBox(i18n.t('group_rag_settings'))
+        rag_layout = QFormLayout(rag_group)
+        rag_layout.setContentsMargins(12, 10, 12, 12)
+        rag_layout.setSpacing(8)
+
         self.rag_threshold = NoWheelDoubleSpinBox()
         self.rag_threshold.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.rag_threshold.setRange(0.0, 1.0)
@@ -1608,23 +1642,24 @@ class MainWindow(QMainWindow):
         self.rag_long_max_results.setValue(self.config_manager.get("rag", "long_term_max_results", 2))
         self.rag_long_max_results.setToolTip(i18n.t("tooltip_rag_long_max_results"))
 
-        form_layout.addRow(i18n.t("label_rag_threshold"), self.rag_threshold)
-        form_layout.addRow(i18n.t("label_rag_short_max_results"), self.rag_short_max_results)
-        form_layout.addRow(i18n.t("label_rag_long_max_results"), self.rag_long_max_results)
+        rag_layout.addRow(i18n.t("label_rag_threshold"), self.rag_threshold)
+        rag_layout.addRow(i18n.t("label_rag_short_max_results"), self.rag_short_max_results)
+        rag_layout.addRow(i18n.t("label_rag_long_max_results"), self.rag_long_max_results)
         recall_limit_note = QLabel(i18n.t(
             "label_rag_recall_limit_note",
             "Recall count is controlled only by short/long glossary max results."
         ))
         recall_limit_note.setWordWrap(True)
-        form_layout.addRow(recall_limit_note)
+        rag_layout.addRow(recall_limit_note)
 
-        form_layout.addRow(QLabel(f"<b>{i18n.t('group_rag_advanced_settings', 'RAG Advanced Settings')}</b>"))
+        rag_advanced_title = QLabel(f"<b>{i18n.t('group_rag_advanced_settings', 'RAG Advanced Settings')}</b>")
+        rag_layout.addRow(rag_advanced_title)
 
         self.rag_keyword_max_queries = NoWheelSpinBox()
         self.rag_keyword_max_queries.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.rag_keyword_max_queries.setRange(1, 64)
         self.rag_keyword_max_queries.setValue(self.config_manager.get("rag", "keyword_max_queries", 8))
-        form_layout.addRow(i18n.t("label_rag_keyword_max_queries", "Keyword max queries:"), self.rag_keyword_max_queries)
+        rag_layout.addRow(i18n.t("label_rag_keyword_max_queries", "Keyword max queries:"), self.rag_keyword_max_queries)
 
         self.rag_keyword_task_decompose_enabled = QCheckBox(i18n.t(
             "label_rag_keyword_task_decompose_enabled", "Enable keyword task decomposition"
@@ -1632,7 +1667,7 @@ class MainWindow(QMainWindow):
         self.rag_keyword_task_decompose_enabled.setChecked(bool(
             self.config_manager.get("rag", "keyword_task_decompose_enabled", True)
         ))
-        form_layout.addRow(self.rag_keyword_task_decompose_enabled)
+        rag_layout.addRow(self.rag_keyword_task_decompose_enabled)
 
         self.rag_keyword_task_keep_original = QCheckBox(i18n.t(
             "label_rag_keyword_task_keep_original", "Keep original phrase task"
@@ -1640,7 +1675,7 @@ class MainWindow(QMainWindow):
         self.rag_keyword_task_keep_original.setChecked(bool(
             self.config_manager.get("rag", "keyword_task_keep_original", False)
         ))
-        form_layout.addRow(self.rag_keyword_task_keep_original)
+        rag_layout.addRow(self.rag_keyword_task_keep_original)
 
         self.rag_short_term_max_chars = NoWheelSpinBox()
         self.rag_short_term_max_chars.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
@@ -1651,7 +1686,7 @@ class MainWindow(QMainWindow):
             "tooltip_rag_short_term_max_chars",
             "Character-length threshold for short-term bucket; <= threshold goes to short-term."
         ))
-        form_layout.addRow(i18n.t("label_rag_short_term_max_chars", "Short-term length threshold (chars):"), self.rag_short_term_max_chars)
+        rag_layout.addRow(i18n.t("label_rag_short_term_max_chars", "Short-term length threshold (chars):"), self.rag_short_term_max_chars)
 
         self.rag_keyword_weight_enabled = QCheckBox(i18n.t(
             "label_rag_keyword_weight_enabled", "Enable keyword weighted retrieval"
@@ -1659,20 +1694,20 @@ class MainWindow(QMainWindow):
         self.rag_keyword_weight_enabled.setChecked(bool(
             self.config_manager.get("rag", "keyword_weight_enabled", True)
         ))
-        form_layout.addRow(self.rag_keyword_weight_enabled)
+        rag_layout.addRow(self.rag_keyword_weight_enabled)
 
         self.rag_min_vector_score = NoWheelDoubleSpinBox()
         self.rag_min_vector_score.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.rag_min_vector_score.setRange(0.0, 1.0)
         self.rag_min_vector_score.setSingleStep(0.01)
         self.rag_min_vector_score.setValue(self.config_manager.get("rag", "min_vector_score", 0.45))
-        form_layout.addRow(i18n.t("label_rag_min_vector_score", "Minimum semantic recall score:"), self.rag_min_vector_score)
+        rag_layout.addRow(i18n.t("label_rag_min_vector_score", "Minimum semantic recall score:"), self.rag_min_vector_score)
 
         self.rag_expert_toggle = QCheckBox(i18n.t(
             "label_rag_expert_params", "Show expert parameters"
         ))
         self.rag_expert_toggle.setChecked(False)
-        form_layout.addRow(self.rag_expert_toggle)
+        rag_layout.addRow(self.rag_expert_toggle)
 
         self.rag_expert_container = QWidget()
         expert_layout = QFormLayout(self.rag_expert_container)
@@ -1733,19 +1768,24 @@ class MainWindow(QMainWindow):
 
         self.rag_expert_container.setVisible(False)
         self.rag_expert_toggle.toggled.connect(self.rag_expert_container.setVisible)
-        form_layout.addRow(self.rag_expert_container)
+        rag_layout.addRow(self.rag_expert_container)
+        form_layout.addWidget(rag_group)
 
-        form_layout.addRow(QLabel(f"<b>{i18n.t('group_system_settings')}</b>"))
+        system_group = QGroupBox(i18n.t('group_system_settings'))
+        system_layout = QFormLayout(system_group)
+        system_layout.setContentsMargins(12, 10, 12, 12)
+        system_layout.setSpacing(8)
+
         self.log_level_combo = NoWheelComboBox()
         self.log_level_combo.addItems(["DEBUG", "INFO", "WARNING", "ERROR"])
         self.log_level_combo.setCurrentText(self.config_manager.get("general", "log_level", "INFO"))
-        form_layout.addRow(i18n.t("label_log_level"), self.log_level_combo)
+        system_layout.addRow(i18n.t("label_log_level"), self.log_level_combo)
         
         # Prompt style selection (dynamic from prompts: translator.system_prompts.*)
         self.prompt_style_combo = NoWheelComboBox()
         self._reload_prompt_style_options()
         self.prompt_style_combo.setToolTip(i18n.t("tooltip_prompt_style"))
-        form_layout.addRow(i18n.t("label_prompt_style"), self.prompt_style_combo)
+        system_layout.addRow(i18n.t("label_prompt_style"), self.prompt_style_combo)
 
         # Translation language selection (prompts are language-agnostic; user chooses here)
         def add_lang_option(combo: NoWheelComboBox, label_key: str, code: str):
@@ -1772,7 +1812,7 @@ class MainWindow(QMainWindow):
         if idx == -1:
             idx = 0
         self.source_language_combo.setCurrentIndex(idx)
-        form_layout.addRow(i18n.t("label_source_language"), self.source_language_combo)
+        system_layout.addRow(i18n.t("label_source_language"), self.source_language_combo)
 
         self.target_language_combo = NoWheelComboBox()
         for k, code in language_items:
@@ -1782,7 +1822,7 @@ class MainWindow(QMainWindow):
         if idx == -1:
             idx = 0
         self.target_language_combo.setCurrentIndex(idx)
-        form_layout.addRow(i18n.t("label_target_language"), self.target_language_combo)
+        system_layout.addRow(i18n.t("label_target_language"), self.target_language_combo)
 
         self.mcm_suffix_combo = NoWheelComboBox()
         suffix_options = [
@@ -1804,13 +1844,13 @@ class MainWindow(QMainWindow):
         if idx == -1:
             idx = 0
         self.mcm_suffix_combo.setCurrentIndex(idx)
-        form_layout.addRow(i18n.t("label_mcm_output_suffix"), self.mcm_suffix_combo)
+        system_layout.addRow(i18n.t("label_mcm_output_suffix"), self.mcm_suffix_combo)
 
         self.mcm_auto_export_checkbox = QCheckBox(i18n.t("label_mcm_auto_export"))
         self.mcm_auto_export_checkbox.setChecked(
             bool(self.config_manager.get("general", "mcm_auto_export", True))
         )
-        form_layout.addRow(self.mcm_auto_export_checkbox)
+        system_layout.addRow(self.mcm_auto_export_checkbox)
 
         self.language_combo = NoWheelComboBox()
         self.language_combo.addItem(i18n.t("language_option_auto"), "auto")
@@ -1821,13 +1861,18 @@ class MainWindow(QMainWindow):
         if current_index == -1:
             current_index = 0
         self.language_combo.setCurrentIndex(current_index)
-        form_layout.addRow(i18n.t("label_language"), self.language_combo)
+        system_layout.addRow(i18n.t("label_language"), self.language_combo)
+        form_layout.addWidget(system_group)
 
         save_btn = QPushButton(i18n.t("btn_save_config"))
         save_btn.clicked.connect(self.save_config)
-        action_row = QHBoxLayout()
-        action_row.addWidget(save_btn)
-        form_layout.addRow(action_row)
+        action_row = QWidget()
+        action_layout = QHBoxLayout(action_row)
+        action_layout.setContentsMargins(0, 0, 0, 0)
+        action_layout.addWidget(save_btn)
+        action_layout.addStretch()
+        form_layout.addWidget(action_row)
+        form_layout.addStretch()
 
         scroll_area.setWidget(form_widget)
         container_layout.addWidget(scroll_area)
