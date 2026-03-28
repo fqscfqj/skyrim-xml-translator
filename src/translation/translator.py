@@ -160,67 +160,48 @@ class Translator:
         search_debug = []
 
         if use_rag:
-            # Short text optimization: skip LLM keyword extraction for brief texts
-            words = str(text).split()
-            is_short_text = len(words) <= 3 and len(str(text).strip()) <= 20
+            threshold = self.rag_engine.config.get("rag", "similarity_threshold", 0.75)
 
-            if is_short_text:
+            log_emit(log_callback, self.rag_engine.config, "DEBUG",
+                     f"[RAG] Starting keyword extraction for text (length={len(text)}): {text[:200]}{'...' if len(text) > 200 else ''}",
+                     module="translator", func="translate_text")
+
+            keywords = self.rag_engine.extract_keywords(text, log_callback=log_callback)
+
+            try:
                 log_emit(log_callback, self.rag_engine.config, "DEBUG",
-                         f"[RAG] Short text detected ({len(words)} words, {len(str(text).strip())} chars), using quick glossary match",
-                         module="translator", func="translate_text")
-                matched_terms = self.rag_engine.quick_glossary_match(text, log_callback=log_callback)
+                         f"[RAG] Translator received {len(keywords)} keywords: {keywords}",
+                         module="translator", func="translate_text",
+                         extra={"keywords": keywords})
+            except Exception:
+                pass
 
-                # Best-effort cache for visualization
-                self._last_rag_debug_info = {
-                    "original_text": text,
-                    "keywords": [],
-                    "rag_tasks": [],
-                    "search_results": [],
-                    "matched_terms": matched_terms,
-                }
+            search_result = self.rag_engine.search_terms(
+                keywords, threshold=threshold, log_callback=log_callback,
+                source_text=text, return_debug=True,
+            )
+
+            if isinstance(search_result, tuple):
+                matched_terms, search_debug = search_result
             else:
-                threshold = self.rag_engine.config.get("rag", "similarity_threshold", 0.75)
+                matched_terms = search_result
 
+            # Best-effort cache for visualization
+            self._last_rag_debug_info = {
+                "original_text": text,
+                "keywords": keywords,
+                "rag_tasks": keywords,
+                "search_results": search_debug if isinstance(search_debug, list) else [],
+                "matched_terms": matched_terms,
+            }
+
+            try:
                 log_emit(log_callback, self.rag_engine.config, "DEBUG",
-                         f"[RAG] Starting keyword extraction for text (length={len(text)}): {text[:200]}{'...' if len(text) > 200 else ''}",
-                         module="translator", func="translate_text")
-
-                keywords = self.rag_engine.extract_keywords(text, log_callback=log_callback)
-
-                try:
-                    log_emit(log_callback, self.rag_engine.config, "DEBUG",
-                             f"[RAG] Translator received {len(keywords)} keywords: {keywords}",
-                             module="translator", func="translate_text",
-                             extra={"keywords": keywords})
-                except Exception:
-                    pass
-
-                search_result = self.rag_engine.search_terms(
-                    keywords, threshold=threshold, log_callback=log_callback,
-                    source_text=text, return_debug=True,
-                )
-
-                if isinstance(search_result, tuple):
-                    matched_terms, search_debug = search_result
-                else:
-                    matched_terms = search_result
-
-                # Best-effort cache for visualization
-                self._last_rag_debug_info = {
-                    "original_text": text,
-                    "keywords": keywords,
-                    "rag_tasks": keywords,
-                    "search_results": search_debug if isinstance(search_debug, list) else [],
-                    "matched_terms": matched_terms,
-                }
-
-                try:
-                    log_emit(log_callback, self.rag_engine.config, "DEBUG",
-                             f"[RAG] Translator received {len(matched_terms)} matched glossary terms: {list(matched_terms.keys())}",
-                             module="translator", func="translate_text",
-                             extra={"rag_matches": list(matched_terms.keys())})
-                except Exception:
-                    pass
+                         f"[RAG] Translator received {len(matched_terms)} matched glossary terms: {list(matched_terms.keys())}",
+                         module="translator", func="translate_text",
+                         extra={"rag_matches": list(matched_terms.keys())})
+            except Exception:
+                pass
 
             if matched_terms:
                 glossary_context = self._prompt_builder.build_glossary_context(text, matched_terms)
