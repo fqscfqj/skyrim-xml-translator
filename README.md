@@ -77,7 +77,7 @@ python main.py
 
 ## 打包为 Windows 可执行文件
 
-当前受支持的构建入口是 `build_exe.py`，`build_windows.ps1` 只是 Windows 下的辅助包装脚本。
+当前受支持的构建入口是 `build_exe.py`。
 
 `build_exe.py` 会在存在时包含以下资源：
 
@@ -91,7 +91,7 @@ python main.py
 快速打包：
 
 ```powershell
-./build_windows.ps1 -OneFile:$true -Windowed:$true
+python build_exe.py --onefile --windowed
 ```
 
 或直接运行：
