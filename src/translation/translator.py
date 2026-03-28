@@ -8,7 +8,7 @@ from src.prompt.prompt_manager import PromptManager
 from src.translation.text_analyzer import TextAnalyzer
 from src.translation.prompt_builder import PromptBuilder
 from src.translation.response_parser import ResponseParser
-from src.translation.quality_checker import QualityChecker
+from src.translation.quality_checker import QualityChecker, QualityIssue, QualityIssueType
 from src.cache.translation_cache import TranslationCache
 from src.logging_helper import emit as log_emit
 
@@ -105,7 +105,7 @@ class Translator:
         return debug_info
 
     def translate_text(self, text, use_rag=True, log_callback=None,
-                       max_retries=1, return_debug_info: bool = False,
+                       max_retries=2, return_debug_info: bool = False,
                        context_hint: Optional[dict] = None):
         if not text or not str(text).strip():
             if return_debug_info:
@@ -232,6 +232,7 @@ class Translator:
 
         # LLM call with simple retry
         last_translation = None
+        issues: list[QualityIssue] = []
 
         for retry_count in range(max_retries + 1):
             try:
@@ -259,12 +260,17 @@ class Translator:
 
                 # Quality check
                 issues = self._quality_checker.check(text, translation, matched_terms)
+                has_untranslated_error = self._has_untranslated_error(issues)
+
+                # Log issues (if any)
+                for issue in issues:
+                    log_emit(log_callback, self.rag_engine.config, "DEBUG",
+                             f"Quality issue: {issue.issue_type.value} ({issue.severity}): {issue.details}",
+                             module="translator", func="translate_text")
 
                 if not issues or not self._quality_checker.should_retry(issues):
                     # Good enough - cache and return
-                    if str(translation).strip() and not self._is_suspicious_identity_translation(
-                        str(text), str(translation)
-                    ):
+                    if self._should_cache_translation(str(text), str(translation), issues):
                         self._translation_cache.put(
                             str(text), prompt_style, target_lang, translation,
                             context_key=runtime_context_key)
@@ -272,20 +278,19 @@ class Translator:
                         return translation, debug_info
                     return translation
 
-                # Log issues
-                for issue in issues:
-                    log_emit(log_callback, self.rag_engine.config, "DEBUG",
-                             f"Quality issue: {issue.issue_type.value} ({issue.severity}): {issue.details}",
-                             module="translator", func="translate_text")
-
                 # Accept on last retry regardless
                 if retry_count == max_retries:
+                    if has_untranslated_error:
+                        log_emit(log_callback, self.rag_engine.config, "ERROR",
+                                 f"Rejecting translation after {max_retries} retries due to untranslated content",
+                                 module="translator", func="translate_text")
+                        raise RuntimeError(
+                            f"Translation failed quality check after {max_retries} retries: untranslated")
+
                     log_emit(log_callback, self.rag_engine.config, "WARNING",
                              f"Accepting translation with issues after {max_retries} retries",
                              module="translator", func="translate_text")
-                    if str(translation).strip() and not self._is_suspicious_identity_translation(
-                        str(text), str(translation)
-                    ):
+                    if self._should_cache_translation(str(text), str(translation), issues):
                         self._translation_cache.put(
                             str(text), prompt_style, target_lang, translation,
                             context_key=runtime_context_key)
@@ -363,6 +368,25 @@ class Translator:
             return False
         words = self._text_analyzer.extract_english_words(source)
         return len(words) >= 2
+
+    def _has_untranslated_error(self, issues: list[QualityIssue]) -> bool:
+        return any(
+            issue.issue_type == QualityIssueType.UNTRANSLATED and issue.severity == "error"
+            for issue in issues
+        )
+
+    def _should_cache_translation(
+            self,
+            source: str,
+            translation: str,
+            issues: Optional[list[QualityIssue]] = None) -> bool:
+        if not str(translation).strip():
+            return False
+        if self._is_suspicious_identity_translation(source, translation):
+            return False
+        if issues and self._has_untranslated_error(issues):
+            return False
+        return True
 
     def _should_reject_cached_translation(
             self,
