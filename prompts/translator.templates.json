@@ -1,5 +1,5 @@
 {
   "glossary_header": "术语表：",
-  "glossary_instruction_append": "\n术语规则：术语表仅作候选参考；仅在当前语义匹配时采用词典译法，不匹配可忽略。若术语候选未在原文直接出现或比原文更长，仅可用于背景理解，不得补全原文未出现的人名成分、头衔、外号或额外句子。",
+  "glossary_instruction_append": "\n以上术语仅供参考，语义不符可忽略；不得据此补全原文未出现的成分。",
   "user_template": "原文：{text}"
 }

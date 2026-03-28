@@ -238,7 +238,8 @@ class Translator:
             try:
                 if retry_count > 0:
                     retry_context = self._quality_checker.get_retry_context(issues)
-                    retry_prompt = self._build_retry_prompt(target_lang, retry_context)
+                    retry_prompt = self._build_retry_prompt(
+                        target_lang, retry_context, last_translation=last_translation)
                     log_emit(log_callback, self.rag_engine.config, "WARNING",
                              f"Retry {retry_count}/{max_retries}",
                              module="translator", func="translate_text")
@@ -322,8 +323,13 @@ class Translator:
             "user_prompt": "",
         }
 
-    def _build_retry_prompt(self, target_lang: str, retry_context: Optional[dict] = None) -> str:
-        """Build a retry prompt, selecting template by primary issue type."""
+    def _build_retry_prompt(self, target_lang: str, retry_context: Optional[dict] = None,
+                            last_translation: Optional[str] = None) -> str:
+        """Build a retry prompt, selecting template by primary issue type.
+
+        If last_translation is provided, it is prepended so the LLM can see
+        what went wrong and correct it.
+        """
         prompt_vars = {
             "target_language": self._text_analyzer.language_display_name(target_lang),
         }
@@ -347,16 +353,16 @@ class Translator:
             template_key = "translator.retry.untranslated"
 
         default_retry = (
-            "上次结果存在质量问题。请重新翻译为{target_language}，并确保："
-            "1) 完整翻译，不混入源语言词；"
-            "2) 保留全部 XML/HTML 标签和占位符；"
-            "3) 术语表仅作参考，按当前语义决定是否采用词典译法；"
-            "4) 标点与引号用法保持与原文结构一致，不得擅自添加书名号《》；"
-            "5) 原文表层词形优先于术语表：简称不得扩写为全称/头衔，短词不得扩写为整句；"
-            "6) 仅输出 JSON。"
+            "上次结果存在质量问题，请重新翻译为{target_language}。"
+            "确保：完整翻译不残留源语言词；保留所有标签和占位符；"
+            "术语表仅作参考；忠实原文形式不扩写；仅输出 JSON。"
         )
         retry_template = self.prompt_manager.get(template_key, default_retry)
         prompt = PromptBuilder.apply_prompt_vars(retry_template, prompt_vars)
+
+        # Prepend previous translation so LLM can see what to fix
+        if last_translation:
+            prompt = f"[上次翻译]\n{last_translation}\n\n{prompt}"
 
         return prompt
 

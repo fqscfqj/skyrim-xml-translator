@@ -8,6 +8,10 @@ from src.translation.text_analyzer import TextAnalyzer
 
 
 class PromptBuilder:
+    # Term count limits to control prompt size
+    _MAX_IN_SOURCE_TERMS = 15
+    _MAX_REFERENCE_TERMS = 10
+
     # Compile regex patterns once
     _ALNUM_UNDERSCORE_RE = re.compile(r"[a-z0-9_]", flags=re.IGNORECASE)
     _TERM_EDGE_PUNCT_RE = re.compile(
@@ -28,7 +32,11 @@ class PromptBuilder:
               prompt_style: str = "default",
               mcm_ui_mode: bool = False,
               context_hint: Optional[dict] = None) -> tuple[str, str]:
-        """Build complete (system_prompt, user_content) for a translation request."""
+        """Build complete (system_prompt, user_content) for a translation request.
+
+        Phase B restructure: system prompt contains only core rules;
+        glossary context and MCM rules are injected into the structured user message.
+        """
         source_lang_setting = self.config.get("general", "source_language", "auto")
         target_lang_setting = self.config.get("general", "target_language", "zh")
         source_lang_code = str(source_lang_setting) if source_lang_setting else "auto"
@@ -41,27 +49,38 @@ class PromptBuilder:
             "target_language": self._text_analyzer.language_display_name(target_lang_code),
         }
 
+        # System prompt: core rules only (no glossary, no MCM)
         system_prompt = self._get_system_prompt(prompt_style)
         system_prompt = self.apply_prompt_vars(system_prompt, prompt_vars)
 
+        # Build structured user content sections
+        sections: list[str] = []
+
+        # Glossary section → user message
         glossary_context = self.build_glossary_context(source_text, matched_terms)
         if glossary_context:
             glossary_append = self.prompt_manager.get(
                 "translator.glossary_instruction_append",
-                "\n术语规则：术语表仅作候选参考；仅在当前语义匹配时采用词典译法，不匹配可忽略。",
+                "\n以上术语仅供参考，语义不符可忽略；不得据此补全原文未出现的成分。",
             )
             glossary_append = self.apply_prompt_vars(glossary_append, prompt_vars)
-            system_prompt += f"\n\n{glossary_context}{glossary_append}"
+            sections.append(f"{glossary_context}{glossary_append}")
 
+        # MCM rules → user message
         if mcm_ui_mode:
-            system_prompt += self._build_mcm_ui_rules(
+            mcm_rules = self._build_mcm_ui_rules(
                 target_lang_code=target_lang_code,
                 source_text=source_text,
                 context_hint=context_hint,
             )
+            sections.append(mcm_rules.strip())
 
+        # Source text section
         user_template = self.prompt_manager.get("translator.user_template", "原文：{text}")
-        user_content = self.apply_prompt_vars(user_template, {**prompt_vars, "text": source_text})
+        source_line = self.apply_prompt_vars(user_template, {**prompt_vars, "text": source_text})
+        sections.append(source_line)
+
+        user_content = "\n\n".join(sections)
 
         return system_prompt, user_content
 
@@ -132,7 +151,11 @@ class PromptBuilder:
         return len(stripped.split()) <= 4
 
     def build_glossary_context(self, source_text: str, matched_terms: dict) -> str:
-        """Build flat glossary context with in-source vs reference grouping."""
+        """Build flat glossary context with in-source vs reference grouping.
+
+        Applies term count limits (_MAX_IN_SOURCE_TERMS, _MAX_REFERENCE_TERMS)
+        to keep prompt size bounded.
+        """
         if not matched_terms:
             return ""
 
@@ -149,9 +172,11 @@ class PromptBuilder:
             display_term = self._strip_term_edge_punct(term) or term
 
             if self._term_appears_in_source(display_term, source_text):
-                in_source_lines.append(f"- {display_term} -> {v_str}")
+                if len(in_source_lines) < self._MAX_IN_SOURCE_TERMS:
+                    in_source_lines.append(f"- {display_term} -> {v_str}")
             else:
-                reference_lines.append(f"- {display_term} -> {v_str}")
+                if len(reference_lines) < self._MAX_REFERENCE_TERMS:
+                    reference_lines.append(f"- {display_term} -> {v_str}")
 
         if not in_source_lines and not reference_lines:
             return ""
@@ -202,15 +227,12 @@ class PromptBuilder:
         if not system_prompt:
             system_prompt = (
                 "将输入翻译为{target_language}。"
-                "只输出 JSON：{\"translation\":\"...\"}。"
+                '只输出 JSON：{"translation":"..."}。'
                 "保留所有 XML/HTML 标签、占位符和空白。"
-                "标点与引号用法应与原文结构一致，保持停顿和语气关系；"
-                "可做必要的目标语言排版转换，但不得无依据增删关键标点，"
-                "且原文未出现书名号《》时，译文不得擅自添加。"
-                "原文表层词形优先于术语表：若原文仅出现简称/短词，只译该简称/短词，不得补入术语表中的额外成分"
-                "（头衔、外号、同位语、整句口号等）。"
-                "例如原文仅有 Mjoll 时只能译作“穆月尔”，不得扩写为“雌狮”穆月尔；"
-                "原文 treachery 仅译“背叛/叛变”等对应词，不得扩写为“有叛徒！攻击！”。"
+                "术语表仅作候选参考，语义匹配时采用；"
+                "简称不得扩写为全名/头衔，短词不得扩写为整句。"
+                "标点与原文结构一致，不无依据增删；"
+                "原文未出现书名号《》时不得添加。"
             )
         return system_prompt
 
