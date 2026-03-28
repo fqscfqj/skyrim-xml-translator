@@ -408,4 +408,4 @@ class Translator:
             return True
 
         untranslated_issue = self._quality_checker._check_untranslated(source, translation)
-        return untranslated_issue is not None
+        return untranslated_issue is not None and untranslated_issue.severity == "error"

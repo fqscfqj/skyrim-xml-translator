@@ -27,6 +27,8 @@ class QualityChecker:
 
     _CJK_CHAR_RE = re.compile(r'[\u4e00-\u9fff]')
     _ALPHA_RE = re.compile(r'[a-zA-Z]')
+    _PROPER_NOUN_TOKEN_RE = re.compile(r"^[A-Z][a-z'\-]+$")
+    _ALLOW_CONNECTORS = {"of", "the", "and", "de", "la", "du", "da"}
 
     def __init__(self):
         self._text_analyzer = TextAnalyzer()
@@ -105,6 +107,34 @@ class QualityChecker:
                 )
 
         return None
+
+    def _looks_like_proper_noun_label(self, text: str) -> bool:
+        """Heuristic for labels like location/NPC names that may legitimately stay romanized."""
+        if not text:
+            return False
+
+        cleaned = self._text_analyzer._XML_TAG_RE.sub('', text)
+        cleaned = self._text_analyzer._PLACEHOLDER_RE.sub('', cleaned)
+        cleaned = cleaned.strip().strip('"').strip("'")
+        if not cleaned:
+            return False
+
+        # Reject sentence-like strings and long text.
+        if len(cleaned) > 48 or any(ch in cleaned for ch in ".!?;:,"):
+            return False
+
+        tokens = [t for t in cleaned.split() if t]
+        if not tokens or len(tokens) > 4:
+            return False
+
+        for token in tokens:
+            lower = token.lower()
+            if lower in self._ALLOW_CONNECTORS:
+                continue
+            if not self._PROPER_NOUN_TOKEN_RE.match(token):
+                return False
+
+        return True
 
     # --- Layer 2: Untranslated glossary fragments ---
 

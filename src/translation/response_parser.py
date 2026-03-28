@@ -28,6 +28,12 @@ class ResponseParser:
         """Parse translation from LLM response. Handles JSON, plain text, and recovery."""
         clean_response = self._MARKDOWN_CODE_RE.sub('', response).strip()
 
+        if self._looks_like_broken_json_fragment(clean_response):
+            log_emit(log_callback, self.config, "WARNING",
+                 f"Discarding broken JSON fragment response: {clean_response[:120]}",
+                 module="response_parser", func="parse")
+            return str(original_text)
+
         # Try direct JSON parse
         try:
             data = json.loads(clean_response)
@@ -65,6 +71,19 @@ class ResponseParser:
             return result
 
         return str(response.strip())
+
+    @staticmethod
+    def _looks_like_broken_json_fragment(text: str) -> bool:
+        if not text:
+            return True
+        compact = text.strip()
+        if compact in {"{", "}", "[", "]", "\"", "'", "{\"", "\"}"}:
+            return True
+        if compact.startswith("{") and "translation" not in compact.lower() and len(compact) < 8:
+            return True
+        if compact.count("{") > compact.count("}") and len(compact) < 32:
+            return True
+        return False
 
     def _try_relaxed_json_extract(self, response: str,
                                   log_callback: Optional[Callable] = None) -> Optional[str]:
