@@ -155,9 +155,9 @@ class ResponseParser:
             prompt_patterns = [
                 "reformat", "Respond only", "Output only", "Extract the",
                 "格式化器", "原任务输入", "模型回复", "只输出合法 JSON",
-                "{\"translation\"", "translation", "JSON", "json"
+                "{\"translation\"",
             ]
-            if result and not any(pattern in result for pattern in prompt_patterns if len(pattern) > 5):
+            if result and not any(pattern in result for pattern in prompt_patterns):
                 return result
             elif result:
                 log_emit(log_callback, self.config, "WARNING",
