@@ -66,7 +66,7 @@ class StatusSegmentedProgressBar(QProgressBar):
         }
         self.update()
 
-    def paintEvent(self, a0: QPaintEvent) -> None:
+    def paintEvent(self, a0: Optional[QPaintEvent]) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
