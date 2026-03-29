@@ -2521,7 +2521,7 @@ class MainWindow(QMainWindow):
         hidden_blank_count = len(strings) - len(display_strings)
         self.trans_table.setRowCount(len(display_strings))
         
-        warning_same_count = 0
+        untranslated_same_count = 0
         for i, (node, id_text, source, dest) in enumerate(display_strings):
             # ID
             id_item = QTableWidgetItem(id_text)
@@ -2536,20 +2536,15 @@ class MainWindow(QMainWindow):
             # Dest
             source_text = str(source) if source is not None else ""
             dest_text = str(dest) if dest is not None else ""
-            row_status = self.ROW_STATUS_UNTRANSLATED
-            row_details = ""
             if source_text.strip() and source_text.strip() == dest_text.strip():
-                dest_text = source_text
-                row_status = self.ROW_STATUS_WARNING
-                row_details = "Imported entry already has identical source and translation"
-                warning_same_count += 1
+                untranslated_same_count += 1
 
             dest_item = QTableWidgetItem(dest_text)
             # Store node in UserRole for easy update
             dest_item.setData(Qt.ItemDataRole.UserRole, node) 
             self.trans_table.setItem(i, 2, dest_item)
-            if row_status == self.ROW_STATUS_WARNING:
-                self._set_row_status(i, row_status, row_details)
+            if source_text.strip() and source_text.strip() == dest_text.strip():
+                self._set_row_status(i, self.ROW_STATUS_UNTRANSLATED)
             elif str(dest_text).strip():
                 self._set_row_status(i, self.ROW_STATUS_SUCCESS)
             else:
@@ -2575,12 +2570,12 @@ class MainWindow(QMainWindow):
                 module='gui_main',
                 func='load_xml_to_table'
             )
-        if warning_same_count > 0:
+        if untranslated_same_count > 0:
             log_emit(
                 self.log,
                 self.config_manager,
                 'INFO',
-                f"Marked {warning_same_count} entries where Source == Dest as warning.",
+                f"Imported {untranslated_same_count} entries where Source == Dest as untranslated.",
                 module='gui_main',
                 func='load_xml_to_table'
             )
