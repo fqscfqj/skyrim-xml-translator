@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QRectF
 from PyQt6.QtGui import (
     QDragEnterEvent, QDropEvent, QIcon, QWheelEvent, QGuiApplication, QCloseEvent,
-    QPaintEvent,
+    QPaintEvent, QMouseEvent,
     QColor, QSyntaxHighlighter, QTextCharFormat, QFont, QPainter, QPainterPath,
 )
 
@@ -535,10 +535,11 @@ class StatusFilterBubbleLabel(QLabel):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-    def mousePressEvent(self, ev):
-        if ev.button() == Qt.MouseButton.LeftButton:
+    def mousePressEvent(self, ev: Optional[QMouseEvent]):
+        if ev is not None and ev.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit(self.status_key)
-        super().mousePressEvent(ev)
+        if ev is not None:
+            super().mousePressEvent(ev)
 
 
 class LogHighlighter(QSyntaxHighlighter):
