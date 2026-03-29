@@ -215,7 +215,35 @@ class KeywordExtractor:
             return None
 
     def _is_sensitive_block_error(self, exc) -> bool:
-        return self._extract_status_code(exc) in (403, 421)
+        status_code = self._extract_status_code(exc)
+        if status_code in (403, 421):
+            return True
+
+        # OpenAI and compatible providers sometimes surface content inspection
+        # failures as HTTP 400 BadRequestError with a structured code/message.
+        message = str(exc or "").lower()
+        if "data_inspection_failed" in message:
+            return True
+        if "output data may contain inappropriate content" in message:
+            return True
+
+        code = getattr(exc, "code", None)
+        if isinstance(code, str) and code.lower() == "data_inspection_failed":
+            return True
+
+        body = getattr(exc, "body", None)
+        if isinstance(body, dict):
+            err = body.get("error")
+            if isinstance(err, dict):
+                err_code = err.get("code")
+                err_message = err.get("message")
+                if isinstance(err_code, str) and err_code.lower() == "data_inspection_failed":
+                    return True
+                if isinstance(err_message, str):
+                    lowered = err_message.lower()
+                    if "data_inspection_failed" in lowered or "output data may contain inappropriate content" in lowered:
+                        return True
+        return False
 
     def _is_refusal_response_text(self, text: str) -> bool:
         normalized = (text or "").strip().lower()
@@ -288,11 +316,17 @@ class KeywordExtractor:
                 self.config,
                 "WARNING",
                 f"[RAG] keyword_extract primary search failed ({reason}, sensitive_block={sensitive}); "
-                "action=fallback_to_search_fallback_model",
-                exc=primary_error,
+                f"action={'local_regex_fallback' if sensitive else 'fallback_to_search_fallback_model'}",
+                exc=None if sensitive else primary_error,
                 module="keyword_extractor",
                 func="_extract_via_llm",
             )
+            if sensitive:
+                # Content inspection failures are usually tied to the prompt/text
+                # pair itself, so retrying with another model rarely helps.
+                # Fall back to the deterministic extractor instead of failing the
+                # whole RAG path.
+                return []
         else:
             reason = "refusal_text" if self._is_refusal_response_text(primary_response_text) else "blank_response"
             log_emit(
@@ -330,11 +364,13 @@ class KeywordExtractor:
                     self.config,
                     "ERROR",
                     f"[RAG] keyword_extract fallback search failed ({reason}, sensitive_block={sensitive}); "
-                    "result=fallback_failed",
-                    exc=fallback_error,
+                    f"result={'local_regex_fallback' if sensitive else 'fallback_failed'}",
+                    exc=None if sensitive else fallback_error,
                     module="keyword_extractor",
                     func="_extract_via_llm",
                 )
+                if sensitive:
+                    return []
                 raise RuntimeError("keyword search unavailable after fallback") from fallback_error
 
             reason = "refusal_text" if self._is_refusal_response_text(fallback_response_text) else "blank_response"

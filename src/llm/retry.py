@@ -16,6 +16,7 @@ class ErrorType(Enum):
     CONNECTION_ERROR = "connection_error"
     TIMEOUT = "timeout"
     AUTH_ERROR = "auth_error"
+    CONTENT_BLOCK = "content_block"
     INVALID_REQUEST = "invalid_request"
     UNKNOWN = "unknown"
 
@@ -35,9 +36,40 @@ _DEFAULT_STRATEGIES: dict[ErrorType, RetryStrategy] = {
     ErrorType.CONNECTION_ERROR: RetryStrategy(max_retries=5, backoff_base=0.5, backoff_max=30.0),
     ErrorType.TIMEOUT: RetryStrategy(max_retries=2, backoff_base=1.0, backoff_max=15.0),
     ErrorType.AUTH_ERROR: RetryStrategy(max_retries=0),
+    ErrorType.CONTENT_BLOCK: RetryStrategy(max_retries=0),
     ErrorType.INVALID_REQUEST: RetryStrategy(max_retries=0),
     ErrorType.UNKNOWN: RetryStrategy(max_retries=1, backoff_base=1.0),
 }
+
+
+def _is_content_block_error(exc: Exception) -> bool:
+    """Detect provider-side safety / content-inspection blocks."""
+    if not isinstance(exc, openai.BadRequestError):
+        return False
+
+    message = str(exc or "").lower()
+    if "data_inspection_failed" in message:
+        return True
+    if "output data may contain inappropriate content" in message:
+        return True
+
+    code = getattr(exc, "code", None)
+    if isinstance(code, str) and code.lower() == "data_inspection_failed":
+        return True
+
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict):
+            err_code = err.get("code")
+            err_message = err.get("message")
+            if isinstance(err_code, str) and err_code.lower() == "data_inspection_failed":
+                return True
+            if isinstance(err_message, str):
+                lowered = err_message.lower()
+                if "data_inspection_failed" in lowered or "output data may contain inappropriate content" in lowered:
+                    return True
+    return False
 
 
 def classify_error(exc: Exception) -> ErrorType:
@@ -52,6 +84,8 @@ def classify_error(exc: Exception) -> ErrorType:
         return ErrorType.TIMEOUT
     if isinstance(exc, openai.AuthenticationError):
         return ErrorType.AUTH_ERROR
+    if _is_content_block_error(exc):
+        return ErrorType.CONTENT_BLOCK
     if isinstance(exc, openai.BadRequestError):
         return ErrorType.INVALID_REQUEST
     if isinstance(exc, openai.APIError):
@@ -66,7 +100,7 @@ def get_strategy(error_type: ErrorType, config_overrides: Optional[dict] = None)
     """
     base = _DEFAULT_STRATEGIES.get(error_type, _DEFAULT_STRATEGIES[ErrorType.UNKNOWN])
     # Never override explicitly non-retryable categories.
-    if error_type in (ErrorType.AUTH_ERROR, ErrorType.INVALID_REQUEST):
+    if error_type in (ErrorType.AUTH_ERROR, ErrorType.CONTENT_BLOCK, ErrorType.INVALID_REQUEST):
         return base
     if not config_overrides:
         return base
@@ -158,9 +192,12 @@ def execute_with_retry(
 
             # Non-retryable errors
             if strategy.max_retries == 0:
-                log_emit(log_callback, config_manager, "ERROR",
-                         f"{log_prefix} non-retryable error ({error_type.value}): {exc}",
-                         exc=exc, module="llm.retry", func="execute_with_retry")
+                is_content_block = error_type == ErrorType.CONTENT_BLOCK
+                log_level = "WARNING" if is_content_block else "ERROR"
+                log_emit(log_callback, config_manager, log_level,
+                         f"{log_prefix} non-retryable {'content block' if is_content_block else 'error'} ({error_type.value}): {exc}",
+                         exc=None if is_content_block else exc,
+                         module="llm.retry", func="execute_with_retry")
                 raise
 
             attempt += 1
