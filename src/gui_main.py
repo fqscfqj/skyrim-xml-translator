@@ -526,6 +526,21 @@ class NoWheelComboBox(QComboBox):
         cast(QWheelEvent, e).ignore()
 
 
+class StatusFilterBubbleLabel(QLabel):
+    clicked = pyqtSignal(str)
+
+    def __init__(self, status_key: str, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.status_key = status_key
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit(self.status_key)
+        super().mousePressEvent(event)
+
+
 class LogHighlighter(QSyntaxHighlighter):
     STATE_NONE = 0
     STATE_DEBUG = 1
@@ -1372,6 +1387,8 @@ class MainWindow(QMainWindow):
         self.row_error_map = {}
         self.status_summary_counts = self._create_empty_status_summary_counts()
         self.status_summary_refresh_suspended = False
+        self.active_status_filter = "all"
+        self.status_filter_bubbles: dict[str, StatusFilterBubbleLabel] = {}
         self.status_summary_total_label: Optional[QLabel] = None
         self.status_summary_untranslated_label: Optional[QLabel] = None
         self.status_summary_warning_label: Optional[QLabel] = None
@@ -1519,13 +1536,6 @@ class MainWindow(QMainWindow):
 
         # Options & Actions
         action_layout = QHBoxLayout()
-        self.status_filter_combo = NoWheelComboBox()
-        self.status_filter_combo.addItem(i18n.t("status_filter_all"), "all")
-        self.status_filter_combo.addItem(i18n.t("status_filter_untranslated"), self.ROW_STATUS_UNTRANSLATED)
-        self.status_filter_combo.addItem(i18n.t("status_filter_success"), self.ROW_STATUS_SUCCESS)
-        self.status_filter_combo.addItem(i18n.t("status_filter_warning"), self.ROW_STATUS_WARNING)
-        self.status_filter_combo.addItem(i18n.t("status_filter_failed"), self.ROW_STATUS_FAILED)
-        self.status_filter_combo.currentIndexChanged.connect(self._apply_status_filter)
         # Overwrite existing translations option removed — always overwrite now
         
         self.start_btn = QPushButton(i18n.t("btn_translate_all"))
@@ -1546,8 +1556,6 @@ class MainWindow(QMainWindow):
         self.trans_resume_btn.clicked.connect(self.resume_translation)
         self.trans_resume_btn.setEnabled(False)
 
-        action_layout.addWidget(QLabel(i18n.t("label_translation_status_filter")))
-        action_layout.addWidget(self.status_filter_combo)
         action_layout.addStretch()
         action_layout.addWidget(self.start_btn)
         action_layout.addWidget(self.trans_sel_btn)
@@ -1581,69 +1589,29 @@ class MainWindow(QMainWindow):
         summary_title.setStyleSheet("font-weight: 600; color: #455A64;")
         summary_layout.addWidget(summary_title)
 
-        self.status_summary_total_label = QLabel()
-        self.status_summary_total_label.setStyleSheet(
-            "QLabel {"
-            " border: 1px solid #CFD8DC;"
-            " border-radius: 10px;"
-            " padding: 4px 10px;"
-            " background-color: #ECEFF1;"
-            " color: #37474F;"
-            " font-weight: 600;"
-            "}"
-        )
+        self.status_summary_total_label = StatusFilterBubbleLabel("all")
+        self.status_summary_total_label.clicked.connect(self._on_status_filter_bubble_clicked)
+        self.status_filter_bubbles["all"] = self.status_summary_total_label
         summary_layout.addWidget(self.status_summary_total_label)
 
-        self.status_summary_untranslated_label = QLabel()
-        self.status_summary_untranslated_label.setStyleSheet(
-            "QLabel {"
-            " border: 1px solid #CFD8DC;"
-            " border-radius: 10px;"
-            " padding: 4px 10px;"
-            " background-color: #F5F5F5;"
-            " color: #455A64;"
-            " font-weight: 600;"
-            "}"
-        )
+        self.status_summary_untranslated_label = StatusFilterBubbleLabel(self.ROW_STATUS_UNTRANSLATED)
+        self.status_summary_untranslated_label.clicked.connect(self._on_status_filter_bubble_clicked)
+        self.status_filter_bubbles[self.ROW_STATUS_UNTRANSLATED] = self.status_summary_untranslated_label
         summary_layout.addWidget(self.status_summary_untranslated_label)
 
-        self.status_summary_warning_label = QLabel()
-        self.status_summary_warning_label.setStyleSheet(
-            "QLabel {"
-            " border: 1px solid #FDD835;"
-            " border-radius: 10px;"
-            " padding: 4px 10px;"
-            " background-color: #FFF9C4;"
-            " color: #795548;"
-            " font-weight: 600;"
-            "}"
-        )
+        self.status_summary_warning_label = StatusFilterBubbleLabel(self.ROW_STATUS_WARNING)
+        self.status_summary_warning_label.clicked.connect(self._on_status_filter_bubble_clicked)
+        self.status_filter_bubbles[self.ROW_STATUS_WARNING] = self.status_summary_warning_label
         summary_layout.addWidget(self.status_summary_warning_label)
 
-        self.status_summary_failed_label = QLabel()
-        self.status_summary_failed_label.setStyleSheet(
-            "QLabel {"
-            " border: 1px solid #EF9A9A;"
-            " border-radius: 10px;"
-            " padding: 4px 10px;"
-            " background-color: #FFEBEE;"
-            " color: #C62828;"
-            " font-weight: 600;"
-            "}"
-        )
+        self.status_summary_failed_label = StatusFilterBubbleLabel(self.ROW_STATUS_FAILED)
+        self.status_summary_failed_label.clicked.connect(self._on_status_filter_bubble_clicked)
+        self.status_filter_bubbles[self.ROW_STATUS_FAILED] = self.status_summary_failed_label
         summary_layout.addWidget(self.status_summary_failed_label)
 
-        self.status_summary_success_label = QLabel()
-        self.status_summary_success_label.setStyleSheet(
-            "QLabel {"
-            " border: 1px solid #A5D6A7;"
-            " border-radius: 10px;"
-            " padding: 4px 10px;"
-            " background-color: #E8F5E9;"
-            " color: #2E7D32;"
-            " font-weight: 600;"
-            "}"
-        )
+        self.status_summary_success_label = StatusFilterBubbleLabel(self.ROW_STATUS_SUCCESS)
+        self.status_summary_success_label.clicked.connect(self._on_status_filter_bubble_clicked)
+        self.status_filter_bubbles[self.ROW_STATUS_SUCCESS] = self.status_summary_success_label
         summary_layout.addWidget(self.status_summary_success_label)
         summary_layout.addStretch()
         layout.addLayout(summary_layout)
@@ -1690,6 +1658,67 @@ class MainWindow(QMainWindow):
         if not suspended:
             self._refresh_status_summary_labels()
 
+    def _get_status_filter_bubble_style(self, status: str, selected: bool) -> str:
+        style_map = {
+            "all": {
+                "normal": ("#CFD8DC", "#ECEFF1", "#37474F", "#90A4AE"),
+                "selected": ("#78909C", "#DDE5EA", "#263238", "#607D8B"),
+            },
+            self.ROW_STATUS_UNTRANSLATED: {
+                "normal": ("#CFD8DC", "#F5F5F5", "#455A64", "#90A4AE"),
+                "selected": ("#78909C", "#E0E0E0", "#263238", "#607D8B"),
+            },
+            self.ROW_STATUS_WARNING: {
+                "normal": ("#FDD835", "#FFF9C4", "#795548", "#F9A825"),
+                "selected": ("#F9A825", "#FFEEA5", "#5D4037", "#F57F17"),
+            },
+            self.ROW_STATUS_FAILED: {
+                "normal": ("#EF9A9A", "#FFEBEE", "#C62828", "#E57373"),
+                "selected": ("#E57373", "#FFD7DB", "#B71C1C", "#D32F2F"),
+            },
+            self.ROW_STATUS_SUCCESS: {
+                "normal": ("#A5D6A7", "#E8F5E9", "#2E7D32", "#66BB6A"),
+                "selected": ("#81C784", "#D0ECD3", "#1B5E20", "#43A047"),
+            },
+        }
+        spec = style_map.get(status, style_map["all"])
+        border_color, background_color, text_color, hover_border_color = spec["selected" if selected else "normal"]
+        border_width = "2px" if selected else "1px"
+        padding = "3px 9px" if selected else "4px 10px"
+        font_weight = "700" if selected else "600"
+        return (
+            "QLabel {"
+            f" border: {border_width} solid {border_color};"
+            " border-radius: 10px;"
+            f" padding: {padding};"
+            f" background-color: {background_color};"
+            f" color: {text_color};"
+            f" font-weight: {font_weight};"
+            "}"
+            f"QLabel:hover {{ border-color: {hover_border_color}; }}"
+        )
+
+    def _update_status_filter_bubble_styles(self) -> None:
+        if not self.status_filter_bubbles:
+            return
+
+        for status, label in self.status_filter_bubbles.items():
+            label.setStyleSheet(
+                self._get_status_filter_bubble_style(
+                    status,
+                    status == self.active_status_filter,
+                )
+            )
+
+    def _set_active_status_filter(self, status: str) -> None:
+        self.active_status_filter = status or "all"
+        self._update_status_filter_bubble_styles()
+        self._apply_status_filter()
+
+    def _on_status_filter_bubble_clicked(self, status: str) -> None:
+        next_status = "all" if status == self.active_status_filter and status != "all" else status
+        self._set_active_status_filter(next_status)
+
     def _refresh_status_summary_labels(self) -> None:
         labels_ready = all([
             self.status_summary_total_label is not None,
@@ -1730,6 +1759,7 @@ class MainWindow(QMainWindow):
                 count=counts.get(self.ROW_STATUS_SUCCESS, 0)
             )
         )
+        self._update_status_filter_bubble_styles()
 
     def _set_row_status(self, row: int, status: str, error: str = "") -> None:
         if row < 0:
@@ -1750,9 +1780,19 @@ class MainWindow(QMainWindow):
         else:
             self.row_error_map.pop(row, None)
         self._apply_row_status_style(row)
+        self._update_row_visibility(row)
         self._sync_translation_progress_bar()
         if not self.status_summary_refresh_suspended:
             self._refresh_status_summary_labels()
+
+    def _update_row_visibility(self, row: int) -> None:
+        if not hasattr(self, "trans_table"):
+            return
+
+        selected = self.active_status_filter if hasattr(self, "active_status_filter") else "all"
+        status = self.row_status_map.get(row, self.ROW_STATUS_UNTRANSLATED)
+        hidden = selected != "all" and status != selected
+        self.trans_table.setRowHidden(row, hidden)
 
     def _apply_row_status_style(self, row: int) -> None:
         status = self.row_status_map.get(row, self.ROW_STATUS_UNTRANSLATED)
@@ -1789,9 +1829,7 @@ class MainWindow(QMainWindow):
     def _apply_status_filter(self, _index: Optional[int] = None) -> None:
         if not hasattr(self, "trans_table"):
             return
-        selected = "all"
-        if hasattr(self, "status_filter_combo"):
-            selected = str(self.status_filter_combo.currentData() or "all")
+        selected = self.active_status_filter if hasattr(self, "active_status_filter") else "all"
         for row in range(self.trans_table.rowCount()):
             status = self.row_status_map.get(row, self.ROW_STATUS_UNTRANSLATED)
             hidden = selected != "all" and status != selected
@@ -2906,7 +2944,6 @@ class MainWindow(QMainWindow):
                 self._set_row_status(row, self.ROW_STATUS_WARNING, str(details or ""))
             else:
                 self._set_row_status(row, self.ROW_STATUS_SUCCESS)
-            self._apply_status_filter()
 
     def update_table_row_failed(self, row, error):
         if self.stop_receiving_results:
@@ -2926,7 +2963,6 @@ class MainWindow(QMainWindow):
                     self.log(f"Error clearing row {row} after failure: {e}")
 
         self._set_row_status(row, self.ROW_STATUS_FAILED, str(error))
-        self._apply_status_filter()
 
     def on_table_item_changed(self, item):
         # Only care about Dest column (index 2)
@@ -2947,7 +2983,6 @@ class MainWindow(QMainWindow):
                     self._set_row_status(item.row(), self.ROW_STATUS_SUCCESS)
                 else:
                     self._set_row_status(item.row(), self.ROW_STATUS_UNTRANSLATED)
-                self._apply_status_filter()
                 # self.log(f"Updated translation manually for row {item.row()}")
         # Update button enabled state (in case manual edit changed content)
         self.update_translate_buttons_enabled()
