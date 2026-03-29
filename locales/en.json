@@ -18,6 +18,7 @@
     "status_filter_all": "All",
     "status_filter_untranslated": "Untranslated",
     "status_filter_success": "Success",
+    "status_filter_warning": "Warning",
     "status_filter_failed": "Failed",
     "header_id": "ID",
     "header_source": "Source",

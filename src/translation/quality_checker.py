@@ -34,7 +34,8 @@ class QualityChecker:
         self._text_analyzer = TextAnalyzer()
 
     def check(self, source: str, translation: str,
-              matched_terms: Optional[dict] = None) -> list[QualityIssue]:
+              matched_terms: Optional[dict] = None,
+              reference_id: Optional[str] = None) -> list[QualityIssue]:
         """Run quality checks and return a list of issues."""
         issues: list[QualityIssue] = []
 
@@ -42,7 +43,7 @@ class QualityChecker:
             return issues
 
         # Layer 1: Complete untranslated detection
-        issue = self._check_untranslated(source, translation)
+        issue = self._check_untranslated(source, translation, reference_id=reference_id)
         if issue:
             issues.append(issue)
             return issues  # No point checking further
@@ -73,14 +74,27 @@ class QualityChecker:
 
     # --- Layer 1: Complete untranslated ---
 
-    def _check_untranslated(self, source: str, translation: str) -> Optional[QualityIssue]:
-        if self._text_analyzer.should_preserve_identity_translation(source, translation):
-            return None
-
+    def _check_untranslated(self, source: str, translation: str,
+                            reference_id: Optional[str] = None) -> Optional[QualityIssue]:
         source_clean = source.strip().lower()
         translation_clean = translation.strip().lower()
 
         if source_clean == translation_clean:
+            if self._text_analyzer.should_preserve_identity_translation(
+                    source, translation, reference_id=reference_id):
+                return QualityIssue(
+                    issue_type=QualityIssueType.UNTRANSLATED,
+                    severity="warning",
+                    details="Identifier-like text preserved as-is",
+                )
+
+            if self._looks_like_proper_noun_label(source):
+                return QualityIssue(
+                    issue_type=QualityIssueType.UNTRANSLATED,
+                    severity="warning",
+                    details="Proper-noun-like label preserved as-is",
+                )
+
             return QualityIssue(
                 issue_type=QualityIssueType.UNTRANSLATED,
                 severity="error",
@@ -164,7 +178,7 @@ class QualityChecker:
         if untranslated:
             return QualityIssue(
                 issue_type=QualityIssueType.UNTRANSLATED,
-                severity="error",
+                severity="warning",
                 details=f"Possible untranslated glossary fragments: {untranslated}",
                 fragments=untranslated,
             )

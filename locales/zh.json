@@ -18,6 +18,7 @@
     "status_filter_all": "全部",
     "status_filter_untranslated": "未翻译",
     "status_filter_success": "成功",
+    "status_filter_warning": "警告",
     "status_filter_failed": "失败",
     "header_id": "ID",
     "header_source": "原文 (Source)",

@@ -107,6 +107,10 @@ class Translator:
     def translate_text(self, text, use_rag=True, log_callback=None,
                        max_retries=2, return_debug_info: bool = False,
                        context_hint: Optional[dict] = None):
+        reference_id = ""
+        if isinstance(context_hint, dict):
+            reference_id = str(context_hint.get("entry_id", "") or "")
+
         if not text or not str(text).strip():
             if return_debug_info:
                 return "", self._empty_debug_info(text)
@@ -126,7 +130,11 @@ class Translator:
                      f"Preserving identifier-like text without translation: {text}",
                      module="translator", func="translate_text")
             if return_debug_info:
-                return str(text), self._empty_debug_info(text)
+                return str(text), self._empty_debug_info(
+                    text,
+                    result_status="warning",
+                    result_details="Identifier-like text preserved as-is",
+                )
             return str(text)
 
         # Check translation cache
@@ -148,7 +156,16 @@ class Translator:
                          f"Translation cache hit for text (len={len(text)})",
                          module="translator", func="translate_text")
                 if return_debug_info:
-                    return cached, self._empty_debug_info(text)
+                    cached_issue = self._quality_checker._check_untranslated(
+                        str(text), str(cached), reference_id=reference_id)
+                    result_status, result_details = self._result_status_from_issues(
+                        [cached_issue] if cached_issue is not None else []
+                    )
+                    return cached, self._empty_debug_info(
+                        text,
+                        result_status=result_status,
+                        result_details=result_details,
+                    )
                 return cached
         if cached is not None and not str(cached).strip():
             log_emit(log_callback, self.rag_engine.config, "DEBUG",
@@ -268,8 +285,14 @@ class Translator:
                 last_translation = translation
 
                 # Quality check
-                issues = self._quality_checker.check(text, translation, matched_terms)
+                issues = self._quality_checker.check(
+                    text,
+                    translation,
+                    matched_terms,
+                    reference_id=reference_id,
+                )
                 has_untranslated_error = self._has_untranslated_error(issues)
+                result_status, result_details = self._result_status_from_issues(issues)
 
                 # Log issues (if any)
                 for issue in issues:
@@ -283,6 +306,7 @@ class Translator:
                         self._translation_cache.put(
                             str(text), prompt_style, target_lang, translation,
                             context_key=runtime_context_key)
+                    self._set_debug_result(debug_info, result_status, result_details)
                     if return_debug_info:
                         return translation, debug_info
                     return translation
@@ -303,6 +327,7 @@ class Translator:
                         self._translation_cache.put(
                             str(text), prompt_style, target_lang, translation,
                             context_key=runtime_context_key)
+                    self._set_debug_result(debug_info, result_status, result_details)
                     if return_debug_info:
                         return translation, debug_info
                     return translation
@@ -319,7 +344,8 @@ class Translator:
 
     # --- Internal helpers ---
 
-    def _empty_debug_info(self, text) -> dict:
+    def _empty_debug_info(self, text, result_status: str = "success",
+                          result_details: str = "") -> dict:
         return {
             "original_text": text,
             "keywords": [],
@@ -329,7 +355,32 @@ class Translator:
             "glossary_context": "",
             "system_prompt": "",
             "user_prompt": "",
+            "result_status": result_status,
+            "result_details": result_details,
         }
+
+    @staticmethod
+    def _set_debug_result(debug_info: Optional[dict], result_status: str,
+                          result_details: str) -> None:
+        if not isinstance(debug_info, dict):
+            return
+        debug_info["result_status"] = result_status
+        debug_info["result_details"] = result_details
+
+    @staticmethod
+    def _result_status_from_issues(issues: list[QualityIssue]) -> tuple[str, str]:
+        if not issues:
+            return "success", ""
+
+        for issue in issues:
+            if issue.severity == "error":
+                return "failed", issue.details
+
+        for issue in issues:
+            if issue.severity == "warning":
+                return "warning", issue.details
+
+        return "success", ""
 
     def _build_retry_prompt(self, target_lang: str, retry_context: Optional[dict] = None,
                             last_translation: Optional[str] = None) -> str:
