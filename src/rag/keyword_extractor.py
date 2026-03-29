@@ -18,7 +18,7 @@ class KeywordExtractor:
     _WHITESPACE_RE = re.compile(r"\s+")
     _WORD_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9'\-]*")
     _STRIP_PUNCT_RE = re.compile(r"^[^\w\u4e00-\u9fff]+|[^\w\u4e00-\u9fff]+$")
-    _KW_CACHE_VERSION = "kw_v13"
+    _KW_CACHE_VERSION = "kw_v15"
     _LOW_SIGNAL_SINGLE_TOKENS = frozenset({
         "honestly", "kinda", "kindof", "sorta", "sortof",
         "really", "actually", "basically", "seriously", "literally",
@@ -152,6 +152,84 @@ class KeywordExtractor:
             out = out.replace("{" + str(key) + "}", str(value))
         return out
 
+    def _flatten_prompt_lines(self, value) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            stripped = value.strip()
+            return [stripped] if stripped else []
+        if isinstance(value, list):
+            lines: list[str] = []
+            for item in value:
+                lines.extend(self._flatten_prompt_lines(item))
+            return lines
+        return []
+
+    def _get_default_keyword_prompt_template(self) -> str:
+        return (
+            "从原文中提取术语查询词。\n"
+            "只返回 JSON 字符串数组。\n\n"
+            "规则：\n"
+            "1) 每项必须是原文中的连续片段。\n"
+            "2) 优先专有名词：人名、地名、阵营、称号、任务、怪物、法术、物品、世界观术语。\n"
+            "3) 其次提取有辨识度的关键词，避免泛词。\n"
+            "4) 不要推断、翻译、归一化或改写；保留原大小写。\n"
+            "5) 无结果仅返回 []。\n\n"
+            "原文：\"{text}\""
+        )
+
+    def _get_keyword_prompt_template(self) -> str:
+        prompt_config = self.prompt_manager.get("rag.keywords")
+
+        if isinstance(prompt_config, str):
+            return prompt_config
+
+        if isinstance(prompt_config, list):
+            prompt_template = "\n".join(self._flatten_prompt_lines(prompt_config)).strip()
+            if prompt_template:
+                return prompt_template
+
+        if isinstance(prompt_config, dict):
+            structured_keys = ("task", "output", "rules", "input")
+            if not any(key in prompt_config for key in structured_keys):
+                prompt_template = prompt_config.get("prompt")
+                if isinstance(prompt_template, str) and prompt_template.strip():
+                    return prompt_template
+
+            lines: list[str] = []
+            for key in ("task", "output"):
+                lines.extend(self._flatten_prompt_lines(prompt_config.get(key)))
+
+            rule_lines: list[str] = []
+            rules = prompt_config.get("rules")
+            if isinstance(rules, dict):
+                for value in rules.values():
+                    rule_lines.extend(self._flatten_prompt_lines(value))
+            else:
+                rule_lines.extend(self._flatten_prompt_lines(rules))
+
+            if rule_lines:
+                if lines:
+                    lines.append("")
+                lines.append("规则：")
+                lines.extend(f"- {line}" for line in rule_lines)
+
+            input_lines = self._flatten_prompt_lines(prompt_config.get("input"))
+            if input_lines:
+                if lines:
+                    lines.append("")
+                lines.extend(input_lines)
+
+            prompt_template = "\n".join(lines).strip()
+            if prompt_template:
+                return prompt_template
+
+        prompt_template = self.prompt_manager.get("rag.keywords.prompt")
+        if isinstance(prompt_template, str) and prompt_template.strip():
+            return prompt_template
+
+        return self._get_default_keyword_prompt_template()
+
     @classmethod
     def _normalize_for_source_match(cls, text: str) -> str:
         if not text:
@@ -268,19 +346,7 @@ class KeywordExtractor:
 
     def _extract_via_llm(self, text: str, log_callback) -> list[str]:
         """Use LLM to extract fine-grained glossary lookup keywords."""
-        prompt_template = self.prompt_manager.get("rag.keywords.prompt")
-        if not prompt_template:
-            prompt_template = (
-                "从原文中提取术语查询词。\n"
-                "只返回 JSON 字符串数组。\n\n"
-                "规则：\n"
-                "1) 每项必须是原文中的连续片段。\n"
-                "2) 优先专有名词：人名、地名、阵营、称号、任务、怪物、法术、物品、世界观术语。\n"
-                "3) 其次提取有辨识度的关键词，避免泛词。\n"
-                "4) 不要推断、翻译、归一化或改写；保留原大小写。\n"
-                "5) 无结果仅返回 []。\n\n"
-                "原文：\"{text}\""
-            )
+        prompt_template = self._get_keyword_prompt_template()
 
         prompt = self._apply_prompt_vars(
             prompt_template,
