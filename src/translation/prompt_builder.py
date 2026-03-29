@@ -224,7 +224,18 @@ class PromptBuilder:
                 "术语表仅作候选参考，语义匹配时采用；"
                 "简称不得扩写为全名/头衔，短词不得扩写为整句。"
             )
-        return system_prompt
+        return self._normalize_prompt_text(system_prompt)
+
+    def _normalize_prompt_text(self, value: Any) -> str:
+        """Normalize prompt text loaded from JSON.
+
+        Supports plain strings and list-of-lines formats.
+        """
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            return "\n".join(str(x) for x in value)
+        return str(value) if value is not None else ""
 
     def _term_appears_in_source(self, term: str, source_text: str) -> bool:
         if not term or not source_text:
