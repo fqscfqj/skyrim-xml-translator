@@ -130,6 +130,13 @@ class Translator:
                 return "", self._empty_debug_info(text)
             return ""
 
+        # Reject oversized texts that would exceed LLM context limits
+        if len(str(text)) > 4000:
+            log_emit(log_callback, self.rag_engine.config, "ERROR",
+                     f"Text exceeds 4000 characters (len={len(str(text))}), skipping translation",
+                     module="translator", func="translate_text")
+            raise ValueError(f"Text too long ({len(str(text))} chars, limit 4000), translation skipped")
+
         # Skip symbols-only text
         if self._text_analyzer.is_only_symbols_or_numbers(str(text)):
             log_emit(log_callback, self.rag_engine.config, "DEBUG",
