@@ -121,6 +121,14 @@ class Translator:
                 return str(text), self._empty_debug_info(text)
             return str(text)
 
+        if self._should_passthrough_identifier(str(text), context_hint=context_hint):
+            log_emit(log_callback, self.rag_engine.config, "DEBUG",
+                     f"Preserving identifier-like text without translation: {text}",
+                     module="translator", func="translate_text")
+            if return_debug_info:
+                return str(text), self._empty_debug_info(text)
+            return str(text)
+
         # Check translation cache
         prompt_style = self.rag_engine.config.get("general", "prompt_style", "default")
         target_lang = self.rag_engine.config.get("general", "target_language", "zh")
@@ -372,8 +380,27 @@ class Translator:
             return False
         if source.strip().lower() != translation.strip().lower():
             return False
+        if self._text_analyzer.should_preserve_identity_translation(source, translation):
+            return False
         words = self._text_analyzer.extract_english_words(source)
         return len(words) >= 2
+
+    def _should_passthrough_identifier(
+            self,
+            text: str,
+            context_hint: Optional[dict] = None) -> bool:
+        entry_id = ""
+        if isinstance(context_hint, dict):
+            entry_id = str(context_hint.get("entry_id", "") or "")
+
+        if entry_id:
+            return self._text_analyzer.should_preserve_identity_translation(
+                source=text,
+                translation=text,
+                reference_id=entry_id,
+            )
+
+        return self._text_analyzer.looks_like_internal_identifier(text)
 
     def _has_untranslated_error(self, issues: list[QualityIssue]) -> bool:
         return any(

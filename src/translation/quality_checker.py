@@ -74,6 +74,9 @@ class QualityChecker:
     # --- Layer 1: Complete untranslated ---
 
     def _check_untranslated(self, source: str, translation: str) -> Optional[QualityIssue]:
+        if self._text_analyzer.should_preserve_identity_translation(source, translation):
+            return None
+
         source_clean = source.strip().lower()
         translation_clean = translation.strip().lower()
 
@@ -93,8 +96,7 @@ class QualityChecker:
                 )
 
         # Check if translation is mostly English when it shouldn't be
-        text_only = self._text_analyzer._XML_TAG_RE.sub('', translation)
-        text_only = self._text_analyzer._PLACEHOLDER_RE.sub('', text_only)
+        text_only = self._text_analyzer.strip_markup_and_placeholders(translation)
         if len(text_only) > 5:
             chinese_chars = len(self._CJK_CHAR_RE.findall(text_only))
             alpha_chars = len(self._text_analyzer._ALPHA_CHAR_RE.findall(text_only))

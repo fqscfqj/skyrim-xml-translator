@@ -28,6 +28,7 @@ from src.rag.engine import RAGEngine
 from src.esp_xml_processor import ESPXMLProcessor
 from src.xml_processor import XMLProcessor
 from src.mcm_processor import MCMProcessor
+from src.translation.text_analyzer import TextAnalyzer
 from src.translation.translator import Translator
 from src.logging_helper import emit as log_emit
 from src.i18n import i18n
@@ -950,6 +951,7 @@ class MainWindow(QMainWindow):
         self.mcm_processor = MCMProcessor()
         self.current_processor = self.xml_processor
         self.current_file_type = "xml"
+        self._text_analyzer = TextAnalyzer()
         self.translator = Translator(self.llm_client, self.rag_engine)
         self.translator.set_runtime_flags({"mcm_ui_mode": False})
         self.model_param_controls = {}
@@ -2187,6 +2189,7 @@ class MainWindow(QMainWindow):
         self.trans_table.setRowCount(len(display_strings))
         
         cleared_same_count = 0
+        preserved_same_count = 0
         for i, (node, id_text, source, dest) in enumerate(display_strings):
             # ID
             id_item = QTableWidgetItem(id_text)
@@ -2202,13 +2205,17 @@ class MainWindow(QMainWindow):
             source_text = str(source) if source is not None else ""
             dest_text = str(dest) if dest is not None else ""
             if source_text.strip() and source_text.strip() == dest_text.strip():
-                dest_text = ""
-                cleared_same_count += 1
-                if node is not None:
-                    try:
-                        self.current_processor.update_dest(node, "", overwrite=True)
-                    except Exception as e:
-                        self.log(f"Error normalizing identical source/dest at row {i}: {e}")
+                if self._text_analyzer.should_preserve_identity_translation(
+                        source_text, dest_text, reference_id=id_text):
+                    preserved_same_count += 1
+                else:
+                    dest_text = ""
+                    cleared_same_count += 1
+                    if node is not None:
+                        try:
+                            self.current_processor.update_dest(node, "", overwrite=True)
+                        except Exception as e:
+                            self.log(f"Error normalizing identical source/dest at row {i}: {e}")
 
             dest_item = QTableWidgetItem(dest_text)
             # Store node in UserRole for easy update
@@ -2244,6 +2251,15 @@ class MainWindow(QMainWindow):
                 self.config_manager,
                 'INFO',
                 f"Normalized {cleared_same_count} entries where Source == Dest to untranslated.",
+                module='gui_main',
+                func='load_xml_to_table'
+            )
+        if preserved_same_count > 0:
+            log_emit(
+                self.log,
+                self.config_manager,
+                'INFO',
+                f"Preserved {preserved_same_count} identifier-like entries where Source == Dest.",
                 module='gui_main',
                 func='load_xml_to_table'
             )
