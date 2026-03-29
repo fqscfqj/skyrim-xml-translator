@@ -22,6 +22,12 @@ class TextAnalyzer:
         text = self._XML_TAG_RE.sub('', str(text))
         return self._PLACEHOLDER_RE.sub('', text)
 
+    def extract_xml_tags(self, text: str) -> list[str]:
+        """Extract XML-style tags from text."""
+        if not text:
+            return []
+        return self._XML_TAG_RE.findall(str(text))
+
     def normalize_text(self, text: str) -> str:
         """Normalize text for heuristic comparisons without changing semantics."""
         return self.strip_markup_and_placeholders(text).strip().strip('"').strip("'")
