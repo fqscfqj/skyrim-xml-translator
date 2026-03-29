@@ -6,7 +6,12 @@ from typing import Optional
 
 class TextAnalyzer:
     # Compile regex patterns once
-    _XML_TAG_RE = re.compile(r'<[^>]+>')
+    _ANGLE_BLOCK_RE = re.compile(r'<[^>]*>')
+    _XML_TAG_NAME_RE = re.compile(r'^[A-Za-z_][\w:.-]*$')
+    _XML_ATTRS_RE = re.compile(
+        r'^[A-Za-z_:][\w:.-]*\s*=\s*(?:"[^"]*"|\'[^\']*\'|[^<>\s"\']+)'
+        r'(?:\s+[A-Za-z_:][\w:.-]*\s*=\s*(?:"[^"]*"|\'[^\']*\'|[^<>\s"\']+))*\s*$'
+    )
     _PLACEHOLDER_RE = re.compile(r'%\w+|\{\d+\}|\[[^\]]*\]')
     # Match latin words even when adjacent to CJK (e.g. "Choose你的").
     _ENGLISH_WORD_RE = re.compile(r'(?<![A-Za-z])[A-Za-z]{2,}(?![A-Za-z])')
@@ -19,14 +24,49 @@ class TextAnalyzer:
         """Remove XML tags and known placeholder patterns from text."""
         if text is None:
             return ""
-        text = self._XML_TAG_RE.sub('', str(text))
+        text = self._ANGLE_BLOCK_RE.sub(self._strip_xml_like_match, str(text))
         return self._PLACEHOLDER_RE.sub('', text)
 
     def extract_xml_tags(self, text: str) -> list[str]:
         """Extract XML-style tags from text."""
         if not text:
             return []
-        return self._XML_TAG_RE.findall(str(text))
+        return [
+            match.group(0)
+            for match in self._ANGLE_BLOCK_RE.finditer(str(text))
+            if self._is_xml_like_tag(match.group(0))
+        ]
+
+    def _strip_xml_like_match(self, match: re.Match[str]) -> str:
+        token = match.group(0)
+        return '' if self._is_xml_like_tag(token) else token
+
+    def _is_xml_like_tag(self, token: str) -> bool:
+        if not token or len(token) < 3 or not token.startswith('<') or not token.endswith('>'):
+            return False
+
+        inner = token[1:-1].strip()
+        if not inner or inner[0] in {'<', '>', '!', '?'}:
+            return False
+
+        if inner.endswith('/'):
+            inner = inner[:-1].rstrip()
+        if not inner:
+            return False
+
+        if inner.startswith('/'):
+            name = inner[1:].strip()
+            return bool(name) and bool(self._XML_TAG_NAME_RE.fullmatch(name))
+
+        parts = inner.split(None, 1)
+        tag_name = parts[0]
+        if not self._XML_TAG_NAME_RE.fullmatch(tag_name):
+            return False
+
+        if len(parts) == 1:
+            return True
+
+        return bool(self._XML_ATTRS_RE.fullmatch(parts[1]))
 
     def normalize_text(self, text: str) -> str:
         """Normalize text for heuristic comparisons without changing semantics."""
