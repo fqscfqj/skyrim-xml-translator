@@ -1006,6 +1006,13 @@ class MainWindow(QMainWindow):
         self.rag_debug_cache = {}
         self.row_status_map = {}
         self.row_error_map = {}
+        self.status_summary_counts = self._create_empty_status_summary_counts()
+        self.status_summary_refresh_suspended = False
+        self.status_summary_total_label: Optional[QLabel] = None
+        self.status_summary_untranslated_label: Optional[QLabel] = None
+        self.status_summary_warning_label: Optional[QLabel] = None
+        self.status_summary_failed_label: Optional[QLabel] = None
+        self.status_summary_success_label: Optional[QLabel] = None
 
         # Pagination state
         self.current_page = 1
@@ -1202,6 +1209,81 @@ class MainWindow(QMainWindow):
         
         layout.addLayout(action_layout)
 
+        summary_layout = QHBoxLayout()
+        summary_layout.setContentsMargins(0, 0, 0, 0)
+        summary_layout.setSpacing(8)
+
+        summary_title = QLabel(i18n.t("label_status_summary"))
+        summary_title.setStyleSheet("font-weight: 600; color: #455A64;")
+        summary_layout.addWidget(summary_title)
+
+        self.status_summary_total_label = QLabel()
+        self.status_summary_total_label.setStyleSheet(
+            "QLabel {"
+            " border: 1px solid #CFD8DC;"
+            " border-radius: 10px;"
+            " padding: 4px 10px;"
+            " background-color: #ECEFF1;"
+            " color: #37474F;"
+            " font-weight: 600;"
+            "}"
+        )
+        summary_layout.addWidget(self.status_summary_total_label)
+
+        self.status_summary_untranslated_label = QLabel()
+        self.status_summary_untranslated_label.setStyleSheet(
+            "QLabel {"
+            " border: 1px solid #CFD8DC;"
+            " border-radius: 10px;"
+            " padding: 4px 10px;"
+            " background-color: #F5F5F5;"
+            " color: #455A64;"
+            " font-weight: 600;"
+            "}"
+        )
+        summary_layout.addWidget(self.status_summary_untranslated_label)
+
+        self.status_summary_warning_label = QLabel()
+        self.status_summary_warning_label.setStyleSheet(
+            "QLabel {"
+            " border: 1px solid #FDD835;"
+            " border-radius: 10px;"
+            " padding: 4px 10px;"
+            " background-color: #FFF9C4;"
+            " color: #795548;"
+            " font-weight: 600;"
+            "}"
+        )
+        summary_layout.addWidget(self.status_summary_warning_label)
+
+        self.status_summary_failed_label = QLabel()
+        self.status_summary_failed_label.setStyleSheet(
+            "QLabel {"
+            " border: 1px solid #EF9A9A;"
+            " border-radius: 10px;"
+            " padding: 4px 10px;"
+            " background-color: #FFEBEE;"
+            " color: #C62828;"
+            " font-weight: 600;"
+            "}"
+        )
+        summary_layout.addWidget(self.status_summary_failed_label)
+
+        self.status_summary_success_label = QLabel()
+        self.status_summary_success_label.setStyleSheet(
+            "QLabel {"
+            " border: 1px solid #A5D6A7;"
+            " border-radius: 10px;"
+            " padding: 4px 10px;"
+            " background-color: #E8F5E9;"
+            " color: #2E7D32;"
+            " font-weight: 600;"
+            "}"
+        )
+        summary_layout.addWidget(self.status_summary_success_label)
+        summary_layout.addStretch()
+        layout.addLayout(summary_layout)
+
         # Table
         self.trans_table = QTableWidget()
         self.trans_table.setColumnCount(3)
@@ -1223,12 +1305,75 @@ class MainWindow(QMainWindow):
         self._reset_translation_progress_bar_style()
         layout.addWidget(self.progress_bar)
 
+        self._refresh_status_summary_labels()
+
         widget.setLayout(layout)
         return widget
+
+    def _create_empty_status_summary_counts(self) -> dict[str, int]:
+        return {
+            self.ROW_STATUS_UNTRANSLATED: 0,
+            self.ROW_STATUS_WARNING: 0,
+            self.ROW_STATUS_FAILED: 0,
+            self.ROW_STATUS_SUCCESS: 0,
+        }
+
+    def _reset_status_summary_counts(self) -> None:
+        self.status_summary_counts = self._create_empty_status_summary_counts()
+
+    def _set_status_summary_refresh_suspended(self, suspended: bool) -> None:
+        self.status_summary_refresh_suspended = suspended
+        if not suspended:
+            self._refresh_status_summary_labels()
+
+    def _refresh_status_summary_labels(self) -> None:
+        labels_ready = all([
+            self.status_summary_total_label is not None,
+            self.status_summary_untranslated_label is not None,
+            self.status_summary_warning_label is not None,
+            self.status_summary_failed_label is not None,
+            self.status_summary_success_label is not None,
+        ])
+        if not labels_ready:
+            return
+
+        counts = self.status_summary_counts
+        total = sum(counts.values())
+        self.status_summary_total_label.setText(i18n.t("summary_total").format(count=total))
+        self.status_summary_untranslated_label.setText(
+            i18n.t("summary_untranslated").format(
+                count=counts.get(self.ROW_STATUS_UNTRANSLATED, 0)
+            )
+        )
+        self.status_summary_warning_label.setText(
+            i18n.t("summary_warning").format(
+                count=counts.get(self.ROW_STATUS_WARNING, 0)
+            )
+        )
+        self.status_summary_failed_label.setText(
+            i18n.t("summary_failed").format(
+                count=counts.get(self.ROW_STATUS_FAILED, 0)
+            )
+        )
+        self.status_summary_success_label.setText(
+            i18n.t("summary_success").format(
+                count=counts.get(self.ROW_STATUS_SUCCESS, 0)
+            )
+        )
 
     def _set_row_status(self, row: int, status: str, error: str = "") -> None:
         if row < 0:
             return
+
+        old_status = self.row_status_map.get(row)
+        if old_status != status:
+            if old_status is not None:
+                self.status_summary_counts[old_status] = max(
+                    0,
+                    self.status_summary_counts.get(old_status, 0) - 1,
+                )
+            self.status_summary_counts[status] = self.status_summary_counts.get(status, 0) + 1
+
         self.row_status_map[row] = status
         if error:
             self.row_error_map[row] = str(error)
@@ -1236,6 +1381,8 @@ class MainWindow(QMainWindow):
             self.row_error_map.pop(row, None)
         self._apply_row_status_style(row)
         self._refresh_translation_progress_bar_style()
+        if not self.status_summary_refresh_suspended:
+            self._refresh_status_summary_labels()
 
     def _apply_row_status_style(self, row: int) -> None:
         status = self.row_status_map.get(row, self.ROW_STATUS_UNTRANSLATED)
@@ -2265,6 +2412,8 @@ class MainWindow(QMainWindow):
         self.trans_table.blockSignals(True) # Prevent itemChanged signals during load
         self.row_status_map.clear()
         self.row_error_map.clear()
+        self._reset_status_summary_counts()
+        self._set_status_summary_refresh_suspended(True)
         self.progress_bar.setValue(0)
         self._reset_translation_progress_bar_style()
 
@@ -2311,6 +2460,7 @@ class MainWindow(QMainWindow):
                 self._set_row_status(i, self.ROW_STATUS_UNTRANSLATED)
 
         self.trans_table.blockSignals(False)
+        self._set_status_summary_refresh_suspended(False)
         self._apply_status_filter()
         log_emit(
             self.log,
@@ -2857,22 +3007,26 @@ class MainWindow(QMainWindow):
             return
 
         self.trans_table.blockSignals(True)
-        for row in range(self.trans_table.rowCount()):
-            dest_item = self.trans_table.item(row, 2)
-            if dest_item is None:
-                dest_item = QTableWidgetItem("")
-                self.trans_table.setItem(row, 2, dest_item)
-            else:
-                dest_item.setText("")
-            self._set_row_status(row, self.ROW_STATUS_UNTRANSLATED)
-            # Update current file node
-            node = dest_item.data(Qt.ItemDataRole.UserRole)
-            if node is not None:
-                try:
-                    self.current_processor.update_dest(node, "", overwrite=True)
-                except Exception as e:
-                    self.log(f"Error clearing translation for row {row}: {e}")
-        self.trans_table.blockSignals(False)
+        self._set_status_summary_refresh_suspended(True)
+        try:
+            for row in range(self.trans_table.rowCount()):
+                dest_item = self.trans_table.item(row, 2)
+                if dest_item is None:
+                    dest_item = QTableWidgetItem("")
+                    self.trans_table.setItem(row, 2, dest_item)
+                else:
+                    dest_item.setText("")
+                self._set_row_status(row, self.ROW_STATUS_UNTRANSLATED)
+                # Update current file node
+                node = dest_item.data(Qt.ItemDataRole.UserRole)
+                if node is not None:
+                    try:
+                        self.current_processor.update_dest(node, "", overwrite=True)
+                    except Exception as e:
+                        self.log(f"Error clearing translation for row {row}: {e}")
+        finally:
+            self.trans_table.blockSignals(False)
+            self._set_status_summary_refresh_suspended(False)
         self._apply_status_filter()
         self._clear_translation_caches()
         self.log(i18n.t("msg_cleared_all_translations"))
