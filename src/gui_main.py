@@ -535,10 +535,10 @@ class StatusFilterBubbleLabel(QLabel):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit(self.status_key)
-        super().mousePressEvent(event)
+        super().mousePressEvent(ev)
 
 
 class LogHighlighter(QSyntaxHighlighter):
