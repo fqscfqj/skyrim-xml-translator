@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QRectF
 from PyQt6.QtGui import (
     QDragEnterEvent, QDropEvent, QIcon, QWheelEvent, QGuiApplication, QCloseEvent,
+    QPaintEvent,
     QColor, QSyntaxHighlighter, QTextCharFormat, QFont, QPainter, QPainterPath,
 )
 
@@ -65,7 +66,7 @@ class StatusSegmentedProgressBar(QProgressBar):
         }
         self.update()
 
-    def paintEvent(self, _event) -> None:
+    def paintEvent(self, a0: QPaintEvent) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
