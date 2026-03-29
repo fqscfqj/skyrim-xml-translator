@@ -16,10 +16,10 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QTableWidget, QTableWidgetItem, QHeaderView, QSplitter, QDoubleSpinBox,
                              QComboBox, QAbstractSpinBox, QScrollArea, QDialog, QTreeWidget, QTreeWidgetItem,
                              QAbstractItemView)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QRectF
 from PyQt6.QtGui import (
     QDragEnterEvent, QDropEvent, QIcon, QWheelEvent, QGuiApplication, QCloseEvent,
-    QColor, QSyntaxHighlighter, QTextCharFormat, QFont,
+    QColor, QSyntaxHighlighter, QTextCharFormat, QFont, QPainter, QPainterPath,
 )
 
 from src.config.manager import ConfigManager
@@ -32,6 +32,112 @@ from src.translation.text_analyzer import TextAnalyzer
 from src.translation.translator import Translator
 from src.logging_helper import emit as log_emit
 from src.i18n import i18n
+
+
+class StatusSegmentedProgressBar(QProgressBar):
+    SEGMENT_ORDER = ("success", "warning", "failed")
+    SEGMENT_COLORS = {
+        "success": QColor("#43A047"),
+        "warning": QColor("#FBC02D"),
+        "failed": QColor("#E53935"),
+    }
+    BACKGROUND_COLOR = QColor("#F5F5F5")
+    BORDER_COLOR = QColor("#B0BEC5")
+    TEXT_COLOR = QColor("#263238")
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._status_counts = {
+            "untranslated": 0,
+            "success": 0,
+            "warning": 0,
+            "failed": 0,
+        }
+        self.setTextVisible(True)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+    def set_status_counts(self, counts: dict[str, int]) -> None:
+        self._status_counts = {
+            "untranslated": max(0, int(counts.get("untranslated", 0))),
+            "success": max(0, int(counts.get("success", 0))),
+            "warning": max(0, int(counts.get("warning", 0))),
+            "failed": max(0, int(counts.get("failed", 0))),
+        }
+        self.update()
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        rect = self.rect().adjusted(0, 0, -1, -1)
+        if rect.width() <= 0 or rect.height() <= 0:
+            return
+
+        radius = min(4.0, rect.height() / 2.0)
+        rect_f = QRectF(rect)
+        frame_path = QPainterPath()
+        frame_path.addRoundedRect(rect_f, radius, radius)
+
+        painter.fillPath(frame_path, self.BACKGROUND_COLOR)
+
+        progress_width = self._progress_width(rect.width())
+        if progress_width > 0:
+            processed_count = sum(self._status_counts[status] for status in self.SEGMENT_ORDER)
+            if processed_count > 0:
+                painter.save()
+                painter.setClipPath(frame_path)
+                self._paint_segments(painter, rect_f, progress_width, processed_count)
+                painter.restore()
+
+        painter.setPen(self.BORDER_COLOR)
+        painter.drawPath(frame_path)
+
+        if self.isTextVisible():
+            painter.setPen(self.TEXT_COLOR)
+            painter.drawText(rect, int(Qt.AlignmentFlag.AlignCenter), self.text())
+
+    def _progress_width(self, total_width: int) -> int:
+        minimum = self.minimum()
+        maximum = self.maximum()
+        if total_width <= 0 or maximum <= minimum:
+            return 0
+
+        value = min(max(self.value(), minimum), maximum)
+        progress_ratio = (value - minimum) / (maximum - minimum)
+        return max(0, min(total_width, int(round(total_width * progress_ratio))))
+
+    def _paint_segments(
+        self,
+        painter: QPainter,
+        rect: QRectF,
+        progress_width: int,
+        processed_count: int,
+    ) -> None:
+        non_zero_statuses = [
+            status for status in self.SEGMENT_ORDER if self._status_counts[status] > 0
+        ]
+        if not non_zero_statuses:
+            return
+
+        left = rect.left()
+        remaining_width = progress_width
+        for index, status in enumerate(non_zero_statuses):
+            count = self._status_counts[status]
+            if index == len(non_zero_statuses) - 1:
+                segment_width = remaining_width
+            else:
+                segment_width = int(progress_width * count / processed_count)
+                remaining_following = len(non_zero_statuses) - index - 1
+                max_width = max(0, remaining_width - remaining_following)
+                segment_width = max(0, min(segment_width, max_width))
+
+            if segment_width > 0:
+                painter.fillRect(
+                    QRectF(left, rect.top(), float(segment_width), rect.height()),
+                    self.SEGMENT_COLORS[status],
+                )
+                left += segment_width
+                remaining_width -= segment_width
 
 class GlossaryWorker(QThread):
     progress = pyqtSignal(int)
@@ -1314,8 +1420,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.trans_table)
 
         # Progress
-        self.progress_bar = QProgressBar()
-        self._reset_translation_progress_bar_style()
+        self.progress_bar = StatusSegmentedProgressBar()
+        self._sync_translation_progress_bar()
         layout.addWidget(self.progress_bar)
 
         self._refresh_status_summary_labels()
@@ -1399,7 +1505,7 @@ class MainWindow(QMainWindow):
         else:
             self.row_error_map.pop(row, None)
         self._apply_row_status_style(row)
-        self._refresh_translation_progress_bar_style()
+        self._sync_translation_progress_bar()
         if not self.status_summary_refresh_suspended:
             self._refresh_status_summary_labels()
 
@@ -1425,45 +1531,15 @@ class MainWindow(QMainWindow):
             else:
                 item.setToolTip("")
 
-    def _set_translation_progress_bar_chunk_color(self, chunk_color: str) -> None:
+    def _sync_translation_progress_bar(self) -> None:
         if not hasattr(self, "progress_bar"):
             return
-        self.progress_bar.setStyleSheet(
-            "QProgressBar {"
-            " border: 1px solid #B0BEC5;"
-            " border-radius: 4px;"
-            " text-align: center;"
-            " background-color: #F5F5F5;"
-            "}"
-            "QProgressBar::chunk {"
-            f" background-color: {chunk_color};"
-            " border-radius: 4px;"
-            "}"
-        )
-
-    def _reset_translation_progress_bar_style(self) -> None:
-        self._set_translation_progress_bar_chunk_color("#90A4AE")
-
-    def _refresh_translation_progress_bar_style(self) -> None:
-        if not hasattr(self, "progress_bar"):
-            return
-        if self.progress_bar.value() <= 0:
-            self._reset_translation_progress_bar_style()
-            return
-
-        statuses = set(self.row_status_map.values())
-        if self.ROW_STATUS_FAILED in statuses:
-            self._set_translation_progress_bar_chunk_color("#E53935")
-        elif self.ROW_STATUS_WARNING in statuses:
-            self._set_translation_progress_bar_chunk_color("#FBC02D")
-        elif self.ROW_STATUS_SUCCESS in statuses:
-            self._set_translation_progress_bar_chunk_color("#43A047")
-        else:
-            self._reset_translation_progress_bar_style()
+        self.progress_bar.set_status_counts(self.status_summary_counts)
+        self.progress_bar.update()
 
     def _handle_translation_progress(self, value: int) -> None:
         self.progress_bar.setValue(value)
-        self._refresh_translation_progress_bar_style()
+        self._sync_translation_progress_bar()
 
     def _apply_status_filter(self, _index: Optional[int] = None) -> None:
         if not hasattr(self, "trans_table"):
@@ -2279,7 +2355,7 @@ class MainWindow(QMainWindow):
         self.trans_resume_btn.setEnabled(False)
         self.stop_receiving_results = False  # Reset flag when starting new translation
         self.progress_bar.setValue(0)
-        self._reset_translation_progress_bar_style()
+        self._sync_translation_progress_bar()
         log_emit(self.log, self.config_manager, 'INFO', i18n.t("msg_starting_translation_task"), module='gui_main', func='start_translation')
 
         # Collect items to translate from table
@@ -2434,7 +2510,7 @@ class MainWindow(QMainWindow):
         self._reset_status_summary_counts()
         self._set_status_summary_refresh_suspended(True)
         self.progress_bar.setValue(0)
-        self._reset_translation_progress_bar_style()
+        self._sync_translation_progress_bar()
 
         strings = list(self.current_processor.get_strings())
         display_strings = [
@@ -2715,7 +2791,7 @@ class MainWindow(QMainWindow):
         self.stop_btn.setEnabled(False)
         self.trans_pause_btn.setEnabled(False)
         self.trans_resume_btn.setEnabled(False)
-        self._refresh_translation_progress_bar_style()
+        self._sync_translation_progress_bar()
         self.log(i18n.t("msg_task_finished"))
 
         if (
@@ -2993,7 +3069,7 @@ class MainWindow(QMainWindow):
         self.trans_resume_btn.setEnabled(False)
         self.stop_receiving_results = False  # Reset flag when starting new translation
         self.progress_bar.setValue(0)
-        self._reset_translation_progress_bar_style()
+        self._sync_translation_progress_bar()
         self.log(i18n.t("msg_starting_selected_translation").format(count=len(selected_rows)))
 
         items_to_process = []
