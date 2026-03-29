@@ -2,7 +2,7 @@
 
 import re
 from bisect import bisect_right
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from src.translation.text_analyzer import TextAnalyzer
 
