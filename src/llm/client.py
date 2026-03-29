@@ -54,6 +54,67 @@ class LLMClient:
                 except Exception:
                     pass
 
+    @staticmethod
+    def _usage_to_dict(usage: Any) -> dict[str, Any]:
+        if usage is None:
+            return {}
+        if isinstance(usage, dict):
+            return usage
+        if hasattr(usage, "model_dump"):
+            try:
+                data = usage.model_dump()
+                if isinstance(data, dict):
+                    return data
+            except Exception:
+                pass
+        if hasattr(usage, "to_dict"):
+            try:
+                data = usage.to_dict()
+                if isinstance(data, dict):
+                    return data
+            except Exception:
+                pass
+
+        data: dict[str, Any] = {}
+        for name in dir(usage):
+            if name.startswith("_"):
+                continue
+            try:
+                value = getattr(usage, name)
+            except Exception:
+                continue
+            if callable(value):
+                continue
+            data[name] = value
+        return data
+
+    @classmethod
+    def _extract_usage_stats(cls, response: Any) -> dict[str, Optional[int]]:
+        usage = cls._usage_to_dict(getattr(response, "usage", None))
+        prompt_details = usage.get("prompt_tokens_details") or {}
+        if not isinstance(prompt_details, dict):
+            prompt_details = {}
+
+        def _safe_int(value: Any) -> Optional[int]:
+            if value is None:
+                return None
+            try:
+                return int(value)
+            except Exception:
+                return None
+
+        return {
+            "prompt_tokens": _safe_int(usage.get("prompt_tokens")),
+            "completion_tokens": _safe_int(usage.get("completion_tokens")),
+            "total_tokens": _safe_int(usage.get("total_tokens")),
+            "cached_tokens": _safe_int(
+                prompt_details.get("cached_tokens", usage.get("cached_tokens"))
+            ),
+            "cache_creation_input_tokens": _safe_int(
+                prompt_details.get("cache_creation_input_tokens", usage.get("cache_creation_input_tokens"))
+            ),
+        }
+
     def get_embedding(self, text, log_callback=None):
         """获取文本向量"""
         if not self.embed_client:
@@ -154,6 +215,38 @@ class LLMClient:
             call_args = dict(request_args)
             call_args["timeout"] = call_timeout
             response = client.chat.completions.create(**call_args)
+            usage_stats = self._extract_usage_stats(response)
+
+            prompt_tokens = usage_stats.get("prompt_tokens")
+            completion_tokens = usage_stats.get("completion_tokens")
+            cached_tokens = usage_stats.get("cached_tokens")
+            cache_creation_tokens = usage_stats.get("cache_creation_input_tokens")
+            cache_capable_hint = (
+                cached_tokens is not None
+                or cache_creation_tokens is not None
+                or "qwen" in model.lower()
+            )
+
+            if prompt_tokens is not None or completion_tokens is not None:
+                level = "INFO"
+                if (
+                    cache_capable_hint
+                    and prompt_tokens is not None
+                    and prompt_tokens >= 256
+                    and (cached_tokens or 0) <= 0
+                ):
+                    level = "WARNING"
+                log_emit(
+                    callback,
+                    self.config,
+                    level,
+                    f"{operation} usage: model={model} prompt_tokens={prompt_tokens or 0} "
+                    f"completion_tokens={completion_tokens or 0} total_tokens={usage_stats.get('total_tokens') or 0} "
+                    f"cached_tokens={cached_tokens or 0} cache_creation_input_tokens={cache_creation_tokens or 0}",
+                    module="llm_client",
+                    func="_call",
+                )
+
             # Track cost if tracker available
             if self.cost_tracker and hasattr(response, "usage") and response.usage:
                 self.cost_tracker.record(
