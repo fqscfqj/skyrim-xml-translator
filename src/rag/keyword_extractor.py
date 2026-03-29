@@ -2,6 +2,7 @@
 
 import json
 import re
+from collections import Counter
 from typing import Optional, Callable, List
 
 from src.logging_helper import emit as log_emit
@@ -18,7 +19,7 @@ class KeywordExtractor:
     _WHITESPACE_RE = re.compile(r"\s+")
     _WORD_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9'\-]*")
     _STRIP_PUNCT_RE = re.compile(r"^[^\w\u4e00-\u9fff]+|[^\w\u4e00-\u9fff]+$")
-    _KW_CACHE_VERSION = "kw_v15"
+    _KW_CACHE_VERSION = "kw_v16"
     _LOW_SIGNAL_SINGLE_TOKENS = frozenset({
         "honestly", "kinda", "kindof", "sorta", "sortof",
         "really", "actually", "basically", "seriously", "literally",
@@ -51,9 +52,15 @@ class KeywordExtractor:
 
     # --- Public API ---
 
-    def extract(self, text: str, log_callback: Optional[Callable] = None) -> list[str]:
+    def extract(self, text: str, log_callback: Optional[Callable] = None,
+                return_debug: bool = False):
         """Extract keywords from text. Checks cache first."""
+        debug_info = self._build_keyword_debug_info(text)
+
         if not text or not text.strip():
+            debug_info["result_source"] = "empty_input"
+            if return_debug:
+                return [], debug_info
             return []
 
         if self._cache is not None:
@@ -66,6 +73,19 @@ class KeywordExtractor:
                              module="keyword_extractor", func="extract")
                 except Exception:
                     pass
+                debug_info["cache_hit"] = True
+                debug_info["result_source"] = "cache"
+                debug_info["final_keywords"] = list(cached)
+                self._record_keyword_step(
+                    debug_info,
+                    phase="cache",
+                    name="cache_hit",
+                    before=[],
+                    after=cached,
+                    note=f"cache_version={self._KW_CACHE_VERSION}",
+                )
+                if return_debug:
+                    return cached, debug_info
                 return cached
 
         try:
@@ -75,13 +95,38 @@ class KeywordExtractor:
         except Exception:
             pass
 
-        keywords = self._extract_via_llm(text, log_callback)
-        keywords = self._finalize_keywords(keywords, text, log_callback)
+        keywords = self._extract_via_llm(text, log_callback, debug_info=debug_info)
+        keywords = self._finalize_keywords(
+            keywords,
+            text,
+            log_callback,
+            debug_info=debug_info,
+            phase="llm",
+        )
 
         # Minimal deterministic fallback only when LLM output is empty/invalid.
         if not keywords:
-            keywords = self._extract_proper_nouns_regex(text)
-            keywords = self._finalize_keywords(keywords, text, log_callback)
+            regex_keywords = self._extract_proper_nouns_regex(text)
+            if regex_keywords:
+                debug_info["raw_keywords"] = list(regex_keywords)
+                debug_info["processed_keywords"] = list(regex_keywords)
+                self._record_keyword_step(
+                    debug_info,
+                    phase="regex",
+                    name="raw_extraction",
+                    before=[],
+                    after=regex_keywords,
+                    note="LLM output empty or invalid; using regex proper-noun fallback.",
+                )
+            keywords = self._finalize_keywords(
+                regex_keywords,
+                text,
+                log_callback,
+                debug_info=debug_info,
+                phase="regex",
+            )
+            if keywords:
+                debug_info["result_source"] = "regex_fallback"
 
         try:
             log_emit(log_callback, self.config, "DEBUG",
@@ -95,6 +140,12 @@ class KeywordExtractor:
             cache_key = LRUCache.make_key(self._KW_CACHE_VERSION, text)
             self._cache.put(cache_key, keywords)
 
+        debug_info["final_keywords"] = list(keywords)
+        if not debug_info.get("result_source"):
+            debug_info["result_source"] = "no_keywords"
+
+        if return_debug:
+            return keywords, debug_info
         return keywords
 
     def extract_titlecase_phrases(self, text: str) -> List[str]:
@@ -230,6 +281,66 @@ class KeywordExtractor:
 
         return self._get_default_keyword_prompt_template()
 
+    @staticmethod
+    def _clone_keyword_list(values) -> list[str]:
+        if not isinstance(values, list):
+            return []
+        return [str(value) for value in values if isinstance(value, str)]
+
+    def _build_keyword_debug_info(self, text: str) -> dict:
+        return {
+            "input_text": str(text or ""),
+            "cache_hit": False,
+            "result_source": "",
+            "prompt": "",
+            "attempts": [],
+            "raw_keywords": [],
+            "processed_keywords": [],
+            "finalization_steps": [],
+            "final_keywords": [],
+        }
+
+    @staticmethod
+    def _keyword_list_diff(before: list[str], after: list[str]) -> list[str]:
+        after_counter = Counter(str(item).lower() for item in after if isinstance(item, str))
+        removed: list[str] = []
+        for item in before:
+            if not isinstance(item, str):
+                continue
+            key = item.lower()
+            if after_counter.get(key, 0) > 0:
+                after_counter[key] -= 1
+            else:
+                removed.append(item)
+        return removed
+
+    def _record_keyword_step(self, debug_info: Optional[dict], phase: str, name: str,
+                             before: list[str], after: list[str], note: str = "",
+                             extra: Optional[dict] = None) -> None:
+        if not isinstance(debug_info, dict):
+            return
+        before_list = self._clone_keyword_list(before)
+        after_list = self._clone_keyword_list(after)
+        step = {
+            "phase": str(phase or "llm"),
+            "name": str(name or "step"),
+            "before": before_list,
+            "after": after_list,
+            "before_count": len(before_list),
+            "after_count": len(after_list),
+        }
+        dropped = self._keyword_list_diff(before_list, after_list)
+        added = self._keyword_list_diff(after_list, before_list)
+        if dropped:
+            step["dropped"] = dropped
+        if added:
+            step["added"] = added
+        if note:
+            step["note"] = note
+        if isinstance(extra, dict):
+            step.update(extra)
+        debug_info.setdefault("finalization_steps", []).append(step)
+
     @classmethod
     def _normalize_for_source_match(cls, text: str) -> str:
         if not text:
@@ -344,7 +455,7 @@ class KeywordExtractor:
             response = str(response)
         return self._MARKDOWN_CODE_RE.sub("", response).strip()
 
-    def _extract_via_llm(self, text: str, log_callback) -> list[str]:
+    def _extract_via_llm(self, text: str, log_callback, debug_info: Optional[dict] = None) -> list[str]:
         """Use LLM to extract fine-grained glossary lookup keywords."""
         prompt_template = self._get_keyword_prompt_template()
 
@@ -352,10 +463,24 @@ class KeywordExtractor:
             prompt_template,
             {"text": text},
         )
+        if isinstance(debug_info, dict):
+            debug_info["prompt"] = prompt
         messages = [{"role": "user", "content": prompt}]
 
         primary_error: Optional[Exception] = None
         primary_response_text = ""
+        primary_attempt = {
+            "stage": "primary",
+            "status": "pending",
+            "response_text": "",
+            "error": "",
+            "failure_reason": "",
+            "parse_method": "",
+            "parsed_keywords": [],
+            "processed_keywords": [],
+        }
+        if isinstance(debug_info, dict):
+            debug_info.setdefault("attempts", []).append(primary_attempt)
         try:
             primary_response = self.llm_client.chat_completion_search(
                 messages,
@@ -366,17 +491,34 @@ class KeywordExtractor:
                 force_search_fallback=False,
             )
             primary_response_text = self._normalize_search_response_text(primary_response)
+            primary_attempt["response_text"] = primary_response_text
         except Exception as e:
             primary_error = e
+            primary_attempt["error"] = str(e)
 
         if not self._is_search_call_failed(primary_response_text, primary_error):
-            keywords = self._parse_keyword_response(primary_response_text, log_callback)
-            return self._process_keywords(keywords)
+            primary_attempt["status"] = "success"
+            keywords = self._parse_keyword_response(
+                primary_response_text,
+                log_callback,
+                debug_target=primary_attempt,
+            )
+            primary_attempt["parsed_keywords"] = self._clone_keyword_list(keywords)
+            processed = self._process_keywords(keywords)
+            primary_attempt["processed_keywords"] = self._clone_keyword_list(processed)
+            if isinstance(debug_info, dict):
+                debug_info["raw_keywords"] = list(primary_attempt["parsed_keywords"])
+                debug_info["processed_keywords"] = list(primary_attempt["processed_keywords"])
+                debug_info["result_source"] = "primary_llm"
+            return processed
 
         if primary_error is not None:
             status = self._extract_status_code(primary_error)
             reason = f"exception status={status}" if status is not None else "exception"
             sensitive = self._is_sensitive_block_error(primary_error)
+            primary_attempt["status"] = "failed"
+            primary_attempt["failure_reason"] = reason
+            primary_attempt["sensitive_block"] = sensitive
             log_emit(
                 log_callback,
                 self.config,
@@ -392,9 +534,13 @@ class KeywordExtractor:
                 # pair itself, so retrying with another model rarely helps.
                 # Fall back to the deterministic extractor instead of failing the
                 # whole RAG path.
+                if isinstance(debug_info, dict):
+                    debug_info["result_source"] = "primary_sensitive_block"
                 return []
         else:
             reason = "refusal_text" if self._is_refusal_response_text(primary_response_text) else "blank_response"
+            primary_attempt["status"] = "failed"
+            primary_attempt["failure_reason"] = reason
             log_emit(
                 log_callback,
                 self.config,
@@ -407,6 +553,18 @@ class KeywordExtractor:
 
         fallback_error: Optional[Exception] = None
         fallback_response_text = ""
+        fallback_attempt = {
+            "stage": "fallback",
+            "status": "pending",
+            "response_text": "",
+            "error": "",
+            "failure_reason": "",
+            "parse_method": "",
+            "parsed_keywords": [],
+            "processed_keywords": [],
+        }
+        if isinstance(debug_info, dict):
+            debug_info.setdefault("attempts", []).append(fallback_attempt)
         try:
             fallback_response = self.llm_client.chat_completion_search(
                 messages,
@@ -417,14 +575,19 @@ class KeywordExtractor:
                 force_search_fallback=True,
             )
             fallback_response_text = self._normalize_search_response_text(fallback_response)
+            fallback_attempt["response_text"] = fallback_response_text
         except Exception as e:
             fallback_error = e
+            fallback_attempt["error"] = str(e)
 
         if self._is_search_call_failed(fallback_response_text, fallback_error):
             if fallback_error is not None:
                 status = self._extract_status_code(fallback_error)
                 reason = f"exception status={status}" if status is not None else "exception"
                 sensitive = self._is_sensitive_block_error(fallback_error)
+                fallback_attempt["status"] = "failed"
+                fallback_attempt["failure_reason"] = reason
+                fallback_attempt["sensitive_block"] = sensitive
                 log_emit(
                     log_callback,
                     self.config,
@@ -436,10 +599,14 @@ class KeywordExtractor:
                     func="_extract_via_llm",
                 )
                 if sensitive:
+                    if isinstance(debug_info, dict):
+                        debug_info["result_source"] = "fallback_sensitive_block"
                     return []
                 raise RuntimeError("keyword search unavailable after fallback") from fallback_error
 
             reason = "refusal_text" if self._is_refusal_response_text(fallback_response_text) else "blank_response"
+            fallback_attempt["status"] = "failed"
+            fallback_attempt["failure_reason"] = reason
             log_emit(
                 log_callback,
                 self.config,
@@ -458,10 +625,23 @@ class KeywordExtractor:
             module="keyword_extractor",
             func="_extract_via_llm",
         )
-        keywords = self._parse_keyword_response(fallback_response_text, log_callback)
-        return self._process_keywords(keywords)
+        fallback_attempt["status"] = "success"
+        keywords = self._parse_keyword_response(
+            fallback_response_text,
+            log_callback,
+            debug_target=fallback_attempt,
+        )
+        fallback_attempt["parsed_keywords"] = self._clone_keyword_list(keywords)
+        processed = self._process_keywords(keywords)
+        fallback_attempt["processed_keywords"] = self._clone_keyword_list(processed)
+        if isinstance(debug_info, dict):
+            debug_info["raw_keywords"] = list(fallback_attempt["parsed_keywords"])
+            debug_info["processed_keywords"] = list(fallback_attempt["processed_keywords"])
+            debug_info["result_source"] = "fallback_llm"
+        return processed
 
-    def _parse_keyword_response(self, response: str, log_callback) -> list:
+    def _parse_keyword_response(self, response: str, log_callback,
+                                debug_target: Optional[dict] = None) -> list:
         """Parse LLM response into a list of keyword strings."""
         parsed = None
         try:
@@ -470,19 +650,28 @@ class KeywordExtractor:
             pass
 
         if isinstance(parsed, list):
+            if isinstance(debug_target, dict):
+                debug_target["parse_method"] = "json_list"
             return parsed
         if isinstance(parsed, str):
+            if isinstance(debug_target, dict):
+                debug_target["parse_method"] = "json_string"
             return [parsed]
         if isinstance(parsed, dict):
             for key in ("keywords", "terms", "entities"):
                 value = parsed.get(key)
                 if isinstance(value, list):
+                    if isinstance(debug_target, dict):
+                        debug_target["parse_method"] = f"json_object.{key}"
                     return value
 
         array_match = re.search(r"\[[\s\S]*?\]", response)
         if array_match:
             try:
-                return json.loads(array_match.group(0))
+                result = json.loads(array_match.group(0))
+                if isinstance(debug_target, dict):
+                    debug_target["parse_method"] = "regex_array"
+                return result
             except json.JSONDecodeError:
                 pass
 
@@ -493,6 +682,9 @@ class KeywordExtractor:
                 truncated = response[:last_match.end()] + "]"
                 try:
                     result = json.loads(truncated)
+                    if isinstance(debug_target, dict):
+                        debug_target["parse_method"] = "truncated_json_recovery"
+                        debug_target["parse_note"] = f"Recovered {len(result)} keyword(s) from truncated JSON."
                     log_emit(log_callback, self.config, "WARNING",
                              f"[RAG] JSON was truncated, recovered {len(result)} keywords",
                              module="keyword_extractor", func="_parse_keyword_response")
@@ -503,6 +695,8 @@ class KeywordExtractor:
         log_emit(log_callback, self.config, "WARNING",
                  "[RAG] Could not parse keyword extraction response",
                  module="keyword_extractor", func="_parse_keyword_response")
+        if isinstance(debug_target, dict):
+            debug_target["parse_method"] = "parse_failed"
         return []
 
     def _process_keywords(self, keywords: list) -> list[str]:
@@ -733,14 +927,80 @@ class KeywordExtractor:
                 pass
         return expanded
 
-    def _finalize_keywords(self, keywords: list[str], text: str, log_callback) -> list[str]:
-        keywords = self._deduplicate(keywords)
-        keywords = self._filter_present_in_text(keywords, text, log_callback)
-        keywords = self._filter_low_signal_keywords(keywords, log_callback)
-        keywords = self._expand_keywords_into_tasks(keywords, log_callback)
-        keywords = self._deduplicate(keywords)
-        keywords = self._apply_keyword_safety_limit(keywords, log_callback)
-        return keywords
+    def _finalize_keywords(self, keywords: list[str], text: str, log_callback,
+                           debug_info: Optional[dict] = None,
+                           phase: str = "llm") -> list[str]:
+        current = self._clone_keyword_list(keywords)
+
+        deduped = self._deduplicate(current)
+        self._record_keyword_step(
+            debug_info,
+            phase=phase,
+            name="deduplicate_raw",
+            before=current,
+            after=deduped,
+            note="Remove exact and case-insensitive duplicates.",
+        )
+        current = deduped
+
+        present = self._filter_present_in_text(current, text, log_callback)
+        self._record_keyword_step(
+            debug_info,
+            phase=phase,
+            name="filter_present_in_text",
+            before=current,
+            after=present,
+            note="Keep only terms that still appear in the source text after normalization.",
+        )
+        current = present
+
+        filtered = self._filter_low_signal_keywords(current, log_callback)
+        self._record_keyword_step(
+            debug_info,
+            phase=phase,
+            name="filter_low_signal",
+            before=current,
+            after=filtered,
+            note="Remove low-signal fillers and weak sentence-level fragments.",
+        )
+        current = filtered
+
+        decompose_enabled = self._get_rag_bool("keyword_task_decompose_enabled", True)
+        keep_original = self._get_rag_bool("keyword_task_keep_original", False)
+        expanded = self._expand_keywords_into_tasks(current, log_callback)
+        self._record_keyword_step(
+            debug_info,
+            phase=phase,
+            name="expand_keywords_into_tasks",
+            before=current,
+            after=expanded,
+            note=f"decompose_enabled={decompose_enabled}, keep_original={keep_original}",
+        )
+        current = expanded
+
+        task_deduped = self._deduplicate(current)
+        self._record_keyword_step(
+            debug_info,
+            phase=phase,
+            name="deduplicate_tasks",
+            before=current,
+            after=task_deduped,
+            note="Deduplicate final task list after expansion.",
+        )
+        current = task_deduped
+
+        limit = self._get_keyword_safety_limit()
+        limited = self._apply_keyword_safety_limit(current, log_callback)
+        self._record_keyword_step(
+            debug_info,
+            phase=phase,
+            name="apply_keyword_safety_limit",
+            before=current,
+            after=limited,
+            note=f"Configured keyword_max_queries={limit}.",
+            extra={"limit": limit},
+        )
+        return limited
 
     def _extract_proper_nouns_regex(self, text: str) -> list[str]:
         """Minimal fallback for extractor outages."""

@@ -62,7 +62,8 @@ class Translator:
             "original_text": text,
             "keywords": [],
             "rag_tasks": [],
-            "search_results": {},
+            "keyword_extraction": {},
+            "search_results": [],
             "matched_terms": {},
             "glossary_context": "",
             "system_prompt": "",
@@ -79,9 +80,18 @@ class Translator:
 
         if use_rag:
             threshold = self.rag_engine.config.get("rag", "similarity_threshold", 0.75)
-            keywords = self.rag_engine.extract_keywords(text, log_callback=log_callback)
+            keyword_result = self.rag_engine.extract_keywords(
+                text,
+                log_callback=log_callback,
+                return_debug=True,
+            )
+            if isinstance(keyword_result, tuple):
+                keywords, keyword_debug = keyword_result
+            else:
+                keywords, keyword_debug = keyword_result, {}
             debug_info["keywords"] = keywords
             debug_info["rag_tasks"] = keywords
+            debug_info["keyword_extraction"] = keyword_debug
 
             matched_terms = self.rag_engine.search_terms(
                 keywords, threshold=threshold, log_callback=log_callback,
@@ -185,6 +195,7 @@ class Translator:
         # RAG phase
         glossary_context = ""
         keywords = []
+        keyword_debug = {}
         matched_terms = {}
         search_debug = []
 
@@ -195,7 +206,16 @@ class Translator:
                      f"[RAG] Starting keyword extraction for text (length={len(text)}): {text[:200]}{'...' if len(text) > 200 else ''}",
                      module="translator", func="translate_text")
 
-            keywords = self.rag_engine.extract_keywords(text, log_callback=log_callback)
+            keyword_result = self.rag_engine.extract_keywords(
+                text,
+                log_callback=log_callback,
+                return_debug=True,
+            )
+            if isinstance(keyword_result, tuple):
+                keywords, keyword_debug = keyword_result
+            else:
+                keywords = keyword_result
+                keyword_debug = {}
 
             try:
                 log_emit(log_callback, self.rag_engine.config, "DEBUG",
@@ -220,6 +240,7 @@ class Translator:
                 "original_text": text,
                 "keywords": keywords,
                 "rag_tasks": keywords,
+                "keyword_extraction": keyword_debug,
                 "search_results": search_debug if isinstance(search_debug, list) else [],
                 "matched_terms": matched_terms,
             })
@@ -247,6 +268,7 @@ class Translator:
                 "original_text": text,
                 "keywords": keywords,
                 "rag_tasks": keywords,
+                "keyword_extraction": keyword_debug,
                 "search_results": search_debug if isinstance(search_debug, list) else [],
                 "matched_terms": matched_terms,
                 "glossary_context": glossary_context,
@@ -354,6 +376,7 @@ class Translator:
             "original_text": text,
             "keywords": [],
             "rag_tasks": [],
+            "keyword_extraction": {},
             "search_results": [],
             "matched_terms": {},
             "glossary_context": "",

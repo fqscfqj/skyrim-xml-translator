@@ -442,6 +442,7 @@ class Worker(QThread):
                                             "original_text": safe_source,
                                             "flow_logs": list(task_logs),
                                             "error": str(error),
+                                            "keyword_extraction": {},
                                             "search_results": [],
                                             "matched_terms": {},
                                             "rag_tasks": [],
@@ -751,6 +752,260 @@ class RAGVisualizationDialog(QDialog):
             item.setTextAlignment(1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         return item
 
+    @staticmethod
+    def _keyword_stage_title(stage: str) -> str:
+        mapping = {
+            "primary": "Primary Search Model",
+            "fallback": "Fallback Search Model",
+            "llm": "LLM Post-processing",
+            "regex": "Regex Fallback",
+            "cache": "Cache",
+        }
+        return mapping.get(str(stage or ""), str(stage or "Unknown Stage"))
+
+    @staticmethod
+    def _keyword_step_title(name: str) -> str:
+        mapping = {
+            "cache_hit": "Cache Hit",
+            "raw_extraction": "Regex Candidate Extraction",
+            "deduplicate_raw": "Deduplicate Raw Keywords",
+            "filter_present_in_text": "Filter Terms Not In Source",
+            "filter_low_signal": "Filter Low-signal Terms",
+            "expand_keywords_into_tasks": "Expand Into Query Tasks",
+            "deduplicate_tasks": "Deduplicate Query Tasks",
+            "apply_keyword_safety_limit": "Apply Configured Query Limit",
+        }
+        return mapping.get(str(name or ""), str(name or "Step"))
+
+    @staticmethod
+    def _keyword_items_to_lines(values, prefix="- ") -> list[str]:
+        if not isinstance(values, list) or not values:
+            return ["(none)"]
+        return [f"{prefix}{value}" for value in values]
+
+    def _build_keyword_attempt_detail(self, attempt: dict) -> str:
+        lines = [
+            f"Stage: {self._keyword_stage_title(str(attempt.get('stage', '') or ''))}",
+            f"Status: {str(attempt.get('status', '') or 'unknown')}",
+        ]
+        failure_reason = str(attempt.get("failure_reason", "") or "")
+        if failure_reason:
+            lines.append(f"Failure Reason: {failure_reason}")
+        if "sensitive_block" in attempt:
+            lines.append(f"Sensitive Block: {bool(attempt.get('sensitive_block'))}")
+        parse_method = str(attempt.get("parse_method", "") or "")
+        if parse_method:
+            lines.append(f"Parse Method: {parse_method}")
+        parse_note = str(attempt.get("parse_note", "") or "")
+        if parse_note:
+            lines.append(f"Parse Note: {parse_note}")
+
+        response_text = str(attempt.get("response_text", "") or "")
+        if response_text:
+            lines.extend(["", "Response:", response_text])
+
+        lines.extend(["", "Parsed Keywords:"])
+        lines.extend(self._keyword_items_to_lines(attempt.get("parsed_keywords") or []))
+        lines.extend(["", "Processed Keywords:"])
+        lines.extend(self._keyword_items_to_lines(attempt.get("processed_keywords") or []))
+
+        error_text = str(attempt.get("error", "") or "")
+        if error_text:
+            lines.extend(["", "Error:", error_text])
+        return "\n".join(lines)
+
+    def _build_keyword_step_detail(self, step: dict) -> str:
+        phase_title = self._keyword_stage_title(str(step.get("phase", "") or ""))
+        step_title = self._keyword_step_title(str(step.get("name", "") or ""))
+        before = step.get("before") or []
+        after = step.get("after") or []
+        dropped = step.get("dropped") or []
+        added = step.get("added") or []
+
+        lines = [
+            f"Phase: {phase_title}",
+            f"Step: {step_title}",
+            f"Count: {len(before)} -> {len(after)}",
+        ]
+        note = str(step.get("note", "") or "")
+        if note:
+            lines.append(f"Note: {note}")
+
+        lines.extend(["", "Before:"])
+        lines.extend(self._keyword_items_to_lines(before))
+        lines.extend(["", "Dropped:"])
+        lines.extend(self._keyword_items_to_lines(dropped))
+        lines.extend(["", "Added:"])
+        lines.extend(self._keyword_items_to_lines(added))
+        lines.extend(["", "After:"])
+        lines.extend(self._keyword_items_to_lines(after))
+        return "\n".join(lines)
+
+    def _populate_keyword_extraction_tree(self, parent, keyword_debug: dict,
+                                          rag_tasks: list, query_limit_map: dict):
+        if not isinstance(keyword_debug, dict):
+            keyword_debug = {}
+
+        summary_parts = []
+        result_source = str(keyword_debug.get("result_source", "") or "")
+        if result_source:
+            summary_parts.append(f"result_source={result_source}")
+        summary_parts.append(f"cache_hit={bool(keyword_debug.get('cache_hit'))}")
+        summary_parts.append(f"final_keywords={len(rag_tasks)}")
+        summary_detail = "\n".join([
+            f"Result Source: {result_source or 'unknown'}",
+            f"Cache Hit: {bool(keyword_debug.get('cache_hit'))}",
+            f"Final Keywords: {len(rag_tasks)}",
+        ])
+        self._create_tree_item(
+            parent,
+            f"Summary ({'; '.join(summary_parts)})",
+            full_text=summary_detail,
+        )
+
+        prompt_text = str(keyword_debug.get("prompt", "") or "")
+        if prompt_text:
+            self._create_tree_item(parent, "Keyword Prompt", full_text=prompt_text)
+
+        attempts = keyword_debug.get("attempts") or []
+        if attempts:
+            attempts_node = self._create_tree_item(parent, "Extraction Attempts")
+            for attempt in attempts:
+                if not isinstance(attempt, dict):
+                    continue
+                status = str(attempt.get("status", "") or "unknown")
+                stage_title = self._keyword_stage_title(str(attempt.get("stage", "") or ""))
+                attempt_node = self._create_tree_item(
+                    attempts_node,
+                    f"{stage_title} [{status}]",
+                    full_text=self._build_keyword_attempt_detail(attempt),
+                )
+
+                response_text = str(attempt.get("response_text", "") or "")
+                if response_text:
+                    self._create_tree_item(attempt_node, "Response", full_text=response_text)
+
+                parsed_keywords = attempt.get("parsed_keywords") or []
+                self._create_tree_item(
+                    attempt_node,
+                    f"Parsed Keywords ({len(parsed_keywords)})",
+                    full_text="\n".join(self._keyword_items_to_lines(parsed_keywords)),
+                )
+
+                processed_keywords = attempt.get("processed_keywords") or []
+                self._create_tree_item(
+                    attempt_node,
+                    f"Processed Keywords ({len(processed_keywords)})",
+                    full_text="\n".join(self._keyword_items_to_lines(processed_keywords)),
+                )
+
+                error_text = str(attempt.get("error", "") or "")
+                if error_text:
+                    self._create_tree_item(attempt_node, "Error", full_text=error_text)
+                attempt_node.setExpanded(True)
+            attempts_node.setExpanded(True)
+
+        finalization_steps = keyword_debug.get("finalization_steps") or []
+        if finalization_steps:
+            steps_node = self._create_tree_item(parent, "Filtering / Task Building")
+            for step in finalization_steps:
+                if not isinstance(step, dict):
+                    continue
+                phase_title = self._keyword_stage_title(str(step.get("phase", "") or ""))
+                step_title = self._keyword_step_title(str(step.get("name", "") or ""))
+                before_count = int(step.get("before_count", len(step.get("before") or [])) or 0)
+                after_count = int(step.get("after_count", len(step.get("after") or [])) or 0)
+                step_node = self._create_tree_item(
+                    steps_node,
+                    f"{phase_title} / {step_title} ({before_count} -> {after_count})",
+                    full_text=self._build_keyword_step_detail(step),
+                )
+
+                for child_label, key in (("Before", "before"), ("Dropped", "dropped"), ("Added", "added"), ("After", "after")):
+                    values = step.get(key) or []
+                    self._create_tree_item(
+                        step_node,
+                        f"{child_label} ({len(values)})",
+                        full_text="\n".join(self._keyword_items_to_lines(values)),
+                    )
+                step_node.setExpanded(False)
+            steps_node.setExpanded(True)
+
+        tasks_node = self._create_tree_item(parent, "Final Keywords / RAG Tasks")
+        if rag_tasks:
+            for keyword in rag_tasks:
+                label = str(keyword)
+                limit_info = query_limit_map.get(label) or {}
+                suffix_parts = []
+                limit = limit_info.get("task_limit")
+                if isinstance(limit, int):
+                    suffix_parts.append(f"task_limit={limit}")
+                short_limit = limit_info.get("short_limit")
+                long_limit = limit_info.get("long_limit")
+                if isinstance(short_limit, int) and isinstance(long_limit, int):
+                    suffix_parts.append(f"short={short_limit}, long={long_limit}")
+                selected_short_count = limit_info.get("selected_short_count")
+                selected_long_count = limit_info.get("selected_long_count")
+                if isinstance(selected_short_count, int) and isinstance(selected_long_count, int):
+                    suffix_parts.append(f"selected={selected_short_count}+{selected_long_count}")
+                if suffix_parts:
+                    label = f"{label} ({'; '.join(suffix_parts)})"
+                self._create_tree_item(tasks_node, label, full_text=str(keyword))
+        else:
+            self._create_tree_item(tasks_node, i18n.t("msg_no_valid_terms"))
+        tasks_node.setExpanded(True)
+
+    def _append_keyword_section(self, lines: list[str], keyword_debug: dict, rag_tasks: list) -> None:
+        lines.append("[Keyword Extraction]")
+        if not isinstance(keyword_debug, dict) or not keyword_debug:
+            lines.append("(no structured keyword extraction debug info)")
+            lines.append("")
+            return
+
+        result_source = str(keyword_debug.get("result_source", "") or "unknown")
+        lines.append(f"Result Source: {result_source}")
+        lines.append(f"Cache Hit: {'yes' if keyword_debug.get('cache_hit') else 'no'}")
+        lines.append(f"Final Keywords: {len(rag_tasks)}")
+        lines.append("")
+
+        prompt_text = str(keyword_debug.get("prompt", "") or "")
+        if prompt_text:
+            lines.append("-- Keyword Prompt --")
+            lines.append(prompt_text)
+            lines.append("")
+
+        attempts = keyword_debug.get("attempts") or []
+        if attempts:
+            lines.append("-- Extraction Attempts --")
+            for attempt in attempts:
+                if not isinstance(attempt, dict):
+                    continue
+                status = str(attempt.get("status", "") or "unknown")
+                stage_title = self._keyword_stage_title(str(attempt.get("stage", "") or ""))
+                lines.append(f"{stage_title} [{status}]")
+                for detail_line in self._build_keyword_attempt_detail(attempt).splitlines():
+                    lines.append(f"  {detail_line}")
+                lines.append("")
+
+        finalization_steps = keyword_debug.get("finalization_steps") or []
+        if finalization_steps:
+            lines.append("-- Filtering / Task Building --")
+            for step in finalization_steps:
+                if not isinstance(step, dict):
+                    continue
+                phase_title = self._keyword_stage_title(str(step.get("phase", "") or ""))
+                step_title = self._keyword_step_title(str(step.get("name", "") or ""))
+                before_count = int(step.get("before_count", len(step.get("before") or [])) or 0)
+                after_count = int(step.get("after_count", len(step.get("after") or [])) or 0)
+                lines.append(f"{phase_title} / {step_title} ({before_count} -> {after_count})")
+                for detail_line in self._build_keyword_step_detail(step).splitlines():
+                    lines.append(f"  {detail_line}")
+                lines.append("")
+
+        lines.append("-- Final Keywords --")
+        lines.extend(self._keyword_items_to_lines(rag_tasks))
+        lines.append("")
+
     def _update_detail_view(self, current, previous):
         if current is None:
             self.detail_title.setText("")
@@ -796,6 +1051,7 @@ class RAGVisualizationDialog(QDialog):
                 None, i18n.t("step_rag_tasks", i18n.t("step_keyword_extraction"))
             )
             rag_tasks = debug_info.get("rag_tasks") or debug_info.get("keywords") or []
+            keyword_debug = debug_info.get("keyword_extraction") or {}
             query_limit_map = {}
             if isinstance(debug_info.get("search_results"), list):
                 for query_result in debug_info.get("search_results") or []:
@@ -809,27 +1065,12 @@ class RAGVisualizationDialog(QDialog):
                                 "selected_short_count": query_result.get("selected_short_count"),
                                 "selected_long_count": query_result.get("selected_long_count"),
                             }
-            if rag_tasks:
-                for keyword in rag_tasks:
-                    label = str(keyword)
-                    limit_info = query_limit_map.get(label) or {}
-                    suffix_parts = []
-                    limit = limit_info.get("task_limit")
-                    if isinstance(limit, int):
-                        suffix_parts.append(f"task_limit={limit}")
-                    short_limit = limit_info.get("short_limit")
-                    long_limit = limit_info.get("long_limit")
-                    if isinstance(short_limit, int) and isinstance(long_limit, int):
-                        suffix_parts.append(f"short={short_limit}, long={long_limit}")
-                    selected_short_count = limit_info.get("selected_short_count")
-                    selected_long_count = limit_info.get("selected_long_count")
-                    if isinstance(selected_short_count, int) and isinstance(selected_long_count, int):
-                        suffix_parts.append(f"selected={selected_short_count}+{selected_long_count}")
-                    if suffix_parts:
-                        label = f"{label} ({'; '.join(suffix_parts)})"
-                    self._create_tree_item(keywords_item, label, full_text=str(keyword))
-            else:
-                self._create_tree_item(keywords_item, i18n.t("msg_no_valid_terms"))
+            self._populate_keyword_extraction_tree(
+                keywords_item,
+                keyword_debug,
+                rag_tasks,
+                query_limit_map,
+            )
             keywords_item.setExpanded(True)
             
             # 2. 向量检索 - 显示每个关键词的搜索结果
@@ -932,6 +1173,9 @@ class RAGVisualizationDialog(QDialog):
         lines.append("")
 
         rag_tasks = di.get("rag_tasks") or di.get("keywords") or []
+        keyword_debug = di.get("keyword_extraction") or {}
+        self._append_keyword_section(lines, keyword_debug, rag_tasks)
+
         lines.append("[RAG Tasks]")
         if rag_tasks:
             query_limit_map = {}

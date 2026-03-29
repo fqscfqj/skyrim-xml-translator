@@ -174,8 +174,12 @@ class RAGEngine:
             log_callback=log_callback,
         )
 
-    def extract_keywords(self, text, log_callback=None):
-        return self._keyword_extractor.extract(text, log_callback=log_callback)
+    def extract_keywords(self, text, log_callback=None, return_debug: bool = False):
+        return self._keyword_extractor.extract(
+            text,
+            log_callback=log_callback,
+            return_debug=return_debug,
+        )
 
     def search_terms(self, query_list, threshold=0.8, log_callback=None,
                      top_k=3, return_debug=False, source_text=None):
