@@ -118,6 +118,19 @@ class Worker(QThread):
         self._pause_event = threading.Event()
         self._pause_event.set()  # Initially not paused (set = running)
 
+    @staticmethod
+    def _normalize_thread_count(value) -> int:
+        try:
+            return max(1, int(value))
+        except (TypeError, ValueError):
+            return 1
+
+    def _effective_max_concurrent(self, unique_count: int) -> int:
+        requested_threads = self._normalize_thread_count(self.num_threads)
+        if unique_count <= 0:
+            return 1
+        return min(requested_threads, unique_count)
+
     def run(self):
         try:
             total = len(self.items_to_process)
@@ -204,9 +217,9 @@ class Worker(QThread):
                         "task_logs": task_logs,
                     }
 
-            # Limit concurrent tasks to reduce memory pressure
-            # Each task holds embedding vectors and LLM context in memory
-            max_concurrent = min(self.num_threads, 4)  # Cap at 4 to limit memory
+            # Honor the configured thread count while avoiding idle workers when
+            # there are fewer unique items than requested threads.
+            max_concurrent = self._effective_max_concurrent(unique_count)
             
             from concurrent.futures import wait, FIRST_COMPLETED
             

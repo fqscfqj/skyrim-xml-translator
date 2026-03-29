@@ -1,5 +1,7 @@
 """Translator facade with simplified pipeline."""
 
+import copy
+from threading import Lock
 from typing import Optional
 
 from src.llm.client import LLMClient
@@ -32,14 +34,16 @@ class Translator:
         self._translation_cache = TranslationCache(
             max_size=cache_size, persist_path=persist_path)
 
-        # Best-effort cache for visualization; NOT thread-safe.
+        # Best-effort cache for visualization shared across translation threads.
         self._last_rag_debug_info = None
+        self._last_rag_debug_info_lock = Lock()
         self._runtime_flags = {"mcm_ui_mode": False}
 
     # --- Public API ---
 
     def get_last_rag_debug_info(self):
-        return self._last_rag_debug_info
+        with self._last_rag_debug_info_lock:
+            return copy.deepcopy(self._last_rag_debug_info)
 
     def clear_translation_cache(self) -> None:
         self._translation_cache.invalidate_all()
@@ -212,13 +216,13 @@ class Translator:
                 matched_terms = search_result
 
             # Best-effort cache for visualization
-            self._last_rag_debug_info = {
+            self._set_last_rag_debug_info({
                 "original_text": text,
                 "keywords": keywords,
                 "rag_tasks": keywords,
                 "search_results": search_debug if isinstance(search_debug, list) else [],
                 "matched_terms": matched_terms,
-            }
+            })
 
             try:
                 log_emit(log_callback, self.rag_engine.config, "DEBUG",
@@ -358,6 +362,10 @@ class Translator:
             "result_status": result_status,
             "result_details": result_details,
         }
+
+    def _set_last_rag_debug_info(self, debug_info: Optional[dict]) -> None:
+        with self._last_rag_debug_info_lock:
+            self._last_rag_debug_info = copy.deepcopy(debug_info)
 
     @staticmethod
     def _set_debug_result(debug_info: Optional[dict], result_status: str,

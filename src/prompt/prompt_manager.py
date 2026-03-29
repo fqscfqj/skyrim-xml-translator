@@ -18,6 +18,7 @@ This is intentionally lightweight so end users can edit prompt JSON files.
 import json
 import os
 import sys
+from threading import RLock
 from typing import Any, Optional
 
 
@@ -29,6 +30,7 @@ class PromptManager:
         self._file_path: Optional[str] = None
         self._loaded_paths: list[str] = []
         self._mtime: Optional[float] = None
+        self._lock = RLock()
 
         if getattr(sys, "frozen", False):
             base_path = getattr(
@@ -122,38 +124,39 @@ class PromptManager:
 
         Falls back to legacy prompts/en.json if no category files exist.
         """
-        merged: dict = {}
-        loaded_paths: list[str] = []
-        latest_mtime: Optional[float] = None
+        with self._lock:
+            merged: dict = {}
+            loaded_paths: list[str] = []
+            latest_mtime: Optional[float] = None
 
-        if os.path.isdir(self.prompts_dir):
-            merged, loaded_paths, latest_mtime = self._load_from_directory(self.prompts_dir)
-            if merged:
-                self.prompts = merged
-                self._file_path = None
-                self._loaded_paths = loaded_paths
-                self._mtime = latest_mtime
-                return
+            if os.path.isdir(self.prompts_dir):
+                merged, loaded_paths, latest_mtime = self._load_from_directory(self.prompts_dir)
+                if merged:
+                    self.prompts = merged
+                    self._file_path = None
+                    self._loaded_paths = loaded_paths
+                    self._mtime = latest_mtime
+                    return
 
-        legacy_path = os.path.join(self.prompts_dir, "en.json")
-        if os.path.exists(legacy_path):
-            try:
-                with open(legacy_path, "r", encoding="utf-8") as f:
-                    self.prompts = json.load(f)
-                self._file_path = legacy_path
-                self._loaded_paths = [legacy_path]
+            legacy_path = os.path.join(self.prompts_dir, "en.json")
+            if os.path.exists(legacy_path):
                 try:
-                    self._mtime = os.path.getmtime(legacy_path)
+                    with open(legacy_path, "r", encoding="utf-8") as f:
+                        self.prompts = json.load(f)
+                    self._file_path = legacy_path
+                    self._loaded_paths = [legacy_path]
+                    try:
+                        self._mtime = os.path.getmtime(legacy_path)
+                    except Exception:
+                        self._mtime = None
+                    return
                 except Exception:
-                    self._mtime = None
-                return
-            except Exception:
-                pass
+                    pass
 
-        self.prompts = {}
-        self._file_path = None
-        self._loaded_paths = []
-        self._mtime = None
+            self.prompts = {}
+            self._file_path = None
+            self._loaded_paths = []
+            self._mtime = None
 
     def load_language(self, lang_code: Optional[str] = None) -> None:
         """Compatibility shim.
@@ -165,35 +168,36 @@ class PromptManager:
 
     def reload_if_changed(self) -> None:
         """Reload prompts if any loaded file was modified."""
+        with self._lock:
+            if not self._loaded_paths:
+                return
 
-        if not self._loaded_paths:
-            return
+            latest_mtime: Optional[float] = None
+            for path in self._loaded_paths:
+                if not path or not os.path.exists(path):
+                    continue
+                try:
+                    mtime = os.path.getmtime(path)
+                except Exception:
+                    continue
+                if latest_mtime is None or mtime > latest_mtime:
+                    latest_mtime = mtime
 
-        latest_mtime: Optional[float] = None
-        for path in self._loaded_paths:
-            if not path or not os.path.exists(path):
-                continue
-            try:
-                mtime = os.path.getmtime(path)
-            except Exception:
-                continue
-            if latest_mtime is None or mtime > latest_mtime:
-                latest_mtime = mtime
-
-        if latest_mtime is None:
-            return
-        if self._mtime is None or latest_mtime > self._mtime:
-            self.load()
+            if latest_mtime is None:
+                return
+            if self._mtime is None or latest_mtime > self._mtime:
+                self.load()
 
     def get(self, key: str, default: Any = None) -> Any:
         """Get a prompt value using dotted-path keys.
 
         Example: get("translator.system_prompts.default")
         """
-        node: Any = self.prompts
-        for part in key.split("."):
-            if isinstance(node, dict) and part in node:
-                node = node[part]
-            else:
-                return default
-        return node
+        with self._lock:
+            node: Any = self.prompts
+            for part in key.split("."):
+                if isinstance(node, dict) and part in node:
+                    node = node[part]
+                else:
+                    return default
+            return node
