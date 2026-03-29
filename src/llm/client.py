@@ -221,25 +221,12 @@ class LLMClient:
             completion_tokens = usage_stats.get("completion_tokens")
             cached_tokens = usage_stats.get("cached_tokens")
             cache_creation_tokens = usage_stats.get("cache_creation_input_tokens")
-            cache_capable_hint = (
-                cached_tokens is not None
-                or cache_creation_tokens is not None
-                or "qwen" in model.lower()
-            )
 
             if prompt_tokens is not None or completion_tokens is not None:
-                level = "INFO"
-                if (
-                    cache_capable_hint
-                    and prompt_tokens is not None
-                    and prompt_tokens >= 256
-                    and (cached_tokens or 0) <= 0
-                ):
-                    level = "WARNING"
                 log_emit(
                     callback,
                     self.config,
-                    level,
+                    "DEBUG",
                     f"{operation} usage: model={model} prompt_tokens={prompt_tokens or 0} "
                     f"completion_tokens={completion_tokens or 0} total_tokens={usage_stats.get('total_tokens') or 0} "
                     f"cached_tokens={cached_tokens or 0} cache_creation_input_tokens={cache_creation_tokens or 0}",
