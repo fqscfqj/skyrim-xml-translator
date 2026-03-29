@@ -18,7 +18,7 @@ class KeywordExtractor:
     _WHITESPACE_RE = re.compile(r"\s+")
     _WORD_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9'\-]*")
     _STRIP_PUNCT_RE = re.compile(r"^[^\w\u4e00-\u9fff]+|[^\w\u4e00-\u9fff]+$")
-    _KW_CACHE_VERSION = "kw_v11"
+    _KW_CACHE_VERSION = "kw_v13"
     _LOW_SIGNAL_SINGLE_TOKENS = frozenset({
         "honestly", "kinda", "kindof", "sorta", "sortof",
         "really", "actually", "basically", "seriously", "literally",
