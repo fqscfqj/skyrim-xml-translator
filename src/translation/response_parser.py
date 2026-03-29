@@ -41,18 +41,19 @@ class ResponseParser:
         except json.JSONDecodeError:
             pass
 
+        # Accept valid leading JSON even when extra explanatory text is appended.
+        data = self._try_parse_first_json_object(clean_response)
+        if isinstance(data, dict) and "translation" in data:
+            return str(data.get("translation", original_text))
+
         # Try extracting JSON substring
+        data = self._try_parse_first_json_object(response)
+        if isinstance(data, dict) and "translation" in data:
+            return str(data.get("translation", original_text))
+
         log_emit(log_callback, self.config, "WARNING",
                  f"JSON Parse Error. Response: {response}",
                  module="response_parser", func="parse")
-
-        try:
-            m = self._JSON_EXTRACT_RE.search(response)
-            if m:
-                data = json.loads(m.group(0))
-                return str(data.get("translation", response.strip()))
-        except Exception:
-            pass
 
         # Try relaxed JSON extraction (trailing commas, single quotes, bare KV)
         result = self._try_relaxed_json_extract(response, log_callback)
@@ -84,6 +85,35 @@ class ResponseParser:
         if compact.count("{") > compact.count("}") and len(compact) < 32:
             return True
         return False
+
+    @staticmethod
+    def _try_parse_first_json_object(text: str) -> Optional[dict]:
+        """Parse the first valid JSON object from text, ignoring trailing content."""
+        if not text:
+            return None
+
+        decoder = json.JSONDecoder()
+
+        # Fast path: string starts with JSON object.
+        compact = text.lstrip()
+        if compact.startswith("{"):
+            try:
+                parsed, _ = decoder.raw_decode(compact)
+                if isinstance(parsed, dict):
+                    return parsed
+            except json.JSONDecodeError:
+                pass
+
+        # Fallback: find the first decodable object anywhere in the text.
+        for match in re.finditer(r"\{", text):
+            try:
+                parsed, _ = decoder.raw_decode(text[match.start():])
+                if isinstance(parsed, dict):
+                    return parsed
+            except json.JSONDecodeError:
+                continue
+
+        return None
 
     def _try_relaxed_json_extract(self, response: str,
                                   log_callback: Optional[Callable] = None) -> Optional[str]:
