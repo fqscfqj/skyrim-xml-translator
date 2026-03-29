@@ -129,8 +129,7 @@ class QualityChecker:
         if not text:
             return False
 
-        cleaned = self._text_analyzer._XML_TAG_RE.sub('', text)
-        cleaned = self._text_analyzer._PLACEHOLDER_RE.sub('', cleaned)
+        cleaned = self._text_analyzer.strip_markup_and_placeholders(text)
         cleaned = cleaned.strip().strip('"').strip("'")
         if not cleaned:
             return False
@@ -191,8 +190,8 @@ class QualityChecker:
         issues = []
 
         # Check XML tags
-        source_tags = set(re.findall(r'<[^>]+>', source))
-        translation_tags = set(re.findall(r'<[^>]+>', translation))
+        source_tags = set(self._text_analyzer.extract_xml_tags(source))
+        translation_tags = set(self._text_analyzer.extract_xml_tags(translation))
         missing_tags = source_tags - translation_tags
         if missing_tags:
             issues.append(QualityIssue(
