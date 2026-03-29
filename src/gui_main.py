@@ -1350,6 +1350,12 @@ class MainWindow(QMainWindow):
         if not labels_ready:
             return
 
+        assert self.status_summary_total_label is not None
+        assert self.status_summary_untranslated_label is not None
+        assert self.status_summary_warning_label is not None
+        assert self.status_summary_failed_label is not None
+        assert self.status_summary_success_label is not None
+
         counts = self.status_summary_counts
         total = sum(counts.values())
         self.status_summary_total_label.setText(i18n.t("summary_total").format(count=total))
