@@ -17,6 +17,7 @@ from src.logging_helper import emit as log_emit
 
 class Translator:
     _FORMAT_EXTRA_RETRIES = 2
+    _BLOCKING_UNTRANSLATED_RULES = {"identity", "containment", "latin_ratio"}
 
     def __init__(self, llm_client: LLMClient, rag_engine: RAGEngine):
         self.llm_client = llm_client
@@ -188,6 +189,7 @@ class Translator:
                         source_text,
                         str(cached),
                         reference_id=reference_id,
+                        target_lang=str(target_lang),
                     )
                     result_status, result_details = self._result_status_from_issues(cached_issues)
                     return cached, self._empty_debug_info(
@@ -340,6 +342,7 @@ class Translator:
                     translation,
                     matched_terms,
                     reference_id=reference_id,
+                    target_lang=str(target_lang),
                 )
                 has_untranslated_error = self._has_untranslated_error(issues)
                 has_format_error = self._has_format_error(issues)
@@ -495,11 +498,15 @@ class Translator:
         """Heuristic: unchanged multi-word English output is likely a missed translation."""
         if not source or not translation:
             return False
-        if source.strip().lower() != translation.strip().lower():
+        source_clean = self._text_analyzer.normalize_text(source)
+        translation_clean = self._text_analyzer.normalize_text(translation)
+        if not source_clean or not translation_clean:
+            return False
+        if source_clean.lower() != translation_clean.lower():
             return False
         if self._text_analyzer.should_preserve_identity_translation(source, translation):
             return False
-        words = self._text_analyzer.extract_english_words(source)
+        words = self._text_analyzer.extract_english_words(source_clean)
         return len(words) >= 2
 
     def _should_passthrough_identifier(
@@ -521,7 +528,9 @@ class Translator:
 
     def _has_untranslated_error(self, issues: list[QualityIssue]) -> bool:
         return any(
-            issue.issue_type == QualityIssueType.UNTRANSLATED and issue.severity == "error"
+            issue.issue_type == QualityIssueType.UNTRANSLATED
+            and issue.severity == "error"
+            and (not issue.rule_id or issue.rule_id in self._BLOCKING_UNTRANSLATED_RULES)
             for issue in issues
         )
 
@@ -565,5 +574,6 @@ class Translator:
             source,
             translation,
             reference_id=reference_id,
+            target_lang=target_lang,
         )
         return any(issue.severity == "error" for issue in issues)

@@ -19,6 +19,7 @@ class QualityIssue:
     issue_type: QualityIssueType
     severity: str  # "error", "warning", "info"
     details: str
+    rule_id: str = ""
     fragments: list[str] = field(default_factory=list)
 
 
@@ -29,6 +30,9 @@ class QualityChecker:
     _ALPHA_RE = re.compile(r'[a-zA-Z]')
     _PLACEHOLDER_RE = re.compile(r'%\w+|\{\d+\}|\[[^\]]*\]')
     _PROPER_NOUN_TOKEN_RE = re.compile(r"^[A-Z][a-z'\-]+$")
+    _UPPER_ACRONYM_RE = re.compile(r'\b[A-Z]{2,}(?:[A-Z0-9]{0,4})\b')
+    _LATIN_SPAN_RE = re.compile(r"[A-Za-z]+(?:[ '\-][A-Za-z]+)*")
+    _WHITESPACE_RE = re.compile(r'\s+')
     _ALLOW_CONNECTORS = {"of", "the", "and", "de", "la", "du", "da"}
 
     def __init__(self):
@@ -36,7 +40,8 @@ class QualityChecker:
 
     def check(self, source: str, translation: str,
               matched_terms: Optional[dict] = None,
-              reference_id: Optional[str] = None) -> list[QualityIssue]:
+              reference_id: Optional[str] = None,
+              target_lang: str = "zh") -> list[QualityIssue]:
         """Run quality checks and return a list of issues."""
         issues: list[QualityIssue] = []
 
@@ -44,7 +49,12 @@ class QualityChecker:
             return issues
 
         # Layer 1: Complete untranslated detection
-        issue = self._check_untranslated(source, translation, reference_id=reference_id)
+        issue = self._check_untranslated(
+            source,
+            translation,
+            reference_id=reference_id,
+            target_lang=target_lang,
+        )
         if issue:
             issues.append(issue)
             return issues  # No point checking further
@@ -70,15 +80,21 @@ class QualityChecker:
         for issue in issues:
             context["issue_types"].append(issue.issue_type.value)
             context["fragments"].extend(issue.fragments)
-            context["details"].append(issue.details)
+            detail = issue.details
+            if issue.rule_id:
+                detail = f"[{issue.rule_id}] {detail}"
+            context["details"].append(detail)
         return context
 
     # --- Layer 1: Complete untranslated ---
 
     def _check_untranslated(self, source: str, translation: str,
-                            reference_id: Optional[str] = None) -> Optional[QualityIssue]:
-        source_clean = source.strip().lower()
-        translation_clean = translation.strip().lower()
+                            reference_id: Optional[str] = None,
+                            target_lang: str = "zh") -> Optional[QualityIssue]:
+        source_visible = self._visible_text(source)
+        translation_visible = self._visible_text(translation)
+        source_clean = source_visible.lower()
+        translation_clean = translation_visible.lower()
 
         if source_clean == translation_clean:
             if self._text_analyzer.should_preserve_identity_translation(
@@ -87,6 +103,7 @@ class QualityChecker:
                     issue_type=QualityIssueType.UNTRANSLATED,
                     severity="warning",
                     details="Identifier-like text preserved as-is",
+                    rule_id="identity_identifier",
                 )
 
             if self._looks_like_proper_noun_label(source):
@@ -94,12 +111,14 @@ class QualityChecker:
                     issue_type=QualityIssueType.UNTRANSLATED,
                     severity="warning",
                     details="Proper-noun-like label preserved as-is",
+                    rule_id="identity_proper_noun",
                 )
 
             return QualityIssue(
                 issue_type=QualityIssueType.UNTRANSLATED,
                 severity="error",
                 details="Translation is identical to source text",
+                rule_id="identity",
             )
 
         if len(source_clean) > 10 and len(translation_clean) > 10:
@@ -108,10 +127,17 @@ class QualityChecker:
                     issue_type=QualityIssueType.UNTRANSLATED,
                     severity="error",
                     details="Translation contains/is contained by source text",
+                    rule_id="containment",
                 )
 
         # Check if translation is mostly English when it shouldn't be
-        text_only = self._text_analyzer.strip_markup_and_placeholders(translation)
+        if not self._should_check_latin_ratio(target_lang):
+            return None
+
+        text_only = self._strip_safe_latin_spans(
+            source_visible,
+            translation_visible,
+        )
         if len(text_only) > 5:
             chinese_chars = len(self._CJK_CHAR_RE.findall(text_only))
             alpha_chars = len(self._text_analyzer._ALPHA_CHAR_RE.findall(text_only))
@@ -121,9 +147,45 @@ class QualityChecker:
                     issue_type=QualityIssueType.UNTRANSLATED,
                     severity="error",
                     details=f"Translation appears mostly untranslated (alpha={alpha_chars}, cjk={chinese_chars})",
+                    rule_id="latin_ratio",
                 )
 
         return None
+
+    def _visible_text(self, text: str) -> str:
+        visible = self._text_analyzer.normalize_text(text)
+        return self._WHITESPACE_RE.sub(" ", visible).strip()
+
+    @staticmethod
+    def _should_check_latin_ratio(target_lang: str) -> bool:
+        lang = (target_lang or "").strip().lower()
+        return lang.startswith(("zh", "ja", "ko"))
+
+    def _strip_safe_latin_spans(self, source_visible: str, translation_visible: str) -> str:
+        if not translation_visible:
+            return ""
+
+        text = self._UPPER_ACRONYM_RE.sub("", translation_visible)
+        spans_to_strip: set[str] = set()
+        source_visible_lower = source_visible.lower()
+
+        for match in self._LATIN_SPAN_RE.finditer(text):
+            span = self._WHITESPACE_RE.sub(" ", match.group(0)).strip()
+            if len(span) < 2:
+                continue
+            if span.lower() not in source_visible_lower:
+                continue
+            if self._looks_like_proper_noun_label(span):
+                spans_to_strip.add(span)
+
+        for span in sorted(spans_to_strip, key=len, reverse=True):
+            pattern = re.compile(
+                r'(?<![a-zA-Z])' + re.escape(span) + r'(?![a-zA-Z])',
+                re.IGNORECASE,
+            )
+            text = pattern.sub("", text)
+
+        return self._WHITESPACE_RE.sub(" ", text).strip()
 
     def _looks_like_proper_noun_label(self, text: str) -> bool:
         """Heuristic for labels like location/NPC names that may legitimately stay romanized."""
@@ -180,6 +242,7 @@ class QualityChecker:
                 issue_type=QualityIssueType.UNTRANSLATED,
                 severity="warning",
                 details=f"Possible untranslated glossary fragments: {untranslated}",
+                rule_id="glossary_fragment",
                 fragments=untranslated,
             )
         return None
@@ -201,6 +264,7 @@ class QualityChecker:
                     source_format_tokens,
                     translation_format_tokens,
                 ),
+                rule_id="protected_token_sequence",
                 fragments=self._collect_sequence_fragments(source_format_tokens, translation_format_tokens),
             ))
 
@@ -215,6 +279,7 @@ class QualityChecker:
                     source_placeholders,
                     translation_placeholders,
                 ),
+                rule_id="placeholder_sequence",
                 fragments=self._collect_sequence_fragments(source_placeholders, translation_placeholders),
             ))
 

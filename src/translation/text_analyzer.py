@@ -27,6 +27,9 @@ class TextAnalyzer:
         r'^[A-Za-z_:][\w:.-]*\s*=\s*(?:"[^"]*"|\'[^\']*\'|[^<>\s"\']+)'
         r'(?:\s+[A-Za-z_:][\w:.-]*\s*=\s*(?:"[^"]*"|\'[^\']*\'|[^<>\s"\']+))*\s*$'
     )
+    _SKYRIM_RUNTIME_ASSIGN_RE = re.compile(r'^[A-Za-z][\w.-]*\s*=\s*[^<>]+$')
+    _SKYRIM_RUNTIME_NUMERIC_RE = re.compile(r'^[+-]?\d+(?:\.\d+)?%?$')
+    _SKYRIM_RUNTIME_SPECIAL_RE = re.compile(r'^\?$')
     _PLACEHOLDER_RE = re.compile(r'%\w+|\{\d+\}|\[[^\]]*\]')
     _PROTECTED_TOKEN_RE = re.compile(r'__FMT_\d{4,}__|<[^>]*>|%\w+|\{\d+\}|\[[^\]]*\]|\s+')
     # Match latin words even when adjacent to CJK (e.g. "Choose你的").
@@ -40,7 +43,7 @@ class TextAnalyzer:
         """Remove XML tags and known placeholder patterns from text."""
         if text is None:
             return ""
-        text = self._ANGLE_BLOCK_RE.sub(self._strip_xml_like_match, str(text))
+        text = self._ANGLE_BLOCK_RE.sub(self._strip_protected_angle_match, str(text))
         text = self._PLACEHOLDER_RE.sub('', text)
         return self._FORMAT_SENTINEL_RE.sub('', text)
 
@@ -72,7 +75,7 @@ class TextAnalyzer:
             if token.startswith("__FMT_"):
                 should_protect = True
             elif token.startswith("<") and token.endswith(">"):
-                should_protect = self._is_xml_like_tag(token)
+                should_protect = self._is_protected_angle_token(token)
             elif token.isspace():
                 should_protect = self._should_protect_whitespace(source, start, end)
             else:
@@ -116,7 +119,7 @@ class TextAnalyzer:
                 tokens.append(token)
                 continue
             if token.startswith("<") and token.endswith(">"):
-                if self._is_xml_like_tag(token):
+                if self._is_protected_angle_token(token):
                     tokens.append(token)
                 continue
             if token.isspace():
@@ -130,9 +133,12 @@ class TextAnalyzer:
     def protected_format_tokens_match(self, source: str, candidate: str) -> bool:
         return self.extract_protected_format_tokens(source) == self.extract_protected_format_tokens(candidate)
 
-    def _strip_xml_like_match(self, match: re.Match[str]) -> str:
+    def _strip_protected_angle_match(self, match: re.Match[str]) -> str:
         token = match.group(0)
-        return '' if self._is_xml_like_tag(token) else token
+        return '' if self._is_protected_angle_token(token) else token
+
+    def _is_protected_angle_token(self, token: str) -> bool:
+        return self._is_xml_like_tag(token) or self._is_skyrim_runtime_token(token)
 
     def _is_xml_like_tag(self, token: str) -> bool:
         if not token or len(token) < 3 or not token.startswith('<') or not token.endswith('>'):
@@ -160,6 +166,20 @@ class TextAnalyzer:
             return True
 
         return bool(self._XML_ATTRS_RE.fullmatch(parts[1]))
+
+    def _is_skyrim_runtime_token(self, token: str) -> bool:
+        if not token or len(token) < 3 or not token.startswith('<') or not token.endswith('>'):
+            return False
+
+        inner = token[1:-1].strip()
+        if not inner:
+            return False
+
+        return bool(
+            self._SKYRIM_RUNTIME_ASSIGN_RE.fullmatch(inner)
+            or self._SKYRIM_RUNTIME_NUMERIC_RE.fullmatch(inner)
+            or self._SKYRIM_RUNTIME_SPECIAL_RE.fullmatch(inner)
+        )
 
     @staticmethod
     def _format_sentinel(index: int) -> str:
