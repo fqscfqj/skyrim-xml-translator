@@ -26,13 +26,12 @@ class QualityIssue:
 class QualityChecker:
     """Quality validation for translations: untranslated detection + format preservation."""
 
-    _CJK_CHAR_RE = re.compile(r'[\u4e00-\u9fff]')
-    _ALPHA_RE = re.compile(r'[a-zA-Z]')
-    _PLACEHOLDER_RE = re.compile(r'%\w+|\{\d+\}|\[[^\]]*\]')
+    _CJK_CHAR_RE = re.compile(r"[\u4e00-\u9fff]")
+    _ALPHA_RE = re.compile(r"[a-zA-Z]")
     _PROPER_NOUN_TOKEN_RE = re.compile(r"^[A-Z][a-z'\-]+$")
-    _UPPER_ACRONYM_RE = re.compile(r'\b[A-Z]{2,}(?:[A-Z0-9]{0,4})\b')
+    _UPPER_ACRONYM_RE = re.compile(r"\b[A-Z]{2,}(?:[A-Z0-9]{0,4})\b")
     _LATIN_SPAN_RE = re.compile(r"[A-Za-z]+(?:[ '\-][A-Za-z]+)*")
-    _WHITESPACE_RE = re.compile(r'\s+')
+    _WHITESPACE_RE = re.compile(r"\s+")
     _ALLOW_CONNECTORS = {"of", "the", "and", "de", "la", "du", "da"}
 
     def __init__(self):
@@ -44,28 +43,39 @@ class QualityChecker:
               target_lang: str = "zh") -> list[QualityIssue]:
         """Run quality checks and return a list of issues."""
         issues: list[QualityIssue] = []
+        source_text = "" if source is None else str(source)
+        translation_text = "" if translation is None else str(translation)
 
-        if not source or not translation:
+        if not source_text.strip():
+            return issues
+
+        if not translation_text.strip():
+            issues.append(QualityIssue(
+                issue_type=QualityIssueType.UNTRANSLATED,
+                severity="error",
+                details="Translation is empty",
+                rule_id="empty",
+            ))
+            issues.extend(self._check_format_preservation(source_text, translation_text))
             return issues
 
         # Layer 1: Complete untranslated detection
         issue = self._check_untranslated(
-            source,
-            translation,
+            source_text,
+            translation_text,
             reference_id=reference_id,
             target_lang=target_lang,
         )
         if issue:
             issues.append(issue)
-            return issues  # No point checking further
 
         # Layer 2: Untranslated glossary fragments
-        frag_issue = self._check_untranslated_fragments(source, translation, matched_terms)
+        frag_issue = self._check_untranslated_fragments(source_text, translation_text, matched_terms)
         if frag_issue:
             issues.append(frag_issue)
 
         # Layer 3: Format preservation
-        format_issues = self._check_format_preservation(source, translation)
+        format_issues = self._check_format_preservation(source_text, translation_text)
         issues.extend(format_issues)
 
         return issues
@@ -180,7 +190,7 @@ class QualityChecker:
 
         for span in sorted(spans_to_strip, key=len, reverse=True):
             pattern = re.compile(
-                r'(?<![a-zA-Z])' + re.escape(span) + r'(?![a-zA-Z])',
+                r"(?<![a-zA-Z])" + re.escape(span) + r"(?![a-zA-Z])",
                 re.IGNORECASE,
             )
             text = pattern.sub("", text)
@@ -207,6 +217,8 @@ class QualityChecker:
 
         for token in tokens:
             lower = token.lower()
+            if self._text_analyzer.is_common_ui_token(token):
+                return False
             if lower in self._ALLOW_CONNECTORS:
                 continue
             if not self._PROPER_NOUN_TOKEN_RE.match(token):
@@ -233,7 +245,7 @@ class QualityChecker:
             if term.lower() in (expected_tl or "").lower():
                 continue
             # Check if the English term still appears verbatim in translation
-            pattern = re.compile(r'(?<![a-zA-Z])' + re.escape(term) + r'(?![a-zA-Z])', re.IGNORECASE)
+            pattern = re.compile(r"(?<![a-zA-Z])" + re.escape(term) + r"(?![a-zA-Z])", re.IGNORECASE)
             if pattern.search(translation):
                 untranslated.append(term)
 
@@ -268,8 +280,8 @@ class QualityChecker:
                 fragments=self._collect_sequence_fragments(source_format_tokens, translation_format_tokens),
             ))
 
-        source_placeholders = self._PLACEHOLDER_RE.findall(source)
-        translation_placeholders = self._PLACEHOLDER_RE.findall(translation)
+        source_placeholders = self._text_analyzer.extract_placeholder_tokens(source)
+        translation_placeholders = self._text_analyzer.extract_placeholder_tokens(translation)
         if source_placeholders != translation_placeholders:
             issues.append(QualityIssue(
                 issue_type=QualityIssueType.PLACEHOLDER_MISMATCH,

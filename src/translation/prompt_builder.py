@@ -1,8 +1,7 @@
 """Build complete prompts (system + user + glossary context) for translation requests."""
 
 import re
-from bisect import bisect_right
-from typing import Any, List, Optional
+from typing import Any, Optional
 
 from src.translation.text_analyzer import TextAnalyzer
 
@@ -275,89 +274,3 @@ class PromptBuilder:
         stripped = term.strip()
         stripped = self._TERM_EDGE_PUNCT_RE.sub("", stripped)
         return stripped
-
-    # --- RAG token span utilities (used for truncation) ---
-
-    @staticmethod
-    def rag_token_spans(text: str) -> List[tuple[int, int]]:
-        spans: List[tuple[int, int]] = []
-        i = 0
-        length = len(text)
-        while i < length:
-            ch = text[i]
-            if "\u4e00" <= ch <= "\u9fff":
-                spans.append((i, i + 1))
-                i += 1
-                continue
-            if ch.isalnum():
-                start = i
-                i += 1
-                while i < length:
-                    nxt = text[i]
-                    if nxt.isalnum() or nxt in ("_", "'"):
-                        i += 1
-                        continue
-                    break
-                spans.append((start, i))
-                continue
-            i += 1
-        return spans
-
-    @staticmethod
-    def find_anchor_char_pos(text: str, anchors: List[str]) -> Optional[int]:
-        lower = text.lower()
-        for anchor in anchors:
-            if not isinstance(anchor, str):
-                continue
-            anchor = anchor.strip()
-            if len(anchor) < 2:
-                continue
-            pos = lower.find(anchor.lower())
-            if pos != -1:
-                return pos
-        return None
-
-    @classmethod
-    def truncate_rag_reference(cls, text: str, anchors: List[str], max_tokens: int) -> str:
-        if not text:
-            return text
-        if not isinstance(max_tokens, int) or max_tokens <= 0:
-            return text
-
-        spans = cls.rag_token_spans(text)
-        if len(spans) <= max_tokens:
-            return text
-        if not spans:
-            return text
-
-        anchor_pos = cls.find_anchor_char_pos(text, anchors)
-        window_lead = int(max_tokens * 0.4)
-        start_token = 0
-
-        if anchor_pos is not None:
-            token_starts = [s for s, _ in spans]
-            anchor_token = bisect_right(token_starts, anchor_pos) - 1
-            if anchor_token < 0:
-                anchor_token = 0
-            start_token = anchor_token - window_lead
-
-        if start_token < 0:
-            start_token = 0
-        max_start = max(0, len(spans) - max_tokens)
-        if start_token > max_start:
-            start_token = max_start
-
-        end_token = start_token + max_tokens
-        if end_token > len(spans):
-            end_token = len(spans)
-            start_token = max(0, end_token - max_tokens)
-
-        char_start = spans[start_token][0]
-        char_end = spans[end_token - 1][1]
-        chunk = text[char_start:char_end]
-
-        if char_start > 0:
-            chunk = "…" + chunk
-        if char_end < len(text):
-            chunk = chunk + "…"
-        return chunk

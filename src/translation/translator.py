@@ -17,7 +17,7 @@ from src.logging_helper import emit as log_emit
 
 class Translator:
     _FORMAT_EXTRA_RETRIES = 2
-    _BLOCKING_UNTRANSLATED_RULES = {"identity", "containment", "latin_ratio"}
+    _BLOCKING_UNTRANSLATED_RULES = {"empty", "identity", "containment", "latin_ratio"}
 
     def __init__(self, llm_client: LLMClient, rag_engine: RAGEngine):
         self.llm_client = llm_client
@@ -482,7 +482,7 @@ class Translator:
         default_retry = (
             "上次结果存在质量问题，请重新翻译为{target_language}。"
             "确保：完整翻译不残留源语言词；保留所有标签、[pagebreak]、占位符和结构性空白；"
-            "不得新增、删除、重排或修复任何标签/标记；若原文中出现 __FMT_0001__ 这类哨兵，必须原样保留；"
+            "不得新增、删除、重排或修复任何标签/标记；若原文中出现形如 __FMT_*__ 的哨兵，必须原样保留；"
             "术语表仅作参考；忠实原文形式不扩写；仅输出 JSON。"
         )
         retry_template = self.prompt_manager.get(template_key, default_retry)
