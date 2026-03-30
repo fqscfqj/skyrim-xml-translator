@@ -186,7 +186,7 @@ class TextAnalyzer:
     def _is_format_boundary_char(ch: str) -> bool:
         if not ch:
             return True
-        return ch in "<>[]{}()%\r\n\t"
+        return ch in "<>[]{}%\r\n\t"
 
     def normalize_text(self, text: str) -> str:
         """Normalize text for heuristic comparisons without changing semantics."""
