@@ -1,18 +1,34 @@
 """Text analysis utilities: language detection, text classification, English word extraction."""
 
+from dataclasses import dataclass
 import re
 from typing import Optional
+
+
+@dataclass(frozen=True)
+class ProtectedFormatShell:
+    """Source text with protected formatting replaced by deterministic sentinels."""
+
+    protected_text: str
+    sentinels: tuple[str, ...]
+    tokens: tuple[str, ...]
+
+    @property
+    def has_tokens(self) -> bool:
+        return bool(self.tokens)
 
 
 class TextAnalyzer:
     # Compile regex patterns once
     _ANGLE_BLOCK_RE = re.compile(r'<[^>]*>')
+    _FORMAT_SENTINEL_RE = re.compile(r'__FMT_\d{4,}__')
     _XML_TAG_NAME_RE = re.compile(r'^[A-Za-z_][\w:.-]*$')
     _XML_ATTRS_RE = re.compile(
         r'^[A-Za-z_:][\w:.-]*\s*=\s*(?:"[^"]*"|\'[^\']*\'|[^<>\s"\']+)'
         r'(?:\s+[A-Za-z_:][\w:.-]*\s*=\s*(?:"[^"]*"|\'[^\']*\'|[^<>\s"\']+))*\s*$'
     )
     _PLACEHOLDER_RE = re.compile(r'%\w+|\{\d+\}|\[[^\]]*\]')
+    _PROTECTED_TOKEN_RE = re.compile(r'__FMT_\d{4,}__|<[^>]*>|%\w+|\{\d+\}|\[[^\]]*\]|\s+')
     # Match latin words even when adjacent to CJK (e.g. "Choose你的").
     _ENGLISH_WORD_RE = re.compile(r'(?<![A-Za-z])[A-Za-z]{2,}(?![A-Za-z])')
     _CJK_CHAR_RE = re.compile(r'[\u4e00-\u9fff]')
@@ -25,7 +41,8 @@ class TextAnalyzer:
         if text is None:
             return ""
         text = self._ANGLE_BLOCK_RE.sub(self._strip_xml_like_match, str(text))
-        return self._PLACEHOLDER_RE.sub('', text)
+        text = self._PLACEHOLDER_RE.sub('', text)
+        return self._FORMAT_SENTINEL_RE.sub('', text)
 
     def extract_xml_tags(self, text: str) -> list[str]:
         """Extract XML-style tags from text."""
@@ -36,6 +53,82 @@ class TextAnalyzer:
             for match in self._ANGLE_BLOCK_RE.finditer(str(text))
             if self._is_xml_like_tag(match.group(0))
         ]
+
+    def build_protected_format_shell(self, text: str) -> ProtectedFormatShell:
+        """Replace immutable formatting tokens with deterministic sentinels."""
+        if text is None:
+            return ProtectedFormatShell("", (), ())
+
+        source = str(text)
+        parts: list[str] = []
+        sentinels: list[str] = []
+        tokens: list[str] = []
+        last_index = 0
+
+        for match in self._PROTECTED_TOKEN_RE.finditer(source):
+            token = match.group(0)
+            start, end = match.span()
+
+            if token.startswith("__FMT_"):
+                should_protect = True
+            elif token.startswith("<") and token.endswith(">"):
+                should_protect = self._is_xml_like_tag(token)
+            elif token.isspace():
+                should_protect = self._should_protect_whitespace(source, start, end)
+            else:
+                should_protect = True
+
+            if not should_protect:
+                continue
+
+            parts.append(source[last_index:start])
+            sentinel = self._format_sentinel(len(tokens) + 1)
+            parts.append(sentinel)
+            sentinels.append(sentinel)
+            tokens.append(token)
+            last_index = end
+
+        parts.append(source[last_index:])
+        return ProtectedFormatShell("".join(parts), tuple(sentinels), tuple(tokens))
+
+    def restore_protected_format_shell(self, text: str, shell: ProtectedFormatShell) -> str:
+        """Restore a protected-format shell by replacing sentinels with original tokens."""
+        if not shell or not shell.tokens:
+            return "" if text is None else str(text)
+
+        restored = "" if text is None else str(text)
+        for sentinel, token in zip(shell.sentinels, shell.tokens):
+            restored = restored.replace(sentinel, token)
+        return restored
+
+    def extract_protected_format_tokens(self, text: str) -> list[str]:
+        """Extract the exact sequence of protected formatting tokens from text."""
+        if not text:
+            return []
+
+        source = str(text)
+        tokens: list[str] = []
+        for match in self._PROTECTED_TOKEN_RE.finditer(source):
+            token = match.group(0)
+            start, end = match.span()
+
+            if token.startswith("__FMT_"):
+                tokens.append(token)
+                continue
+            if token.startswith("<") and token.endswith(">"):
+                if self._is_xml_like_tag(token):
+                    tokens.append(token)
+                continue
+            if token.isspace():
+                if self._should_protect_whitespace(source, start, end):
+                    tokens.append(token)
+                continue
+            tokens.append(token)
+
+        return tokens
+
+    def protected_format_tokens_match(self, source: str, candidate: str) -> bool:
+        return self.extract_protected_format_tokens(source) == self.extract_protected_format_tokens(candidate)
 
     def _strip_xml_like_match(self, match: re.Match[str]) -> str:
         token = match.group(0)
@@ -67,6 +160,33 @@ class TextAnalyzer:
             return True
 
         return bool(self._XML_ATTRS_RE.fullmatch(parts[1]))
+
+    @staticmethod
+    def _format_sentinel(index: int) -> str:
+        return f"__FMT_{index:04d}__"
+
+    def _should_protect_whitespace(self, text: str, start: int, end: int) -> bool:
+        """Preserve structural whitespace without freezing word separators inside prose."""
+        token = text[start:end]
+        if not token:
+            return False
+
+        if "\n" in token or "\r" in token or "\t" in token:
+            return True
+        if start == 0 or end == len(text):
+            return True
+        if len(token) > 1:
+            return True
+
+        prev_char = text[start - 1] if start > 0 else ""
+        next_char = text[end] if end < len(text) else ""
+        return self._is_format_boundary_char(prev_char) or self._is_format_boundary_char(next_char)
+
+    @staticmethod
+    def _is_format_boundary_char(ch: str) -> bool:
+        if not ch:
+            return True
+        return ch in "<>[]{}()%\r\n\t"
 
     def normalize_text(self, text: str) -> str:
         """Normalize text for heuristic comparisons without changing semantics."""

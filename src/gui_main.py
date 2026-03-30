@@ -2921,6 +2921,9 @@ class MainWindow(QMainWindow):
             source_item = self.trans_table.item(row, 1)
             source_text = source_item.text() if source_item is not None else ""
             display_text = translation if translation is not None else ""
+            if status == self.ROW_STATUS_FAILED:
+                self._set_row_status(row, self.ROW_STATUS_FAILED, str(details or ""))
+                return
             if status == self.ROW_STATUS_WARNING and not str(display_text).strip():
                 display_text = source_text
 
@@ -2951,20 +2954,6 @@ class MainWindow(QMainWindow):
             return
 
         dest_item = self.trans_table.item(row, 2)
-        if dest_item:
-            source_item = self.trans_table.item(row, 1)
-            source_text = source_item.text() if source_item is not None else ""
-            self.trans_table.blockSignals(True)
-            dest_item.setText(source_text)
-            self.trans_table.blockSignals(False)
-
-            node = dest_item.data(Qt.ItemDataRole.UserRole)
-            if node is not None:
-                try:
-                    self.current_processor.update_dest(node, source_text, overwrite=True)
-                except Exception as e:
-                    self.log(f"Error updating row {row} after failure: {e}")
-
         self._set_row_status(row, self.ROW_STATUS_FAILED, str(error))
 
     def on_table_item_changed(self, item):

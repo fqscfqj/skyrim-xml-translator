@@ -27,7 +27,8 @@ class PromptBuilder:
     def build(self, source_text: str, matched_terms: dict,
               prompt_style: str = "default",
               mcm_ui_mode: bool = False,
-              context_hint: Optional[dict] = None) -> tuple[str, str]:
+              context_hint: Optional[dict] = None,
+              glossary_source_text: Optional[str] = None) -> tuple[str, str]:
         """Build complete (system_prompt, user_content) for a translation request.
 
         Phase B restructure: system prompt contains only core rules;
@@ -53,7 +54,10 @@ class PromptBuilder:
         sections: list[str] = []
 
         # Glossary section → user message
-        glossary_context = self.build_glossary_context(source_text, matched_terms)
+        glossary_context = self.build_glossary_context(
+            glossary_source_text if glossary_source_text is not None else source_text,
+            matched_terms,
+        )
         if glossary_context:
             glossary_append = self.prompt_manager.get(
                 "translator.glossary_instruction_append",

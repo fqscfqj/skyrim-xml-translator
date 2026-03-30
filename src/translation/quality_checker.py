@@ -27,6 +27,7 @@ class QualityChecker:
 
     _CJK_CHAR_RE = re.compile(r'[\u4e00-\u9fff]')
     _ALPHA_RE = re.compile(r'[a-zA-Z]')
+    _PLACEHOLDER_RE = re.compile(r'%\w+|\{\d+\}|\[[^\]]*\]')
     _PROPER_NOUN_TOKEN_RE = re.compile(r"^[A-Z][a-z'\-]+$")
     _ALLOW_CONNECTORS = {"of", "the", "and", "de", "la", "du", "da"}
 
@@ -186,32 +187,65 @@ class QualityChecker:
     # --- Layer 3: Format preservation ---
 
     def _check_format_preservation(self, source: str, translation: str) -> list[QualityIssue]:
-        """Check that XML tags and placeholders are preserved."""
+        """Check that protected formatting tokens are preserved exactly."""
         issues = []
 
-        # Check XML tags
-        source_tags = set(self._text_analyzer.extract_xml_tags(source))
-        translation_tags = set(self._text_analyzer.extract_xml_tags(translation))
-        missing_tags = source_tags - translation_tags
-        if missing_tags:
+        source_format_tokens = self._text_analyzer.extract_protected_format_tokens(source)
+        translation_format_tokens = self._text_analyzer.extract_protected_format_tokens(translation)
+        if source_format_tokens != translation_format_tokens:
             issues.append(QualityIssue(
                 issue_type=QualityIssueType.FORMAT_VIOLATION,
                 severity="error",
-                details=f"Missing XML tags in translation: {missing_tags}",
-                fragments=list(missing_tags),
+                details=self._describe_token_sequence_mismatch(
+                    "Protected format sequence mismatch",
+                    source_format_tokens,
+                    translation_format_tokens,
+                ),
+                fragments=self._collect_sequence_fragments(source_format_tokens, translation_format_tokens),
             ))
 
-        # Check placeholders (%s, %d, {0}, etc.)
-        source_placeholders = re.findall(r'%\w+|\{\d+\}', source)
-        translation_placeholders = re.findall(r'%\w+|\{\d+\}', translation)
-        if sorted(source_placeholders) != sorted(translation_placeholders):
-            missing = set(source_placeholders) - set(translation_placeholders)
-            if missing:
-                issues.append(QualityIssue(
-                    issue_type=QualityIssueType.PLACEHOLDER_MISMATCH,
-                    severity="error",
-                    details=f"Missing placeholders in translation: {missing}",
-                    fragments=list(missing),
-                ))
+        source_placeholders = self._PLACEHOLDER_RE.findall(source)
+        translation_placeholders = self._PLACEHOLDER_RE.findall(translation)
+        if source_placeholders != translation_placeholders:
+            issues.append(QualityIssue(
+                issue_type=QualityIssueType.PLACEHOLDER_MISMATCH,
+                severity="error",
+                details=self._describe_token_sequence_mismatch(
+                    "Placeholder sequence mismatch",
+                    source_placeholders,
+                    translation_placeholders,
+                ),
+                fragments=self._collect_sequence_fragments(source_placeholders, translation_placeholders),
+            ))
 
         return issues
+
+    @staticmethod
+    def _collect_sequence_fragments(source_tokens: list[str], translation_tokens: list[str]) -> list[str]:
+        fragments: list[str] = []
+        max_len = max(len(source_tokens), len(translation_tokens))
+        for idx in range(max_len):
+            src = source_tokens[idx] if idx < len(source_tokens) else None
+            dst = translation_tokens[idx] if idx < len(translation_tokens) else None
+            if src == dst:
+                continue
+            if src and src not in fragments:
+                fragments.append(src)
+            if dst and dst not in fragments:
+                fragments.append(dst)
+        return fragments
+
+    @staticmethod
+    def _describe_token_sequence_mismatch(prefix: str, source_tokens: list[str],
+                                          translation_tokens: list[str]) -> str:
+        max_len = max(len(source_tokens), len(translation_tokens))
+        for idx in range(max_len):
+            src = source_tokens[idx] if idx < len(source_tokens) else None
+            dst = translation_tokens[idx] if idx < len(translation_tokens) else None
+            if src == dst:
+                continue
+            src_repr = repr(src) if src is not None else "<missing>"
+            dst_repr = repr(dst) if dst is not None else "<missing>"
+            return f"{prefix} at index {idx}: expected {src_repr}, got {dst_repr}"
+
+        return prefix
