@@ -6,6 +6,7 @@ from collections import Counter
 from typing import Optional, Callable, List
 
 from src.logging_helper import emit as log_emit
+from src.llm.retry import ErrorType, classify_error
 from src.cache.lru_cache import LRUCache
 
 
@@ -404,35 +405,13 @@ class KeywordExtractor:
             return None
 
     def _is_sensitive_block_error(self, exc) -> bool:
-        status_code = self._extract_status_code(exc)
-        if status_code in (403, 421):
-            return True
+        return classify_error(exc) == ErrorType.CONTENT_BLOCK
 
-        # OpenAI and compatible providers sometimes surface content inspection
-        # failures as HTTP 400 BadRequestError with a structured code/message.
-        message = str(exc or "").lower()
-        if "data_inspection_failed" in message:
-            return True
-        if "output data may contain inappropriate content" in message:
-            return True
-
-        code = getattr(exc, "code", None)
-        if isinstance(code, str) and code.lower() == "data_inspection_failed":
-            return True
-
-        body = getattr(exc, "body", None)
-        if isinstance(body, dict):
-            err = body.get("error")
-            if isinstance(err, dict):
-                err_code = err.get("code")
-                err_message = err.get("message")
-                if isinstance(err_code, str) and err_code.lower() == "data_inspection_failed":
-                    return True
-                if isinstance(err_message, str):
-                    lowered = err_message.lower()
-                    if "data_inspection_failed" in lowered or "output data may contain inappropriate content" in lowered:
-                        return True
-        return False
+    @staticmethod
+    def _format_error_summary(exc: Exception) -> str:
+        if classify_error(exc) == ErrorType.CONTENT_BLOCK:
+            return "模型拒绝回复（内容拦截）"
+        return str(exc)
 
     def _is_refusal_response_text(self, text: str) -> bool:
         normalized = (text or "").strip().lower()
@@ -494,7 +473,7 @@ class KeywordExtractor:
             primary_attempt["response_text"] = primary_response_text
         except Exception as e:
             primary_error = e
-            primary_attempt["error"] = str(e)
+            primary_attempt["error"] = self._format_error_summary(e)
 
         if not self._is_search_call_failed(primary_response_text, primary_error):
             primary_attempt["status"] = "success"
@@ -514,8 +493,8 @@ class KeywordExtractor:
 
         if primary_error is not None:
             status = self._extract_status_code(primary_error)
-            reason = f"exception status={status}" if status is not None else "exception"
             sensitive = self._is_sensitive_block_error(primary_error)
+            reason = "content_block" if sensitive else (f"exception status={status}" if status is not None else "exception")
             primary_attempt["status"] = "failed"
             primary_attempt["failure_reason"] = reason
             primary_attempt["sensitive_block"] = sensitive
@@ -578,13 +557,13 @@ class KeywordExtractor:
             fallback_attempt["response_text"] = fallback_response_text
         except Exception as e:
             fallback_error = e
-            fallback_attempt["error"] = str(e)
+            fallback_attempt["error"] = self._format_error_summary(e)
 
         if self._is_search_call_failed(fallback_response_text, fallback_error):
             if fallback_error is not None:
                 status = self._extract_status_code(fallback_error)
-                reason = f"exception status={status}" if status is not None else "exception"
                 sensitive = self._is_sensitive_block_error(fallback_error)
+                reason = "content_block" if sensitive else (f"exception status={status}" if status is not None else "exception")
                 fallback_attempt["status"] = "failed"
                 fallback_attempt["failure_reason"] = reason
                 fallback_attempt["sensitive_block"] = sensitive

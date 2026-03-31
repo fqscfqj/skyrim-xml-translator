@@ -42,32 +42,59 @@ _DEFAULT_STRATEGIES: dict[ErrorType, RetryStrategy] = {
 }
 
 
+_CONTENT_BLOCK_MARKERS = (
+    "data_inspection_failed",
+    "output data may contain inappropriate content",
+    "moderation block",
+    "content_filter",
+    "high risk",
+)
+
+
+def _has_any_marker(text: str, markers: tuple[str, ...]) -> bool:
+    lowered = (text or "").lower()
+    return any(marker in lowered for marker in markers)
+
+
 def _is_content_block_error(exc: Exception) -> bool:
     """Detect provider-side safety / content-inspection blocks."""
+    status_code = getattr(exc, "status_code", None)
+    if status_code in (403, 421):
+        return True
+
     if not isinstance(exc, openai.BadRequestError):
         return False
 
-    message = str(exc or "").lower()
-    if "data_inspection_failed" in message:
-        return True
-    if "output data may contain inappropriate content" in message:
+    message = str(exc or "")
+    if _has_any_marker(message, _CONTENT_BLOCK_MARKERS):
         return True
 
     code = getattr(exc, "code", None)
-    if isinstance(code, str) and code.lower() == "data_inspection_failed":
+    if isinstance(code, str) and code.lower() in ("data_inspection_failed", "content_filter", "421"):
         return True
 
     body = getattr(exc, "body", None)
     if isinstance(body, dict):
         err = body.get("error")
         if isinstance(err, dict):
+            err_type = err.get("type")
+            if isinstance(err_type, str) and err_type.lower() == "content_filter":
+                return True
+
             err_code = err.get("code")
             err_message = err.get("message")
+            err_param = err.get("param")
+            if isinstance(err_code, int) and err_code == 421:
+                return True
             if isinstance(err_code, str) and err_code.lower() == "data_inspection_failed":
                 return True
+            if isinstance(err_code, str) and err_code.strip() == "421":
+                return True
             if isinstance(err_message, str):
-                lowered = err_message.lower()
-                if "data_inspection_failed" in lowered or "output data may contain inappropriate content" in lowered:
+                if _has_any_marker(err_message, _CONTENT_BLOCK_MARKERS):
+                    return True
+            if isinstance(err_param, str):
+                if _has_any_marker(err_param, _CONTENT_BLOCK_MARKERS):
                     return True
     return False
 
@@ -194,8 +221,9 @@ def execute_with_retry(
             if strategy.max_retries == 0:
                 is_content_block = error_type == ErrorType.CONTENT_BLOCK
                 log_level = "WARNING" if is_content_block else "ERROR"
+                message = f"{log_prefix} non-retryable content block" if is_content_block else f"{log_prefix} non-retryable error ({error_type.value}): {exc}"
                 log_emit(log_callback, config_manager, log_level,
-                         f"{log_prefix} non-retryable {'content block' if is_content_block else 'error'} ({error_type.value}): {exc}",
+                         message,
                          exc=None if is_content_block else exc,
                          module="llm.retry", func="execute_with_retry")
                 raise
