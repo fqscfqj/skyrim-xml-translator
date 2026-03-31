@@ -1,0 +1,125 @@
+name: Build And Publish To Nexus Mods
+
+on:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: write
+
+env:
+  APP_NAME: SkyrimXMLTranslator
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  build-and-publish:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Validate Nexus Mods configuration
+        shell: pwsh
+        env:
+          NEXUSMODS_API_KEY: ${{ secrets.NEXUSMODS_API_KEY }}
+          NEXUSMODS_FILE_GROUP_ID: ${{ vars.NEXUSMODS_FILE_GROUP_ID }}
+        run: |
+          if (-not $env:NEXUSMODS_API_KEY) {
+            throw 'Missing repository secret NEXUSMODS_API_KEY.'
+          }
+
+          if (-not $env:NEXUSMODS_FILE_GROUP_ID) {
+            throw 'Missing repository variable NEXUSMODS_FILE_GROUP_ID. Open the Nexus Mods Files tab, use API Info on the target file group, then add the group id in GitHub -> Settings -> Secrets and variables -> Actions -> Variables.'
+          }
+
+      - name: Compute release metadata
+        id: meta
+        shell: pwsh
+        env:
+          RELEASE_BODY: ${{ github.event.release.body }}
+        run: |
+          $tag = '${{ github.event.release.tag_name }}'
+          $version = if ($tag -match '^[vV](.+)$') { $Matches[1] } else { $tag }
+          $displayName = "Skyrim XML Translator $version"
+          $description = $env:RELEASE_BODY
+
+          if ([string]::IsNullOrWhiteSpace($description)) {
+            $description = "Release $version"
+          }
+
+          $delimiter = [guid]::NewGuid().ToString()
+
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "display_name=$displayName" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "description<<$delimiter" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          $description | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          $delimiter | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Build executable
+        shell: pwsh
+        run: |
+          python build_exe.py --onefile --windowed --name "${{ env.APP_NAME }}"
+
+      - name: Prepare release package
+        id: package
+        shell: pwsh
+        run: |
+          if (-not (Test-Path dist)) {
+            throw 'Build output folder dist was not created.'
+          }
+
+          New-Item -ItemType Directory -Path release -Force | Out-Null
+
+          if (Test-Path config.example.json) {
+            Copy-Item config.example.json dist\config.example.json -Force
+          }
+
+          if (Test-Path README.md) {
+            Copy-Item README.md dist\README.md -Force
+          }
+
+          $zipName = "${{ env.APP_NAME }}-${{ steps.meta.outputs.tag }}-windows-x64.zip"
+          $zipPath = Join-Path $PWD "release\$zipName"
+
+          if (Test-Path $zipPath) {
+            Remove-Item $zipPath -Force
+          }
+
+          Compress-Archive -Path dist\* -DestinationPath $zipPath -CompressionLevel Optimal
+
+          "zip_name=$zipName" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "zip_path=$zipPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Upload build archive to GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ steps.meta.outputs.tag }}" "${{ steps.package.outputs.zip_path }}" --clobber
+
+      - name: Upload archive to Nexus Mods
+        uses: Nexus-Mods/upload-action@v1.0.0-beta.3
+        with:
+          api_key: ${{ secrets.NEXUSMODS_API_KEY }}
+          file_group_id: ${{ vars.NEXUSMODS_FILE_GROUP_ID }}
+          filename: ${{ steps.package.outputs.zip_path }}
+          version: ${{ steps.meta.outputs.version }}
+          display_name: ${{ steps.meta.outputs.display_name }}
+          description: ${{ steps.meta.outputs.description }}
+          file_category: main
