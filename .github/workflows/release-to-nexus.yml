@@ -31,39 +31,29 @@ jobs:
         shell: pwsh
         env:
           NEXUSMODS_API_KEY: ${{ secrets.NEXUSMODS_API_KEY }}
-          NEXUSMODS_FILE_GROUP_ID: ${{ vars.NEXUSMODS_FILE_GROUP_ID }}
+          NEXUSMODS_FILE_GROUP_ID: ${{ vars.NEXUSMODS_FILE_GROUP_ID != '' && vars.NEXUSMODS_FILE_GROUP_ID || secrets.NEXUSMODS_FILE_GROUP_ID }}
         run: |
           if (-not $env:NEXUSMODS_API_KEY) {
             throw 'Missing repository secret NEXUSMODS_API_KEY.'
           }
 
           if (-not $env:NEXUSMODS_FILE_GROUP_ID) {
-            throw 'Missing repository variable NEXUSMODS_FILE_GROUP_ID. Open the Nexus Mods Files tab, use API Info on the target file group, then add the group id in GitHub -> Settings -> Secrets and variables -> Actions -> Variables.'
+            throw 'Missing NEXUSMODS_FILE_GROUP_ID. Add it either as a repository Variable or Secret, using the target file group id from the Nexus Mods Files tab API Info.'
           }
 
       - name: Compute release metadata
         id: meta
         shell: pwsh
-        env:
-          RELEASE_BODY: ${{ github.event.release.body }}
         run: |
           $tag = '${{ github.event.release.tag_name }}'
           $version = if ($tag -match '^[vV](.+)$') { $Matches[1] } else { $tag }
           $displayName = "Skyrim XML Translator $version"
-          $description = $env:RELEASE_BODY
-
-          if ([string]::IsNullOrWhiteSpace($description)) {
-            $description = "Release $version"
-          }
-
-          $delimiter = [guid]::NewGuid().ToString()
+          $description = "Desktop release for version $version."
 
           "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "display_name=$displayName" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          "description<<$delimiter" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          $description | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          $delimiter | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "description=$description" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Install dependencies
         shell: pwsh
@@ -94,7 +84,7 @@ jobs:
             Copy-Item README.md dist\README.md -Force
           }
 
-          $zipName = "${{ env.APP_NAME }}-${{ steps.meta.outputs.tag }}-windows-x64.zip"
+          $zipName = "${{ env.APP_NAME }}-windows-x64.zip"
           $zipPath = Join-Path $PWD "release\$zipName"
 
           if (Test-Path $zipPath) {
@@ -117,7 +107,7 @@ jobs:
         uses: Nexus-Mods/upload-action@v1.0.0-beta.3
         with:
           api_key: ${{ secrets.NEXUSMODS_API_KEY }}
-          file_group_id: ${{ vars.NEXUSMODS_FILE_GROUP_ID }}
+          file_group_id: ${{ vars.NEXUSMODS_FILE_GROUP_ID != '' && vars.NEXUSMODS_FILE_GROUP_ID || secrets.NEXUSMODS_FILE_GROUP_ID }}
           filename: ${{ steps.package.outputs.zip_path }}
           version: ${{ steps.meta.outputs.version }}
           display_name: ${{ steps.meta.outputs.display_name }}
