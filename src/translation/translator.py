@@ -17,7 +17,13 @@ from src.logging_helper import emit as log_emit
 
 class Translator:
     _FORMAT_EXTRA_RETRIES = 2
-    _BLOCKING_UNTRANSLATED_RULES = {"empty", "identity", "containment", "latin_ratio"}
+    _BLOCKING_UNTRANSLATED_RULES = {
+        "empty",
+        "identity",
+        "containment",
+        "latin_ratio",
+        "placeholder_adjacent_latin_residue",
+    }
 
     def __init__(self, llm_client: LLMClient, rag_engine: RAGEngine):
         self.llm_client = llm_client

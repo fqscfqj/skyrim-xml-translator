@@ -22,11 +22,13 @@ class TextAnalyzer:
     # Compile regex patterns once
     _FORMAT_SENTINEL_PATTERN = r"__FMT_(?:[A-Z0-9]+_)?\d{4,}__"
     _PERCENT_PLACEHOLDER_PATTERN = (
-        r"%(?:[A-Za-z_][A-Za-z0-9_]*|"
-        r"(?:\d+\$)?[#0\- +]*(?:\*|\d+)?(?:\.(?:\*|\d+))?"
-        r"(?:hh|h|ll|l|L|z|j|t)?[A-Za-z%]|"
-        r"\d+)"
+        r"(?:(?<![>\d])%[A-Za-z_][A-Za-z0-9_]*|"
+        r"%%|"
+        r"%(?:\d+\$)?[#0\-+]*(?:\*|\d+)?(?:\.(?:\*|\d+))?"
+        r"(?:hh|h|ll|l|L|z|j|t)?[diuoxXfFeEgGaAcspncrs](?![A-Za-z])|"
+        r"%\d+)"
     )
+    _PERCENT_LITERAL_PATTERN = r"(?:(?<=[>\d])%|%(?![A-Za-z0-9_]))"
     _BRACKET_TOKEN_PATTERN = r"\[[^\]]+\]"
     _ANGLE_BLOCK_RE = re.compile(r"<[^>]*>")
     _FORMAT_SENTINEL_RE = re.compile(_FORMAT_SENTINEL_PATTERN)
@@ -39,12 +41,18 @@ class TextAnalyzer:
     _SKYRIM_RUNTIME_NUMERIC_RE = re.compile(r"^[+-]?\d+(?:\.\d+)?%?$")
     _SKYRIM_RUNTIME_SPECIAL_RE = re.compile(r"^\?$")
     _PLACEHOLDER_TOKEN_RE = re.compile(
-        _PERCENT_PLACEHOLDER_PATTERN + r"|\{\d+\}|" + _BRACKET_TOKEN_PATTERN
+        _PERCENT_PLACEHOLDER_PATTERN
+        + r"|"
+        + _PERCENT_LITERAL_PATTERN
+        + r"|\{\d+\}|"
+        + _BRACKET_TOKEN_PATTERN
     )
     _PROTECTED_TOKEN_RE = re.compile(
         _FORMAT_SENTINEL_PATTERN
         + r"|<[^>]*>|"
         + _PERCENT_PLACEHOLDER_PATTERN
+        + r"|"
+        + _PERCENT_LITERAL_PATTERN
         + r"|\{\d+\}|"
         + _BRACKET_TOKEN_PATTERN
         + r"|\s+"
@@ -260,6 +268,8 @@ class TextAnalyzer:
 
         prev_char = text[start - 1] if start > 0 else ""
         next_char = text[end] if end < len(text) else ""
+        if prev_char == "%" and next_char.isalpha():
+            return False
         return self._is_format_boundary_char(prev_char) or self._is_format_boundary_char(next_char)
 
     @staticmethod

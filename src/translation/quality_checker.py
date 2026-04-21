@@ -31,6 +31,10 @@ class QualityChecker:
     _PROPER_NOUN_TOKEN_RE = re.compile(r"^[A-Z][a-z'\-]+$")
     _UPPER_ACRONYM_RE = re.compile(r"\b[A-Z]{2,}(?:[A-Z0-9]{0,4})\b")
     _LATIN_SPAN_RE = re.compile(r"[A-Za-z]+(?:[ '\-][A-Za-z]+)*")
+    _PLACEHOLDER_ADJACENT_LATIN_RE = re.compile(
+        r"(?P<prefix>(?:<[^>]*>\s*)?%\s*)(?P<letter>[a-z])"
+        r"(?=$|[\s\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af。，、！？；：,.!?;:)\]\uFF09])"
+    )
     _WHITESPACE_RE = re.compile(r"\s+")
     _ALLOW_CONNECTORS = {"of", "the", "and", "de", "la", "du", "da"}
 
@@ -73,6 +77,14 @@ class QualityChecker:
         frag_issue = self._check_untranslated_fragments(source_text, translation_text, matched_terms)
         if frag_issue:
             issues.append(frag_issue)
+
+        residue_issue = self._check_placeholder_adjacent_latin_residue(
+            source_text,
+            translation_text,
+            target_lang=target_lang,
+        )
+        if residue_issue:
+            issues.append(residue_issue)
 
         # Layer 3: Format preservation
         format_issues = self._check_format_preservation(source_text, translation_text)
@@ -225,6 +237,48 @@ class QualityChecker:
                 return False
 
         return True
+
+    def _check_placeholder_adjacent_latin_residue(
+            self,
+            source: str,
+            translation: str,
+            target_lang: str = "zh") -> Optional[QualityIssue]:
+        """Flag stray single Latin letters next to percent/placeholder clusters.
+
+        This catches format-shell pollution such as ``<mag>% m伤害`` where the
+        first letter of an English comparative (``more``/``faster``) survived as
+        if it were a protected token. Real source placeholders like ``%s`` or
+        ``%f`` are skipped when they appear in the source token sequence.
+        """
+        if not self._should_check_latin_ratio(target_lang):
+            return None
+        if not translation:
+            return None
+
+        source_tokens = set(self._text_analyzer.extract_placeholder_tokens(source))
+        source_tokens.update(self._text_analyzer.extract_protected_format_tokens(source))
+
+        fragments: list[str] = []
+        for match in self._PLACEHOLDER_ADJACENT_LATIN_RE.finditer(translation):
+            letter = match.group("letter")
+            candidate_placeholder = f"%{letter}"
+            if candidate_placeholder in source_tokens:
+                continue
+
+            fragment = match.group(0).strip()
+            if fragment and fragment not in fragments:
+                fragments.append(fragment)
+
+        if not fragments:
+            return None
+
+        return QualityIssue(
+            issue_type=QualityIssueType.UNTRANSLATED,
+            severity="error",
+            details=f"Possible source-language letter residue near placeholder/percent sign: {fragments}",
+            rule_id="placeholder_adjacent_latin_residue",
+            fragments=fragments,
+        )
 
     # --- Layer 2: Untranslated glossary fragments ---
 
