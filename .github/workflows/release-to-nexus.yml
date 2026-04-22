@@ -104,7 +104,7 @@ jobs:
           gh release upload "${{ steps.meta.outputs.tag }}" "${{ steps.package.outputs.zip_path }}" --clobber
 
       - name: Upload archive to Nexus Mods
-        uses: Nexus-Mods/upload-action@v1.0.0-beta.3
+        uses: Nexus-Mods/upload-action@v1.0.0-beta.4
         with:
           api_key: ${{ secrets.NEXUSMODS_API_KEY }}
           file_group_id: ${{ vars.NEXUSMODS_FILE_GROUP_ID != '' && vars.NEXUSMODS_FILE_GROUP_ID || secrets.NEXUSMODS_FILE_GROUP_ID }}
