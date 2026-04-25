@@ -182,14 +182,21 @@ class LLMClient:
                 final_params[key] = value
 
         request_args = {"model": model, "messages": messages}
-        # Some OpenAI-compatible providers support non-standard fields like
-        # `enable_thinking`, but the OpenAI Python SDK rejects unknown top-level
-        # kwargs. Route those through `extra_body` to avoid TypeError while still
-        # letting compatible backends receive the flag.
+        # Some OpenAI-compatible providers support non-standard fields.
+        # Known standard kwargs accepted by the OpenAI SDK at top level;
+        # anything else is routed through `extra_body` to avoid TypeError.
+        _STANDARD_KWARGS = frozenset({
+            "model", "messages", "temperature", "top_p", "frequency_penalty",
+            "presence_penalty", "max_tokens", "stream", "stop", "n",
+            "logprobs", "top_logprobs", "logit_bias", "user", "seed",
+            "response_format", "tools", "tool_choice", "functions",
+            "function_call", "parallel_tool_calls", "reasoning_effort",
+            "timeout", "extra_headers", "extra_query", "extra_body",
+        })
         extra_body: dict[str, Any] = {}
-        enable_thinking = final_params.pop("enable_thinking", None)
-        if enable_thinking is not None:
-            extra_body["enable_thinking"] = bool(enable_thinking)
+        for key in list(final_params.keys()):
+            if key not in _STANDARD_KWARGS:
+                extra_body[key] = final_params.pop(key)
 
         request_args.update(final_params)
         if extra_body:

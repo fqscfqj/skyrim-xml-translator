@@ -53,6 +53,7 @@ class RAGConfig:
     keyword_weight_anchor_max_df: int = 500
     keyword_weight_anchor_boost: float = 0.18
     format_extra_retries: int = 2
+    latin_ratio_threshold: float = 2.0
 
 
 @dataclass

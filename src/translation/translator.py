@@ -1,6 +1,7 @@
 """Translator facade with simplified pipeline."""
 
 import copy
+import time
 from threading import Lock
 from typing import Optional
 
@@ -34,7 +35,9 @@ class Translator:
         self._text_analyzer = TextAnalyzer()
         self._prompt_builder = PromptBuilder(self.prompt_manager, rag_engine.config)
         self._response_parser = ResponseParser(rag_engine.config)
-        self._quality_checker = QualityChecker()
+        self._quality_checker = QualityChecker(
+            latin_ratio_threshold=float(rag_engine.config.get(
+                "rag", "latin_ratio_threshold", 2.0)))
 
         # Translation cache
         cache_size = rag_engine.config.get("cache", "translation_cache_size", 50000)
@@ -54,7 +57,23 @@ class Translator:
         self._format_extra_retries = int(rag_engine.config.get(
             "rag", "format_extra_retries", self._DEFAULT_FORMAT_EXTRA_RETRIES))
 
+        # Prompt hot-reload throttle: avoid per-text mtime checks in batch runs.
+        self._last_prompt_reload_time: float = 0.0
+
     # --- Public API ---
+
+    # --- Internal helpers (shared by public API) ---
+
+    def _reload_prompts_if_needed(self) -> None:
+        """Reload prompt files if they changed, throttled to once per 30s."""
+        now = time.time()
+        if now - self._last_prompt_reload_time < 30.0:
+            return
+        self._last_prompt_reload_time = now
+        try:
+            self.prompt_manager.reload_if_changed()
+        except Exception:
+            pass
 
     def get_last_rag_debug_info(self):
         with self._last_rag_debug_info_lock:
@@ -88,10 +107,7 @@ class Translator:
         if not text or not str(text).strip():
             return debug_info
 
-        try:
-            self.prompt_manager.reload_if_changed()
-        except Exception:
-            pass
+        self._reload_prompts_if_needed()
 
         rag_result = self._run_rag_phase(text, use_rag=use_rag, log_callback=log_callback)
         debug_info["keywords"] = rag_result["keywords"]
@@ -274,11 +290,8 @@ class Translator:
                      "Ignoring empty cached translation (treat as cache miss)",
                      module="translator", func="translate_text")
 
-        # Reload prompts if changed
-        try:
-            self.prompt_manager.reload_if_changed()
-        except Exception:
-            pass
+        # Reload prompts if changed (throttled)
+        self._reload_prompts_if_needed()
 
         # RAG phase
         rag_result = self._run_rag_phase(text, use_rag=use_rag, log_callback=log_callback)

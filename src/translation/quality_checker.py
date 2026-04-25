@@ -38,8 +38,9 @@ class QualityChecker:
     _WHITESPACE_RE = re.compile(r"\s+")
     _ALLOW_CONNECTORS = {"of", "the", "and", "de", "la", "du", "da"}
 
-    def __init__(self):
+    def __init__(self, latin_ratio_threshold: float = 2.0):
         self._text_analyzer = TextAnalyzer()
+        self._latin_ratio_threshold = max(latin_ratio_threshold, 0.5)
 
     def check(self, source: str, translation: str,
               matched_terms: Optional[dict] = None,
@@ -175,7 +176,7 @@ class QualityChecker:
             chinese_chars = len(self._CJK_CHAR_RE.findall(text_only))
             alpha_chars = len(self._text_analyzer._ALPHA_CHAR_RE.findall(text_only))
             total_chars = chinese_chars + alpha_chars
-            if total_chars > 5 and alpha_chars > chinese_chars * 2:
+            if total_chars > 5 and alpha_chars > chinese_chars * self._latin_ratio_threshold:
                 return QualityIssue(
                     issue_type=QualityIssueType.UNTRANSLATED,
                     severity="error",
