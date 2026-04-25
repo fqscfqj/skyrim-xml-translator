@@ -6,8 +6,10 @@ from src.cache.lru_cache import LRUCache
 
 
 class TranslationCache:
-    def __init__(self, max_size: int = 50000, persist_path: Optional[str] = None):
-        self._cache = LRUCache(max_size=max_size, persist_path=persist_path)
+    def __init__(self, max_size: int = 50000, persist_path: Optional[str] = None,
+                 ttl_seconds: float = 0):
+        self._cache = LRUCache(max_size=max_size, persist_path=persist_path,
+                               ttl_seconds=ttl_seconds)
 
     def get(self, source_text: str, prompt_style: str, target_lang: str,
             context_key: str = "") -> Optional[str]:
