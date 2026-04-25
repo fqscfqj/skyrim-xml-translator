@@ -187,51 +187,80 @@ class ResponseParser:
 
     def _try_followup_reformat(self, response: str, messages: list,
                                llm_client, log_callback) -> Optional[str]:
-        """Ask LLM to reformat a non-JSON response into JSON."""
-        followup_response = None
-        try:
-            original_input = None
-            for msg in messages:
-                if msg.get("role") == "user":
-                    original_input = msg.get("content", "")
-                    break
+        """Ask LLM to reformat a non-JSON response into JSON.
 
-            followup_msg = [
-                {"role": "system", "content": "你是 JSON 格式化器，只输出合法 JSON。"},
-                {"role": "user", "content": (
-                    f"原任务输入：{original_input}\n\n"
-                    f"模型回复：{response}\n\n"
-                    "请提取其中最终译文，并按以下格式返回："
-                    "{\"translation\":\"...\"}\n"
-                    "只输出合法 JSON，不要输出其他内容。"
-                )}
-            ]
-            followup_response = llm_client.chat_completion(followup_msg, log_callback=log_callback)
-            clean_followup = self._MARKDOWN_CODE_RE.sub("", followup_response).strip()
-            data = json.loads(clean_followup)
-            found, result = self._extract_translation_value(data)
-            if not found:
+        Makes up to 2 attempts if the followup itself fails to produce valid JSON.
+        """
+        original_input = None
+        for msg in messages:
+            if msg.get("role") == "user":
+                original_input = msg.get("content", "")
+                break
+
+        followup_msg = [
+            {"role": "system", "content": "你是 JSON 格式化器，只输出合法 JSON。"},
+            {"role": "user", "content": (
+                f"原任务输入：{original_input}\n\n"
+                f"模型回复：{response}\n\n"
+                "请提取其中最终译文，并按以下格式返回："
+                "{\"translation\":\"...\"}\n"
+                "只输出合法 JSON，不要输出其他内容。"
+            )}
+        ]
+
+        for attempt in range(2):
+            followup_response = None
+            try:
+                followup_response = llm_client.chat_completion(
+                    followup_msg, log_callback=log_callback)
+                clean_followup = self._MARKDOWN_CODE_RE.sub(
+                    "", followup_response).strip()
+                data = json.loads(clean_followup)
+                found, result = self._extract_translation_value(data)
+                if not found:
+                    return None
+
+                # Safety check for prompt leakage
+                prompt_patterns = [
+                    "reformat", "Respond only", "Output only", "Extract the",
+                    "格式化器", "原任务输入", "模型回复", "只输出合法 JSON",
+                    "{\"translation\"",
+                ]
+                if result and not any(pattern in result for pattern in prompt_patterns):
+                    log_emit(log_callback, self.config, "DEBUG",
+                             f"Recovered via followup reformat (attempt {attempt + 1})",
+                             module="response_parser", func="_try_followup_reformat")
+                    return result
+                if result:
+                    log_emit(log_callback, self.config, "WARNING",
+                             f"Followup response may contain prompt leakage: {result[:100]}...",
+                             module="response_parser", func="_try_followup_reformat")
+                    return None
+            except json.JSONDecodeError:
+                if followup_response:
+                    log_emit(log_callback, self.config, "WARNING",
+                             f"Followup JSON Parse Error (attempt {attempt + 1}). "
+                             f"Response: {followup_response[:120]}",
+                             module="response_parser", func="_try_followup_reformat")
+                if attempt == 0:
+                    # Retry with stronger instruction
+                    followup_msg.append({
+                        "role": "user",
+                        "content": "上一条回复不是合法 JSON。请严格只输出一个 JSON 对象，"
+                                   "格式：{\"translation\":\"...\"}"
+                    })
+                    continue
+            except Exception:
+                if attempt == 0:
+                    log_emit(log_callback, self.config, "WARNING",
+                             "Followup reformat failed, retrying once",
+                             module="response_parser", func="_try_followup_reformat")
+                    continue
+                log_emit(log_callback, self.config, "WARNING",
+                         "Followup reformat failed after retry, giving up",
+                         module="response_parser", func="_try_followup_reformat")
                 return None
 
-            # Safety check for prompt leakage
-            prompt_patterns = [
-                "reformat", "Respond only", "Output only", "Extract the",
-                "格式化器", "原任务输入", "模型回复", "只输出合法 JSON",
-                "{\"translation\"",
-            ]
-            if result and not any(pattern in result for pattern in prompt_patterns):
-                return result
-            if result:
-                log_emit(log_callback, self.config, "WARNING",
-                         f"Followup response may contain prompt leakage: {result[:100]}...",
-                         module="response_parser", func="_try_followup_reformat")
-        except json.JSONDecodeError:
-            if followup_response:
-                log_emit(log_callback, self.config, "WARNING",
-                         f"Followup JSON Parse Error. Response: {followup_response}",
-                         module="response_parser", func="_try_followup_reformat")
-        except Exception:
-            pass
         return None
 
     def _try_plain_text_fallback(self, response: str) -> Optional[str]:

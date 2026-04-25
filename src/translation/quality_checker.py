@@ -145,6 +145,17 @@ class QualityChecker:
 
         if len(source_clean) > 10 and len(translation_clean) > 10:
             if source_clean in translation_clean or translation_clean in source_clean:
+                # Downgrade to warning when translation mixes CJK + Latin
+                # (e.g. "Screenshot 截图" is a valid mixed-lang result)
+                has_cjk = bool(self._CJK_CHAR_RE.search(translation_visible))
+                has_alpha = bool(self._ALPHA_RE.search(translation_visible))
+                if has_cjk and has_alpha:
+                    return QualityIssue(
+                        issue_type=QualityIssueType.UNTRANSLATED,
+                        severity="warning",
+                        details="Translation contains source text but also has CJK+Latin mix (possibly intentional)",
+                        rule_id="containment",
+                    )
                 return QualityIssue(
                     issue_type=QualityIssueType.UNTRANSLATED,
                     severity="error",

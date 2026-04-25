@@ -16,7 +16,7 @@ from src.logging_helper import emit as log_emit
 
 
 class Translator:
-    _FORMAT_EXTRA_RETRIES = 2
+    _DEFAULT_FORMAT_EXTRA_RETRIES = 2
     _BLOCKING_UNTRANSLATED_RULES = {
         "empty",
         "identity",
@@ -49,6 +49,10 @@ class Translator:
         self._last_rag_debug_info = None
         self._last_rag_debug_info_lock = Lock()
         self._runtime_flags = {"mcm_ui_mode": False}
+
+        # Configurable extra retries for format errors
+        self._format_extra_retries = int(rag_engine.config.get(
+            "rag", "format_extra_retries", self._DEFAULT_FORMAT_EXTRA_RETRIES))
 
     # --- Public API ---
 
@@ -318,7 +322,7 @@ class Translator:
             try:
                 if retry_count > 0:
                     retry_limit = max_retries + (
-                        self._FORMAT_EXTRA_RETRIES if self._has_format_error(issues) else 0
+                        self._format_extra_retries if self._has_format_error(issues) else 0
                     )
                     retry_context = self._quality_checker.get_retry_context(issues)
                     retry_prompt = self._build_retry_prompt(
@@ -377,7 +381,7 @@ class Translator:
                     return translation
 
                 max_retry_limit = max_retries + (
-                    self._FORMAT_EXTRA_RETRIES if has_format_error else 0
+                    self._format_extra_retries if has_format_error else 0
                 )
                 if retry_count >= max_retry_limit:
                     if has_untranslated_error:
@@ -407,7 +411,7 @@ class Translator:
                          f"Translation failed: {e}", exc=e,
                          module="translator", func="translate_text")
                 max_retry_limit = max_retries + (
-                    self._FORMAT_EXTRA_RETRIES if self._has_format_error(issues) else 0
+                    self._format_extra_retries if self._has_format_error(issues) else 0
                 )
                 if retry_count >= max_retry_limit:
                     raise
