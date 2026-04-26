@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import time
 from typing import Optional, Callable, Any
 
@@ -12,6 +13,9 @@ from src.logging_helper import emit as log_emit
 
 
 class VectorStore:
+    _NORMALIZE_TERM_RE = re.compile(r"[^0-9a-zA-Z\u4e00-\u9fff]+")
+    _WHITESPACE_RE = re.compile(r"\s+")
+
     def __init__(self, vector_path: str, terms_path: str, embed_dim: int,
                  config_manager=None):
         self.vector_path = vector_path
@@ -20,6 +24,8 @@ class VectorStore:
         self.config = config_manager
         self.vectors: Optional[np.ndarray] = None
         self.terms: list[str] = []
+        self._normalized_terms: list[str] = []
+        self._token_to_indices: dict[str, list[int]] = {}
 
         # Flags for GUI pause/stop control
         self.stop_flag: bool = False
@@ -65,6 +71,39 @@ class VectorStore:
                      "Vector index size mismatch. Rebuilding index is recommended.",
                      module="vector_store", func="load")
 
+        self._rebuild_lexical_index()
+
+    @classmethod
+    def _normalize_term_key(cls, text: str) -> str:
+        if not text:
+            return ""
+        cleaned = text.strip().lower()
+        cleaned = cls._NORMALIZE_TERM_RE.sub(" ", cleaned)
+        cleaned = cls._WHITESPACE_RE.sub(" ", cleaned).strip()
+        return cleaned
+
+    def _add_term_to_lexical_index(self, index: int, term: str) -> None:
+        normalized = self._normalize_term_key(term)
+        self._normalized_terms.append(normalized)
+        for token in set(t for t in normalized.split() if t):
+            self._token_to_indices.setdefault(token, []).append(index)
+
+    def _rebuild_lexical_index(self) -> None:
+        self._normalized_terms = []
+        self._token_to_indices = {}
+        for idx, term in enumerate(self.terms):
+            self._add_term_to_lexical_index(idx, term)
+
+    def _append_terms_to_lexical_index(self, terms: list[str]) -> None:
+        if not terms:
+            return
+        start_idx = len(self.terms) - len(terms)
+        if start_idx < 0 or len(self._normalized_terms) != start_idx:
+            self._rebuild_lexical_index()
+            return
+        for offset, term in enumerate(terms):
+            self._add_term_to_lexical_index(start_idx + offset, term)
+
     def save_vectors(self) -> None:
         if self.vectors is not None:
             parent = os.path.dirname(self.vector_path)
@@ -92,6 +131,7 @@ class VectorStore:
             self._close_mmap()
             self.vectors = np.vstack([old, vec_np])
             self.terms.append(term)
+        self._append_terms_to_lexical_index([term])
         self.save_vectors()
         self.save_terms_index()
 
@@ -105,6 +145,7 @@ class VectorStore:
                 self._close_mmap()
                 self.vectors = np.delete(old, idx, axis=0)
                 self.save_vectors()
+            self._rebuild_lexical_index()
             self.save_terms_index()
             return True
         return False
@@ -126,6 +167,7 @@ class VectorStore:
             self.save_vectors()
             for idx in indices_to_delete:
                 self.terms.pop(idx)
+            self._rebuild_lexical_index()
             self.save_terms_index()
 
         return indices_to_delete
@@ -222,6 +264,7 @@ class VectorStore:
                 self._close_mmap()
                 self.vectors = np.vstack([old, new_vectors_np])
             self.terms.extend(new_terms_added)
+            self._append_terms_to_lexical_index(new_terms_added)
             self.save_vectors()
             self.save_terms_index()
 
@@ -313,6 +356,7 @@ class VectorStore:
                         self._close_mmap()
                         self.vectors = np.vstack([old, new_vectors_np])
                     self.terms.extend(batch_valid_terms)
+                    self._append_terms_to_lexical_index(batch_valid_terms)
                     self.save_vectors()
                     self.save_terms_index()
 
@@ -365,7 +409,24 @@ class VectorStore:
 
         Returns [(index, term), ...] sorted by similarity if provided.
         """
-        indices = [i for i, t in enumerate(self.terms) if query_lower in t.lower()]
+        query_norm = self._normalize_term_key(query_lower)
+        if not query_norm:
+            return []
+
+        if len(self._normalized_terms) != len(self.terms):
+            self._rebuild_lexical_index()
+
+        candidate_indices = range(len(self.terms))
+        query_tokens = [t for t in query_norm.split() if t]
+        if len(query_tokens) > 1:
+            indexed_hits = [self._token_to_indices[t] for t in set(query_tokens) if t in self._token_to_indices]
+            if indexed_hits:
+                candidate_indices = min(indexed_hits, key=len)
+
+        indices = [
+            i for i in candidate_indices
+            if i < len(self._normalized_terms) and query_norm in self._normalized_terms[i]
+        ]
         if similarities is not None and len(indices) > 0:
             indices.sort(key=lambda i: similarities[i] if i < len(similarities) else 0, reverse=True)
         return [(i, self.terms[i]) for i in indices[:top_k]]
