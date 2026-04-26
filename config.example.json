@@ -12,9 +12,6 @@
         "parameters": {
             "temperature": null,
             "top_p": null,
-            "frequency_penalty": null,
-            "presence_penalty": null,
-            "max_tokens": null,
             "enable_thinking": null
         }
     },
@@ -31,9 +28,6 @@
         "parameters": {
             "temperature": null,
             "top_p": null,
-            "frequency_penalty": null,
-            "presence_penalty": null,
-            "max_tokens": null,
             "enable_thinking": null
         }
     },
@@ -50,9 +44,6 @@
         "parameters": {
             "temperature": null,
             "top_p": null,
-            "frequency_penalty": null,
-            "presence_penalty": null,
-            "max_tokens": null,
             "enable_thinking": null
         }
     },

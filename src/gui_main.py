@@ -1995,27 +1995,6 @@ class MainWindow(QMainWindow):
         top_p_spin.setValue(1.0)
         add_param_control("top_p", i18n.t("param_top_p"), top_p_spin)
 
-        freq_spin = NoWheelDoubleSpinBox()
-        freq_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        freq_spin.setRange(-2.0, 2.0)
-        freq_spin.setSingleStep(0.1)
-        freq_spin.setValue(0.0)
-        add_param_control("frequency_penalty", i18n.t("param_freq_penalty"), freq_spin)
-
-        pres_spin = NoWheelDoubleSpinBox()
-        pres_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        pres_spin.setRange(-2.0, 2.0)
-        pres_spin.setSingleStep(0.1)
-        pres_spin.setValue(0.0)
-        add_param_control("presence_penalty", i18n.t("param_pres_penalty"), pres_spin)
-
-        token_spin = NoWheelSpinBox()
-        token_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        token_spin.setRange(16, 8192)
-        token_spin.setSingleStep(16)
-        token_spin.setValue(512)
-        add_param_control("max_tokens", i18n.t("param_max_tokens"), token_spin)
-
         thinking_combo = NoWheelComboBox()
         thinking_combo.addItem(i18n.t("option_thinking_on"), True)
         thinking_combo.addItem(i18n.t("option_thinking_off"), False)
@@ -2080,27 +2059,6 @@ class MainWindow(QMainWindow):
         s_top_p_spin.setValue(1.0)
         add_search_param_control("top_p", i18n.t("param_top_p"), s_top_p_spin)
 
-        s_freq_spin = NoWheelDoubleSpinBox()
-        s_freq_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        s_freq_spin.setRange(-2.0, 2.0)
-        s_freq_spin.setSingleStep(0.1)
-        s_freq_spin.setValue(0.0)
-        add_search_param_control("frequency_penalty", i18n.t("param_freq_penalty"), s_freq_spin)
-
-        s_pres_spin = NoWheelDoubleSpinBox()
-        s_pres_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        s_pres_spin.setRange(-2.0, 2.0)
-        s_pres_spin.setSingleStep(0.1)
-        s_pres_spin.setValue(0.0)
-        add_search_param_control("presence_penalty", i18n.t("param_pres_penalty"), s_pres_spin)
-
-        s_token_spin = NoWheelSpinBox()
-        s_token_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        s_token_spin.setRange(16, 8192)
-        s_token_spin.setSingleStep(16)
-        s_token_spin.setValue(512)
-        add_search_param_control("max_tokens", i18n.t("param_max_tokens"), s_token_spin)
-
         s_thinking_combo = NoWheelComboBox()
         s_thinking_combo.addItem(i18n.t("option_thinking_on"), True)
         s_thinking_combo.addItem(i18n.t("option_thinking_off"), False)
@@ -2163,27 +2121,6 @@ class MainWindow(QMainWindow):
         sf_top_p_spin.setSingleStep(0.05)
         sf_top_p_spin.setValue(1.0)
         add_search_fallback_param_control("top_p", i18n.t("param_top_p"), sf_top_p_spin)
-
-        sf_freq_spin = NoWheelDoubleSpinBox()
-        sf_freq_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        sf_freq_spin.setRange(-2.0, 2.0)
-        sf_freq_spin.setSingleStep(0.1)
-        sf_freq_spin.setValue(0.0)
-        add_search_fallback_param_control("frequency_penalty", i18n.t("param_freq_penalty"), sf_freq_spin)
-
-        sf_pres_spin = NoWheelDoubleSpinBox()
-        sf_pres_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        sf_pres_spin.setRange(-2.0, 2.0)
-        sf_pres_spin.setSingleStep(0.1)
-        sf_pres_spin.setValue(0.0)
-        add_search_fallback_param_control("presence_penalty", i18n.t("param_pres_penalty"), sf_pres_spin)
-
-        sf_token_spin = NoWheelSpinBox()
-        sf_token_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        sf_token_spin.setRange(16, 8192)
-        sf_token_spin.setSingleStep(16)
-        sf_token_spin.setValue(512)
-        add_search_fallback_param_control("max_tokens", i18n.t("param_max_tokens"), sf_token_spin)
 
         sf_thinking_combo = NoWheelComboBox()
         sf_thinking_combo.addItem(i18n.t("option_thinking_on"), True)
@@ -3282,19 +3219,27 @@ class MainWindow(QMainWindow):
                 return widget.currentData()
             return widget.value()
 
+        removed_param_keys = {"frequency_penalty", "presence_penalty", "max_tokens"}
+
         params = self.config_manager.config.setdefault("llm", {}).setdefault("parameters", {})
         for name, (checkbox, widget) in self.model_param_controls.items():
             params[name] = _param_widget_value(widget) if checkbox.isChecked() else None
+        for name in removed_param_keys:
+            params.pop(name, None)
             
         search_params = self.config_manager.config.setdefault("llm_search", {}).setdefault("parameters", {})
         for name, (checkbox, widget) in self.search_param_controls.items():
             search_params[name] = _param_widget_value(widget) if checkbox.isChecked() else None
+        for name in removed_param_keys:
+            search_params.pop(name, None)
 
         search_fallback_params = self.config_manager.config.setdefault(
             "llm_search_fallback", {}
         ).setdefault("parameters", {})
         for name, (checkbox, widget) in self.search_fallback_param_controls.items():
             search_fallback_params[name] = _param_widget_value(widget) if checkbox.isChecked() else None
+        for name in removed_param_keys:
+            search_fallback_params.pop(name, None)
         
         self.config_manager.save_config()
         self.llm_client.reload_config()

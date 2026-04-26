@@ -18,9 +18,6 @@ class LLMConfig:
     parameters: dict = field(default_factory=lambda: {
         "temperature": None,
         "top_p": None,
-        "frequency_penalty": None,
-        "presence_penalty": None,
-        "max_tokens": None,
         "enable_thinking": None,
     })
 

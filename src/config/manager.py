@@ -35,6 +35,11 @@ class ConfigManager:
         ("rag", "keyword_weight_max_term_tokens"),
         ("rag", "keyword_weight_anchor_token_budget"),
     )
+    _DEPRECATED_LLM_PARAMETER_KEYS: tuple[str, ...] = (
+        "frequency_penalty",
+        "presence_penalty",
+        "max_tokens",
+    )
 
     def __init__(self, config_path: str = "config.json"):
         self.config_path = config_path
@@ -104,6 +109,18 @@ class ConfigManager:
                 section_dict.pop(key, None)
                 changed = True
                 removed.append(f"{section}.{key}")
+        for section in ("llm", "llm_search", "llm_search_fallback"):
+            section_dict = self.config.get(section)
+            if not isinstance(section_dict, dict):
+                continue
+            params = section_dict.get("parameters")
+            if not isinstance(params, dict):
+                continue
+            for key in self._DEPRECATED_LLM_PARAMETER_KEYS:
+                if key in params:
+                    params.pop(key, None)
+                    changed = True
+                    removed.append(f"{section}.parameters.{key}")
         if removed:
             log_emit(
                 None,
