@@ -1,5 +1,5 @@
 {
   "glossary_header": "术语表：",
   "glossary_instruction_append": "\n以上术语仅供参考，语义不符可忽略；不得据此补全原文未出现的成分。",
-  "user_template": "原文：{text}"
+  "user_template": "请将以下原文翻译为{target_language}：\n{text}"
 }

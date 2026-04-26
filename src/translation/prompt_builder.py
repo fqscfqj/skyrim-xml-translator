@@ -221,7 +221,7 @@ class PromptBuilder:
             system_prompt = (
                 "将输入翻译为{target_language}。"
                 '只输出 JSON：{"translation":"..."}。'
-                "先理解全句含义再用地道中文重新表达，禁止逐词硬译；"
+                "先理解全句含义再用自然地道的{target_language}重新表达，禁止逐词硬译；"
                 "口语称呼和习语按语境真实含义翻译，不取字面义。"
                 "保留所有 XML/HTML 标签、占位符和空白。"
                 "术语表仅作候选参考，语义匹配时采用；"
