@@ -82,45 +82,57 @@
     "btn_close": "关闭",
     "msg_rag_log_copied": "RAG 日志已复制到剪贴板。",
     "group_llm_settings": "LLM 设置",
-    "label_base_url": "Base URL:",
-    "label_api_key": "API Key:",
-    "label_model_name": "Model Name:",
+    "label_base_url": "Base URL：",
+    "label_api_key": "API 密钥：",
+    "label_model_name": "模型名称：",
     "group_llm_params": "LLM 参数 (可选)",
-    "param_temperature": "启用温度 (temperature)",
-    "param_top_p": "启用 Top-p (top_p)",
-    "param_enable_thinking": "启用思考 (enable_thinking)",
+    "param_temperature": "覆盖 Temperature 参数",
+    "param_top_p": "覆盖 Top-p 参数",
+    "param_enable_thinking": "覆盖 Thinking 参数",
+    "tooltip_param_temperature": "勾选后向模型显式发送 temperature。数值越低越稳定，越高越发散。",
+    "tooltip_param_top_p": "勾选后向模型显式发送 top_p 核采样参数。通常保持不勾选，除非供应商要求或需要调参。",
+    "tooltip_param_enable_thinking": "勾选后显式发送供应商兼容的思考开关；仅适用于支持该参数的模型。",
     "option_thinking_on": "开启思考",
     "option_thinking_off": "关闭思考",
     "group_search_llm_settings": "搜索模型设置 (可选 - 用于提取关键词)",
-    "label_search_base_url": "Search Base URL:",
-    "label_search_api_key": "Search API Key:",
-    "label_search_model": "Search Model:",
+    "label_search_base_url": "搜索模型 Base URL：",
+    "label_search_api_key": "搜索模型 API 密钥：",
+    "label_search_model": "搜索模型名称：",
     "group_search_llm_params": "搜索模型参数 (可选)",
     "group_search_fallback_llm_settings": "搜索兜底模型设置 (可选 - 仅主搜索失败时使用)",
-    "label_search_fallback_base_url": "Fallback Search Base URL:",
-    "label_search_fallback_api_key": "Fallback Search API Key:",
-    "label_search_fallback_model": "Fallback Search Model:",
+    "label_search_fallback_base_url": "兜底搜索模型 Base URL：",
+    "label_search_fallback_api_key": "兜底搜索模型 API 密钥：",
+    "label_search_fallback_model": "兜底搜索模型名称：",
     "group_search_fallback_llm_params": "搜索兜底模型参数 (可选)",
     "group_embedding_settings": "Embedding 设置",
     "tooltip_embed_dim": "设置 Embedding 模型的向量维度 (例如 OpenAI 为 1536)",
-    "label_dimensions": "Dimensions:",
+    "label_dimensions": "向量维度：",
     "group_threads": "多线程设置",
     "label_trans_threads": "翻译线程数:",
     "label_vec_threads": "向量化线程数:",
+    "tooltip_trans_threads": "并发翻译请求数量。过高可能触发限流或增加内存占用。",
+    "tooltip_vec_threads": "导入术语或重建向量索引时使用的并发向量化请求数量。",
     "group_rag_settings": "RAG 设置",
     "label_rag_threshold": "相似度阈值 (0-1):",
+    "tooltip_rag_threshold": "术语匹配需要达到的最低相似度。数值越高越严格，越低召回更多但可能引入噪声。",
     "label_rag_short_max_results": "短词典单次召回上限:",
     "tooltip_rag_short_max_results": "每次 RAG 召回最多返回多少条短词典。",
     "label_rag_long_max_results": "长词典单次召回上限:",
     "tooltip_rag_long_max_results": "每次 RAG 召回最多返回多少条长词典。",
     "group_system_settings": "系统设置",
     "label_log_level": "日志等级:",
+    "tooltip_log_level": "显示和写入的最低日志等级。DEBUG 最详细，ERROR 只记录错误。",
     "label_prompt_style": "提示词风格 (prompt_style):",
     "label_language": "界面语言:",
+    "tooltip_language": "更改应用界面语言。部分界面文字需要重启应用后完全生效。",
     "label_source_language": "源语言（Source Language）:",
+    "tooltip_source_language": "源文本语言。文件语言混合或不确定时建议使用自动检测。",
     "label_target_language": "目标语言（Target Language）:",
+    "tooltip_target_language": "翻译输出语言，会写入提示词并影响模型输出。",
     "label_mcm_output_suffix": "MCM 输出后缀:",
+    "tooltip_mcm_output_suffix": "保存 MCM 文本文件时使用的语言后缀，例如强制 _CHINESE 或保持源后缀。",
     "label_mcm_auto_export": "MCM 翻译完成后自动输出到源目录",
+    "tooltip_mcm_auto_export": "启用后，MCM 翻译任务完成时会自动保存到源文件所在目录。",
     "mcm_suffix_source": "保持源后缀",
     "mcm_suffix_english": "强制 _ENGLISH",
     "mcm_suffix_chinese": "强制 _CHINESE",
@@ -141,7 +153,7 @@
     "language_option_de": "德语",
     "language_option_es": "西班牙语",
     "language_option_ru": "俄语",
-    "tooltip_prompt_style": "选择使用的提示词风格",
+    "tooltip_prompt_style": "选择提示词风格：default 为标准本地化，nsfw 用于成人/不审查内容，lore_accurate 强调世界观准确，modern_colloquial 更口语自然，erotic_novel 强调成人文学表达。",
     "btn_save_config": "保存配置",
     "title_open_xml": "打开 XML 文件",
     "title_open_translation_file": "打开翻译文件",
@@ -192,9 +204,12 @@
     "msg_restart_for_language": "请重启应用以应用新的语言设置。"
     ,"label_rag_recall_limit_note": "召回数量仅由短/长词典上限控制。"
     ,"group_rag_advanced_settings": "RAG 高级设置"
-    ,"label_rag_keyword_max_queries": "关键词安全阈值:"
+    ,"label_rag_keyword_max_queries": "关键词搜索任务上限:"
+    ,"tooltip_rag_keyword_max_queries": "单条文本最多生成多少个关键词检索任务，用于避免异常大的召回工作量。"
     ,"label_rag_keyword_task_decompose_enabled": "启用关键词任务拆分"
+    ,"tooltip_rag_keyword_task_decompose_enabled": "将较长原文拆成多个关键词检索任务，以提升术语召回率。"
     ,"label_rag_keyword_task_keep_original": "保留原短语任务"
+    ,"tooltip_rag_keyword_task_keep_original": "拆分后仍额外使用完整原短语检索。可能提升召回，但也可能带来重复候选。"
     ,"label_rag_short_term_max_chars": "短词典长度阈值（字符）:"
     ,"tooltip_rag_short_term_max_chars": "用于短词典分桶的字符长度阈值；长度 <= 该值视为短词典。"
     ,"label_rag_ai_path_disabled_note": "AI 候选路径在当前版本暂不生效，后续将由 reranker 替代。"
@@ -203,18 +218,31 @@
     ,"label_rag_ai_candidate_context_chars": "AI 上下文字符数:"
     ,"label_rag_ai_candidate_min_vector_score": "AI 候选最低向量分:"
     ,"label_rag_keyword_weight_enabled": "启用关键词加权召回"
+    ,"tooltip_rag_keyword_weight_enabled": "在选择术语参考前，对命中重要关键词的候选项进行加权提升。"
+    ,"label_rag_min_vector_score": "最低语义召回分数:"
+    ,"tooltip_rag_min_vector_score": "候选项进入关键词加权筛选前需要达到的最低向量相似度。"
     ,"label_rag_expert_params": "显示专家参数"
+    ,"tooltip_rag_expert_params": "显示关键词加权召回的高级调参项。除非需要微调 RAG 行为，否则建议保持隐藏。"
     ,"label_rag_keyword_weight_candidate_pool_size": "加权候选池大小:"
+    ,"tooltip_rag_keyword_weight_candidate_pool_size": "执行关键词加权前参与筛选的语义候选数量。"
     ,"label_rag_keyword_weight_keep_k": "加权保留 Top-K:"
+    ,"tooltip_rag_keyword_weight_keep_k": "加权重排后最多保留的候选数量。"
     ,"label_rag_keyword_weight_min_primary_hits": "加权主命中最小数:"
+    ,"tooltip_rag_keyword_weight_min_primary_hits": "优先保留的主要关键词命中数量不足时，会补充回退候选。"
     ,"label_rag_keyword_weight_exact_boost": "精确匹配加成:"
+    ,"tooltip_rag_keyword_weight_exact_boost": "关键词精确匹配时增加的分数。"
     ,"label_rag_keyword_weight_contains_boost": "包含匹配加成:"
+    ,"tooltip_rag_keyword_weight_contains_boost": "候选项包含关键词片段时增加的分数。"
     ,"label_rag_keyword_weight_token_boost": "token 匹配加成:"
+    ,"tooltip_rag_keyword_weight_token_boost": "token 级关键词重叠时增加的分数。"
     ,"label_rag_keyword_weight_anchor_max_df": "锚点最大 DF:"
+    ,"tooltip_rag_keyword_weight_anchor_max_df": "一个 token 被视为有效锚点时允许的最大文档频率。数值越低越偏向罕见词。"
     ,"label_rag_keyword_weight_anchor_boost": "锚点加成:"
+    ,"tooltip_rag_keyword_weight_anchor_boost": "命中罕见锚点词时增加的分数。"
     ,"btn_reset_rag_advanced": "重置 RAG 高级参数"
     ,"title_confirm_reset_rag_advanced": "确认重置"
     ,"msg_confirm_reset_rag_advanced": "将 RAG 高级参数重置为默认值？"
     ,"msg_rag_advanced_reset_done": "RAG 高级参数已重置，点击“保存配置”后生效。"
+    ,"msg_invalid_base_url": "{group} / {field} 的 URL 无效。请使用完整的 http:// 或 https:// 地址。"
     ,"step_rag_tasks": "1. RAG任务"
 }

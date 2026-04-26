@@ -9,6 +9,7 @@ from typing import Optional, cast
 import csv
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlparse
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QLabel, QLineEdit, QPushButton, QTextEdit, QPlainTextEdit,
                              QTabWidget, QFileDialog, QCheckBox, QProgressBar, 
@@ -24,6 +25,7 @@ from PyQt6.QtGui import (
 )
 
 from src.config.manager import ConfigManager
+from src.config.schema import RAGConfig
 from src.llm.client import LLMClient
 from src.rag.engine import RAGEngine
 from src.esp_xml_processor import ESPXMLProcessor
@@ -2028,6 +2030,21 @@ class MainWindow(QMainWindow):
         form_layout = QVBoxLayout(form_widget)
         form_layout.setSpacing(10)
 
+        param_tooltips = {
+            "temperature": i18n.t(
+                "tooltip_param_temperature",
+                "When enabled, send temperature to the model. Lower values are more stable; higher values are more creative."
+            ),
+            "top_p": i18n.t(
+                "tooltip_param_top_p",
+                "When enabled, send top_p nucleus sampling to the model. Usually leave disabled unless your provider requires it."
+            ),
+            "enable_thinking": i18n.t(
+                "tooltip_param_enable_thinking",
+                "When enabled, explicitly sends the provider-specific thinking switch. Only use with compatible models."
+            ),
+        }
+
         # Wrap settings in a scroll area so controls remain usable on smaller windows.
         llm_group = QGroupBox(i18n.t('group_llm_settings'))
         llm_layout = QFormLayout(llm_group)
@@ -2049,6 +2066,8 @@ class MainWindow(QMainWindow):
 
         def add_param_control(name, label_text, widget):
             checkbox = QCheckBox(label_text)
+            checkbox.setToolTip(param_tooltips.get(name, ""))
+            widget.setToolTip(param_tooltips.get(name, ""))
             widget.setEnabled(False)
             # Use toggled (bool) rather than stateChanged (enum int) to avoid enum/value mismatches
             checkbox.toggled.connect(
@@ -2113,6 +2132,8 @@ class MainWindow(QMainWindow):
 
         def add_search_param_control(name, label_text, widget):
             checkbox = QCheckBox(label_text)
+            checkbox.setToolTip(param_tooltips.get(name, ""))
+            widget.setToolTip(param_tooltips.get(name, ""))
             widget.setEnabled(False)
             # Use toggled (bool) rather than stateChanged to ensure consistent boolean values
             checkbox.toggled.connect(
@@ -2177,6 +2198,8 @@ class MainWindow(QMainWindow):
 
         def add_search_fallback_param_control(name, label_text, widget):
             checkbox = QCheckBox(label_text)
+            checkbox.setToolTip(param_tooltips.get(name, ""))
+            widget.setToolTip(param_tooltips.get(name, ""))
             widget.setEnabled(False)
             checkbox.toggled.connect(
                 lambda checked, w=widget: w.setEnabled(bool(checked))
@@ -2251,11 +2274,13 @@ class MainWindow(QMainWindow):
         self.trans_threads.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.trans_threads.setRange(1, 99)
         self.trans_threads.setValue(self.config_manager.get("threads", "translation", 5))
+        self.trans_threads.setToolTip(i18n.t("tooltip_trans_threads"))
         
         self.vec_threads = NoWheelSpinBox()
         self.vec_threads.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.vec_threads.setRange(1, 99)
         self.vec_threads.setValue(self.config_manager.get("threads", "vectorization", 5))
+        self.vec_threads.setToolTip(i18n.t("tooltip_vec_threads"))
 
         threads_layout.addRow(i18n.t("label_trans_threads"), self.trans_threads)
         threads_layout.addRow(i18n.t("label_vec_threads"), self.vec_threads)
@@ -2271,6 +2296,7 @@ class MainWindow(QMainWindow):
         self.rag_threshold.setRange(0.0, 1.0)
         self.rag_threshold.setSingleStep(0.05)
         self.rag_threshold.setValue(self.config_manager.get("rag", "similarity_threshold", 0.75))
+        self.rag_threshold.setToolTip(i18n.t("tooltip_rag_threshold"))
 
         self.rag_short_max_results = NoWheelSpinBox()
         self.rag_short_max_results.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
@@ -2303,6 +2329,7 @@ class MainWindow(QMainWindow):
         self.rag_keyword_max_queries.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.rag_keyword_max_queries.setRange(1, 512)
         self.rag_keyword_max_queries.setValue(self.config_manager.get("rag", "keyword_max_queries", 128))
+        self.rag_keyword_max_queries.setToolTip(i18n.t("tooltip_rag_keyword_max_queries"))
         rag_layout.addRow(i18n.t("label_rag_keyword_max_queries", "Keyword safety limit:"), self.rag_keyword_max_queries)
 
         self.rag_keyword_task_decompose_enabled = QCheckBox(i18n.t(
@@ -2311,6 +2338,7 @@ class MainWindow(QMainWindow):
         self.rag_keyword_task_decompose_enabled.setChecked(bool(
             self.config_manager.get("rag", "keyword_task_decompose_enabled", True)
         ))
+        self.rag_keyword_task_decompose_enabled.setToolTip(i18n.t("tooltip_rag_keyword_task_decompose_enabled"))
         rag_layout.addRow(self.rag_keyword_task_decompose_enabled)
 
         self.rag_keyword_task_keep_original = QCheckBox(i18n.t(
@@ -2319,6 +2347,7 @@ class MainWindow(QMainWindow):
         self.rag_keyword_task_keep_original.setChecked(bool(
             self.config_manager.get("rag", "keyword_task_keep_original", False)
         ))
+        self.rag_keyword_task_keep_original.setToolTip(i18n.t("tooltip_rag_keyword_task_keep_original"))
         rag_layout.addRow(self.rag_keyword_task_keep_original)
 
         self.rag_short_term_max_chars = NoWheelSpinBox()
@@ -2338,6 +2367,7 @@ class MainWindow(QMainWindow):
         self.rag_keyword_weight_enabled.setChecked(bool(
             self.config_manager.get("rag", "keyword_weight_enabled", True)
         ))
+        self.rag_keyword_weight_enabled.setToolTip(i18n.t("tooltip_rag_keyword_weight_enabled"))
         rag_layout.addRow(self.rag_keyword_weight_enabled)
 
         self.rag_min_vector_score = NoWheelDoubleSpinBox()
@@ -2345,12 +2375,14 @@ class MainWindow(QMainWindow):
         self.rag_min_vector_score.setRange(0.0, 1.0)
         self.rag_min_vector_score.setSingleStep(0.01)
         self.rag_min_vector_score.setValue(self.config_manager.get("rag", "min_vector_score", 0.45))
+        self.rag_min_vector_score.setToolTip(i18n.t("tooltip_rag_min_vector_score"))
         rag_layout.addRow(i18n.t("label_rag_min_vector_score", "Minimum semantic recall score:"), self.rag_min_vector_score)
 
         self.rag_expert_toggle = QCheckBox(i18n.t(
             "label_rag_expert_params", "Show expert parameters"
         ))
         self.rag_expert_toggle.setChecked(False)
+        self.rag_expert_toggle.setToolTip(i18n.t("tooltip_rag_expert_params"))
         rag_layout.addRow(self.rag_expert_toggle)
 
         self.rag_expert_container = QWidget()
@@ -2362,18 +2394,21 @@ class MainWindow(QMainWindow):
         self.rag_keyword_weight_candidate_pool_size.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.rag_keyword_weight_candidate_pool_size.setRange(1, 500)
         self.rag_keyword_weight_candidate_pool_size.setValue(self.config_manager.get("rag", "keyword_weight_candidate_pool_size", 24))
+        self.rag_keyword_weight_candidate_pool_size.setToolTip(i18n.t("tooltip_rag_keyword_weight_candidate_pool_size"))
         expert_layout.addRow(i18n.t("label_rag_keyword_weight_candidate_pool_size", "Keyword weight candidate pool size:"), self.rag_keyword_weight_candidate_pool_size)
 
         self.rag_keyword_weight_keep_k = NoWheelSpinBox()
         self.rag_keyword_weight_keep_k.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.rag_keyword_weight_keep_k.setRange(1, 500)
         self.rag_keyword_weight_keep_k.setValue(self.config_manager.get("rag", "keyword_weight_keep_k", 24))
+        self.rag_keyword_weight_keep_k.setToolTip(i18n.t("tooltip_rag_keyword_weight_keep_k"))
         expert_layout.addRow(i18n.t("label_rag_keyword_weight_keep_k", "Keyword weight keep top-k:"), self.rag_keyword_weight_keep_k)
 
         self.rag_keyword_weight_min_primary_hits = NoWheelSpinBox()
         self.rag_keyword_weight_min_primary_hits.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.rag_keyword_weight_min_primary_hits.setRange(1, 500)
         self.rag_keyword_weight_min_primary_hits.setValue(self.config_manager.get("rag", "keyword_weight_min_primary_hits", 8))
+        self.rag_keyword_weight_min_primary_hits.setToolTip(i18n.t("tooltip_rag_keyword_weight_min_primary_hits"))
         expert_layout.addRow(i18n.t("label_rag_keyword_weight_min_primary_hits", "Keyword weight min primary hits:"), self.rag_keyword_weight_min_primary_hits)
 
         self.rag_keyword_weight_exact_boost = NoWheelDoubleSpinBox()
@@ -2381,6 +2416,7 @@ class MainWindow(QMainWindow):
         self.rag_keyword_weight_exact_boost.setRange(0.0, 2.0)
         self.rag_keyword_weight_exact_boost.setSingleStep(0.01)
         self.rag_keyword_weight_exact_boost.setValue(self.config_manager.get("rag", "keyword_weight_exact_boost", 0.14))
+        self.rag_keyword_weight_exact_boost.setToolTip(i18n.t("tooltip_rag_keyword_weight_exact_boost"))
         expert_layout.addRow(i18n.t("label_rag_keyword_weight_exact_boost", "Keyword weight exact boost:"), self.rag_keyword_weight_exact_boost)
 
         self.rag_keyword_weight_contains_boost = NoWheelDoubleSpinBox()
@@ -2388,6 +2424,7 @@ class MainWindow(QMainWindow):
         self.rag_keyword_weight_contains_boost.setRange(0.0, 2.0)
         self.rag_keyword_weight_contains_boost.setSingleStep(0.01)
         self.rag_keyword_weight_contains_boost.setValue(self.config_manager.get("rag", "keyword_weight_contains_boost", 0.06))
+        self.rag_keyword_weight_contains_boost.setToolTip(i18n.t("tooltip_rag_keyword_weight_contains_boost"))
         expert_layout.addRow(i18n.t("label_rag_keyword_weight_contains_boost", "Keyword weight contains boost:"), self.rag_keyword_weight_contains_boost)
 
         self.rag_keyword_weight_token_boost = NoWheelDoubleSpinBox()
@@ -2395,12 +2432,14 @@ class MainWindow(QMainWindow):
         self.rag_keyword_weight_token_boost.setRange(0.0, 2.0)
         self.rag_keyword_weight_token_boost.setSingleStep(0.01)
         self.rag_keyword_weight_token_boost.setValue(self.config_manager.get("rag", "keyword_weight_token_boost", 0.04))
+        self.rag_keyword_weight_token_boost.setToolTip(i18n.t("tooltip_rag_keyword_weight_token_boost"))
         expert_layout.addRow(i18n.t("label_rag_keyword_weight_token_boost", "Keyword weight token boost:"), self.rag_keyword_weight_token_boost)
 
         self.rag_keyword_weight_anchor_max_df = NoWheelSpinBox()
         self.rag_keyword_weight_anchor_max_df.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.rag_keyword_weight_anchor_max_df.setRange(1, 200000)
         self.rag_keyword_weight_anchor_max_df.setValue(self.config_manager.get("rag", "keyword_weight_anchor_max_df", 500))
+        self.rag_keyword_weight_anchor_max_df.setToolTip(i18n.t("tooltip_rag_keyword_weight_anchor_max_df"))
         expert_layout.addRow(i18n.t("label_rag_keyword_weight_anchor_max_df", "Anchor max DF:"), self.rag_keyword_weight_anchor_max_df)
 
         self.rag_keyword_weight_anchor_boost = NoWheelDoubleSpinBox()
@@ -2408,7 +2447,12 @@ class MainWindow(QMainWindow):
         self.rag_keyword_weight_anchor_boost.setRange(0.0, 2.0)
         self.rag_keyword_weight_anchor_boost.setSingleStep(0.01)
         self.rag_keyword_weight_anchor_boost.setValue(self.config_manager.get("rag", "keyword_weight_anchor_boost", 0.18))
+        self.rag_keyword_weight_anchor_boost.setToolTip(i18n.t("tooltip_rag_keyword_weight_anchor_boost"))
         expert_layout.addRow(i18n.t("label_rag_keyword_weight_anchor_boost", "Anchor boost:"), self.rag_keyword_weight_anchor_boost)
+
+        reset_rag_advanced_btn = QPushButton(i18n.t("btn_reset_rag_advanced"))
+        reset_rag_advanced_btn.clicked.connect(self.reset_rag_advanced_settings)
+        expert_layout.addRow(reset_rag_advanced_btn)
 
         self.rag_expert_container.setVisible(False)
         self.rag_expert_toggle.toggled.connect(self.rag_expert_container.setVisible)
@@ -2420,9 +2464,22 @@ class MainWindow(QMainWindow):
         system_layout.setContentsMargins(12, 10, 12, 12)
         system_layout.setSpacing(8)
 
+        self.language_combo = NoWheelComboBox()
+        self.language_combo.addItem(i18n.t("language_option_auto"), "auto")
+        self.language_combo.addItem(i18n.t("language_option_en"), "en")
+        self.language_combo.addItem(i18n.t("language_option_zh"), "zh")
+        current_language = self.config_manager.get("general", "language", "auto") or "auto"
+        current_index = self.language_combo.findData(current_language)
+        if current_index == -1:
+            current_index = 0
+        self.language_combo.setCurrentIndex(current_index)
+        self.language_combo.setToolTip(i18n.t("tooltip_language"))
+        system_layout.addRow(i18n.t("label_language"), self.language_combo)
+
         self.log_level_combo = NoWheelComboBox()
         self.log_level_combo.addItems(["DEBUG", "INFO", "WARNING", "ERROR"])
         self.log_level_combo.setCurrentText(self.config_manager.get("general", "log_level", "INFO"))
+        self.log_level_combo.setToolTip(i18n.t("tooltip_log_level"))
         system_layout.addRow(i18n.t("label_log_level"), self.log_level_combo)
         
         # Prompt style selection (dynamic from prompts: translator.system_prompts.*)
@@ -2456,6 +2513,7 @@ class MainWindow(QMainWindow):
         if idx == -1:
             idx = 0
         self.source_language_combo.setCurrentIndex(idx)
+        self.source_language_combo.setToolTip(i18n.t("tooltip_source_language"))
         system_layout.addRow(i18n.t("label_source_language"), self.source_language_combo)
 
         self.target_language_combo = NoWheelComboBox()
@@ -2466,6 +2524,7 @@ class MainWindow(QMainWindow):
         if idx == -1:
             idx = 0
         self.target_language_combo.setCurrentIndex(idx)
+        self.target_language_combo.setToolTip(i18n.t("tooltip_target_language"))
         system_layout.addRow(i18n.t("label_target_language"), self.target_language_combo)
 
         self.mcm_suffix_combo = NoWheelComboBox()
@@ -2488,24 +2547,15 @@ class MainWindow(QMainWindow):
         if idx == -1:
             idx = 0
         self.mcm_suffix_combo.setCurrentIndex(idx)
+        self.mcm_suffix_combo.setToolTip(i18n.t("tooltip_mcm_output_suffix"))
         system_layout.addRow(i18n.t("label_mcm_output_suffix"), self.mcm_suffix_combo)
 
         self.mcm_auto_export_checkbox = QCheckBox(i18n.t("label_mcm_auto_export"))
         self.mcm_auto_export_checkbox.setChecked(
             bool(self.config_manager.get("general", "mcm_auto_export", True))
         )
+        self.mcm_auto_export_checkbox.setToolTip(i18n.t("tooltip_mcm_auto_export"))
         system_layout.addRow(self.mcm_auto_export_checkbox)
-
-        self.language_combo = NoWheelComboBox()
-        self.language_combo.addItem(i18n.t("language_option_auto"), "auto")
-        self.language_combo.addItem(i18n.t("language_option_en"), "en")
-        self.language_combo.addItem(i18n.t("language_option_zh"), "zh")
-        current_language = self.config_manager.get("general", "language", "auto") or "auto"
-        current_index = self.language_combo.findData(current_language)
-        if current_index == -1:
-            current_index = 0
-        self.language_combo.setCurrentIndex(current_index)
-        system_layout.addRow(i18n.t("label_language"), self.language_combo)
         form_layout.addWidget(system_group)
 
         save_btn = QPushButton(i18n.t("btn_save_config"))
@@ -3235,7 +3285,67 @@ class MainWindow(QMainWindow):
         self.refresh_term_list()
         QMessageBox.information(self, i18n.t("title_success"), i18n.t("msg_operation_completed"))
 
+    def _is_valid_http_url(self, value: str) -> bool:
+        parsed = urlparse(value)
+        return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+    def _validate_config_inputs(self) -> bool:
+        url_fields = [
+            (self.llm_base, i18n.t("group_llm_settings"), i18n.t("label_base_url")),
+            (self.search_base, i18n.t("group_search_llm_settings"), i18n.t("label_search_base_url")),
+            (self.search_fallback_base, i18n.t("group_search_fallback_llm_settings"), i18n.t("label_search_fallback_base_url")),
+            (self.embed_base, i18n.t("group_embedding_settings"), i18n.t("label_base_url")),
+        ]
+        for widget, group_label, field_label in url_fields:
+            value = widget.text().strip()
+            if value and not self._is_valid_http_url(value):
+                QMessageBox.warning(
+                    self,
+                    i18n.t("title_warning"),
+                    i18n.t("msg_invalid_base_url").format(
+                        group=group_label,
+                        field=field_label.rstrip(":："),
+                    ),
+                )
+                widget.setFocus()
+                return False
+        return True
+
+    def reset_rag_advanced_settings(self):
+        confirm = QMessageBox.question(
+            self,
+            i18n.t("title_confirm_reset_rag_advanced"),
+            i18n.t("msg_confirm_reset_rag_advanced"),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        defaults = RAGConfig()
+        self.rag_keyword_max_queries.setValue(defaults.keyword_max_queries)
+        self.rag_keyword_task_decompose_enabled.setChecked(defaults.keyword_task_decompose_enabled)
+        self.rag_keyword_task_keep_original.setChecked(defaults.keyword_task_keep_original)
+        self.rag_short_term_max_chars.setValue(defaults.short_term_max_chars)
+        self.rag_min_vector_score.setValue(defaults.min_vector_score)
+        self.rag_keyword_weight_enabled.setChecked(defaults.keyword_weight_enabled)
+        self.rag_keyword_weight_candidate_pool_size.setValue(defaults.keyword_weight_candidate_pool_size)
+        self.rag_keyword_weight_keep_k.setValue(defaults.keyword_weight_keep_k)
+        self.rag_keyword_weight_min_primary_hits.setValue(defaults.keyword_weight_min_primary_hits)
+        self.rag_keyword_weight_exact_boost.setValue(defaults.keyword_weight_exact_boost)
+        self.rag_keyword_weight_contains_boost.setValue(defaults.keyword_weight_contains_boost)
+        self.rag_keyword_weight_token_boost.setValue(defaults.keyword_weight_token_boost)
+        self.rag_keyword_weight_anchor_max_df.setValue(defaults.keyword_weight_anchor_max_df)
+        self.rag_keyword_weight_anchor_boost.setValue(defaults.keyword_weight_anchor_boost)
+        QMessageBox.information(
+            self,
+            i18n.t("title_info"),
+            i18n.t("msg_rag_advanced_reset_done"),
+        )
+
     def save_config(self):
+        if not self._validate_config_inputs():
+            return
+
         previous_language = self.config_manager.get("general", "language", "auto")
         selected_language = self.language_combo.currentData()
         source_lang = self.source_language_combo.currentData() if hasattr(self, "source_language_combo") else "auto"
@@ -3250,24 +3360,24 @@ class MainWindow(QMainWindow):
         # Batch update to avoid repeated save() calls.
         self.config_manager.set_many({
             "llm": {
-                "base_url": self.llm_base.text(),
-                "api_key": self.llm_key.text(),
-                "model": self.llm_model.text(),
+                "base_url": self.llm_base.text().strip(),
+                "api_key": self.llm_key.text().strip(),
+                "model": self.llm_model.text().strip(),
             },
             "llm_search": {
-                "base_url": self.search_base.text(),
-                "api_key": self.search_key.text(),
-                "model": self.search_model.text(),
+                "base_url": self.search_base.text().strip(),
+                "api_key": self.search_key.text().strip(),
+                "model": self.search_model.text().strip(),
             },
             "llm_search_fallback": {
-                "base_url": self.search_fallback_base.text(),
-                "api_key": self.search_fallback_key.text(),
-                "model": self.search_fallback_model.text(),
+                "base_url": self.search_fallback_base.text().strip(),
+                "api_key": self.search_fallback_key.text().strip(),
+                "model": self.search_fallback_model.text().strip(),
             },
             "embedding": {
-                "base_url": self.embed_base.text(),
-                "api_key": self.embed_key.text(),
-                "model": self.embed_model.text(),
+                "base_url": self.embed_base.text().strip(),
+                "api_key": self.embed_key.text().strip(),
+                "model": self.embed_model.text().strip(),
                 "dimensions": self.embed_dim.value(),
             },
             "threads": {
