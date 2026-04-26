@@ -1,6 +1,20 @@
 import unittest
 
+from src.translation.prompt_builder import PromptBuilder
 from src.translation.text_analyzer import TextAnalyzer
+
+
+class _DummyPromptManager:
+    def get(self, key, default=None):
+        return default
+
+
+class _DummyConfig:
+    def __init__(self, values=None):
+        self._values = values or {}
+
+    def get(self, section, key, default=None):
+        return self._values.get((section, key), default)
 
 
 class TextAnalyzerPercentProtectionTests(unittest.TestCase):
@@ -75,6 +89,44 @@ class TextAnalyzerPercentProtectionTests(unittest.TestCase):
         self.assertIn("more damage", shell.protected_text)
         self.assertEqual(["<mag>", "%", "<dur>"], self.non_space_tokens(format_tokens))
         self.assertNotIn("% m", format_tokens)
+
+    def test_chunk_text_preserves_content_and_respects_limit(self):
+        source = (
+            "First sentence stays together. Second sentence can split here.\n\n"
+            "Third sentence follows after a paragraph break. Fourth sentence ends."
+        )
+
+        chunks = self.analyzer.chunk_text(source, 64)
+
+        self.assertGreater(len(chunks), 1)
+        self.assertEqual("".join(chunks), source)
+        self.assertTrue(all(len(chunk) <= 64 for chunk in chunks))
+
+    def test_chunk_text_does_not_split_protected_angle_token(self):
+        source = "AAAAAAAAAA<mag>BBBBBBBBBB"
+
+        chunks = self.analyzer.chunk_text(source, 12)
+
+        self.assertEqual("".join(chunks), source)
+        self.assertIn("<mag>", chunks[1])
+
+
+class PromptBuilderGlossaryContextTests(unittest.TestCase):
+    def test_glossary_context_respects_configured_max_chars(self):
+        builder = PromptBuilder(
+            _DummyPromptManager(),
+            _DummyConfig({("rag", "glossary_context_max_chars"): 120}),
+        )
+        matched_terms = {
+            "Dragon": "龙",
+            "Reference One": "参考一" * 20,
+            "Reference Two": "参考二" * 20,
+        }
+
+        context = builder.build_glossary_context("Dragon attacks.", matched_terms)
+
+        self.assertLessEqual(len(context), 120)
+        self.assertIn("Dragon -> 龙", context)
 
 
 if __name__ == "__main__":

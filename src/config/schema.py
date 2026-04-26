@@ -49,6 +49,7 @@ class RAGConfig:
     keyword_weight_token_boost: float = 0.04
     keyword_weight_anchor_max_df: int = 500
     keyword_weight_anchor_boost: float = 0.18
+    glossary_context_max_chars: int = 4000
     format_extra_retries: int = 2
     latin_ratio_threshold: float = 2.0
 
@@ -63,6 +64,9 @@ class GeneralConfig:
     mcm_output_language_suffix: str = "source"
     mcm_auto_export: bool = True
     log_file: str = "logs/app.log"
+    long_text_chunking_enabled: bool = True
+    long_text_chunk_threshold_chars: int = 4000
+    long_text_chunk_target_chars: int = 1800
     short_text_batch_enabled: bool = False
     short_text_batch_max_chars: int = 50
     short_text_batch_size: int = 8

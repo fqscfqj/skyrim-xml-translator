@@ -145,6 +145,85 @@ class TextAnalyzer:
             restored = restored.replace(sentinel, token)
         return restored
 
+    def chunk_text(self, text: str, max_chunk_chars: int) -> list[str]:
+        """Split long text into safe chunks without dropping content."""
+        if text is None:
+            return []
+
+        source = str(text)
+        if not source:
+            return []
+        try:
+            limit = int(max_chunk_chars)
+        except Exception:
+            limit = 0
+        if limit <= 0 or len(source) <= limit:
+            return [source]
+
+        chunks: list[str] = []
+        start = 0
+        source_len = len(source)
+        while start < source_len:
+            if source_len - start <= limit:
+                chunks.append(source[start:])
+                break
+
+            split_at = self._find_chunk_boundary(source, start, limit)
+            if split_at <= start:
+                split_at = min(source_len, start + limit)
+
+            chunks.append(source[start:split_at])
+            start = split_at
+
+        return [chunk for chunk in chunks if chunk]
+
+    def _find_chunk_boundary(self, text: str, start: int, limit: int) -> int:
+        max_end = min(len(text), start + limit)
+        window = text[start:max_end]
+
+        boundary_patterns = (
+            re.compile(r"(?:\r?\n){2,}\s*"),
+            re.compile(r"[.!?。！？]+(?:[\"'\)\]\}”’》」』]*)\s+"),
+            re.compile(r"[;；:：,，、]\s+"),
+            self._WHITESPACE_RE,
+        )
+
+        for pattern in boundary_patterns:
+            candidates = [
+                start + match.end()
+                for match in pattern.finditer(window)
+                if start + match.end() > start and self._is_safe_chunk_boundary(text, start + match.end())
+            ]
+            if candidates:
+                return candidates[-1]
+
+        split_at = max_end
+        while split_at > start and not self._is_safe_chunk_boundary(text, split_at):
+            split_at -= 1
+        if split_at > start:
+            return split_at
+
+        split_at = max_end
+        while split_at < len(text) and not self._is_safe_chunk_boundary(text, split_at):
+            split_at += 1
+        return split_at if split_at > start else max_end
+
+    def _is_safe_chunk_boundary(self, text: str, index: int) -> bool:
+        if index <= 0 or index >= len(text):
+            return True
+        probe_start = max(0, index - 256)
+        probe_end = min(len(text), index + 256)
+        offset = probe_start
+        for match in self._PROTECTED_TOKEN_RE.finditer(text[probe_start:probe_end]):
+            token = match.group(0)
+            if token.isspace():
+                continue
+            token_start = offset + match.start()
+            token_end = offset + match.end()
+            if token_start < index < token_end:
+                return False
+        return True
+
     def extract_protected_format_tokens(self, text: str) -> list[str]:
         """Extract the exact sequence of protected formatting tokens from text."""
         if not text:

@@ -237,40 +237,56 @@ class Translator:
         if isinstance(context_hint, dict):
             reference_id = str(context_hint.get("entry_id", "") or "")
 
-        if not text or not str(text).strip():
+        source_text = str(text) if text is not None else ""
+
+        if not text or not source_text.strip():
             if return_debug_info:
                 return "", self._empty_debug_info(text)
             return ""
 
-        # Reject oversized texts that would exceed LLM context limits
-        if len(str(text)) > 4000:
-            log_emit(log_callback, self.rag_engine.config, "ERROR",
-                     f"Text exceeds 4000 characters (len={len(str(text))}), skipping translation",
-                     module="translator", func="translate_text")
-            raise ValueError(f"Text too long ({len(str(text))} chars, limit 4000), translation skipped")
-
         # Skip symbols-only text
-        if self._text_analyzer.is_only_symbols_or_numbers(str(text)):
+        if self._text_analyzer.is_only_symbols_or_numbers(source_text):
             log_emit(log_callback, self.rag_engine.config, "DEBUG",
                      f"Text contains only symbols/numbers, skipping: {text}",
                      module="translator", func="translate_text")
             if return_debug_info:
-                return str(text), self._empty_debug_info(text)
-            return str(text)
+                return source_text, self._empty_debug_info(text)
+            return source_text
 
-        if self._should_passthrough_identifier(str(text), context_hint=context_hint):
+        if self._should_passthrough_identifier(source_text, context_hint=context_hint):
             log_emit(log_callback, self.rag_engine.config, "DEBUG",
                      f"Preserving identifier-like text without translation: {text}",
                      module="translator", func="translate_text")
             if return_debug_info:
-                return str(text), self._empty_debug_info(
+                return source_text, self._empty_debug_info(
                     text,
                     result_status="warning",
                     result_details="Identifier-like text preserved as-is",
                 )
-            return str(text)
+            return source_text
 
-        source_text = str(text)
+        chunk_threshold = self._config_int(
+            "general", "long_text_chunk_threshold_chars", 4000,
+            min_value=1, max_value=100_000,
+        )
+        if len(source_text) > chunk_threshold:
+            if self._config_bool("general", "long_text_chunking_enabled", True):
+                return self._translate_long_text(
+                    source_text,
+                    use_rag=use_rag,
+                    log_callback=log_callback,
+                    max_retries=max_retries,
+                    return_debug_info=return_debug_info,
+                    context_hint=context_hint,
+                    reference_id=reference_id,
+                )
+
+            log_emit(log_callback, self.rag_engine.config, "ERROR",
+                     f"Text exceeds {chunk_threshold} characters (len={len(source_text)}), skipping translation",
+                     module="translator", func="translate_text")
+            raise ValueError(
+                f"Text too long ({len(source_text)} chars, limit {chunk_threshold}), translation skipped")
+
         format_shell = self._text_analyzer.build_protected_format_shell(source_text)
         llm_text = format_shell.protected_text if format_shell.has_tokens else source_text
 
@@ -633,7 +649,203 @@ class Translator:
 
         return results
 
+    def _translate_long_text(self, source_text: str, use_rag=True, log_callback=None,
+                             max_retries=2, return_debug_info: bool = False,
+                             context_hint: Optional[dict] = None,
+                             reference_id: str = ""):
+        prompt_style = self.rag_engine.config.get("general", "prompt_style", "default")
+        target_lang = self.rag_engine.config.get("general", "target_language", "zh")
+        runtime_context_key = "mcm_ui" if self._runtime_flags.get("mcm_ui_mode", False) else ""
+
+        cached = self._translation_cache.get(
+            source_text, prompt_style, target_lang, context_key=runtime_context_key)
+        if cached is not None and str(cached).strip():
+            if self._should_reject_cached_translation(
+                    source=source_text,
+                    translation=str(cached),
+                    target_lang=str(target_lang),
+                    reference_id=reference_id):
+                log_emit(log_callback, self.rag_engine.config, "DEBUG",
+                         "Ignoring suspicious long-text cache entry",
+                         module="translator", func="_translate_long_text")
+            else:
+                log_emit(log_callback, self.rag_engine.config, "DEBUG",
+                         f"Long-text translation cache hit for text (len={len(source_text)})",
+                         module="translator", func="_translate_long_text")
+                if return_debug_info:
+                    cached_issues = self._quality_checker.check(
+                        source_text,
+                        str(cached),
+                        reference_id=reference_id,
+                        target_lang=str(target_lang),
+                    )
+                    result_status, result_details = self._result_status_from_issues(cached_issues)
+                    return cached, self._empty_debug_info(
+                        source_text,
+                        result_status=result_status,
+                        result_details=result_details,
+                    )
+                return cached
+
+        chunk_target = self._config_int(
+            "general", "long_text_chunk_target_chars", 1800,
+            min_value=200, max_value=100_000,
+        )
+        chunks = self._text_analyzer.chunk_text(source_text, chunk_target)
+        if len(chunks) <= 1:
+            log_emit(log_callback, self.rag_engine.config, "ERROR",
+                     f"Text exceeds chunk threshold but could not be split (len={len(source_text)})",
+                     module="translator", func="_translate_long_text")
+            raise ValueError(
+                f"Text too long ({len(source_text)} chars), long-text chunking produced no chunks")
+
+        log_emit(log_callback, self.rag_engine.config, "INFO",
+                 f"Long-text chunking: len={len(source_text)} target={chunk_target} chunks={len(chunks)}",
+                 module="translator", func="_translate_long_text")
+
+        self._reload_prompts_if_needed()
+
+        rag_result = self._run_rag_phase(source_text, use_rag=use_rag, log_callback=log_callback)
+        matched_terms = rag_result["matched_terms"]
+        mcm_ui_mode = bool(self._runtime_flags.get("mcm_ui_mode", False))
+
+        debug_info = None
+        if return_debug_info:
+            debug_info = {
+                "original_text": source_text,
+                "keywords": rag_result["keywords"],
+                "rag_tasks": rag_result["keywords"],
+                "keyword_extraction": rag_result["keyword_debug"],
+                "search_results": rag_result["search_debug"],
+                "matched_terms": matched_terms,
+                "glossary_context": rag_result["glossary_context"],
+                "system_prompt": "",
+                "user_prompt": "",
+                "long_text_chunks": [],
+            }
+
+        translated_chunks: list[str] = []
+        previous_translation = ""
+        first_system_prompt = ""
+        first_user_prompt = ""
+
+        for idx, chunk in enumerate(chunks, start=1):
+            format_shell = self._text_analyzer.build_protected_format_shell(chunk)
+            llm_text = format_shell.protected_text if format_shell.has_tokens else chunk
+            system_prompt, user_content = self._prompt_builder.build(
+                llm_text,
+                matched_terms,
+                prompt_style,
+                mcm_ui_mode=mcm_ui_mode,
+                context_hint=context_hint,
+                glossary_source_text=source_text,
+            )
+            if previous_translation:
+                context_snippet = previous_translation[-1000:]
+                user_content = (
+                    "前文译文（仅用于保持语气、称谓和上下文衔接，禁止重复输出）：\n"
+                    f"{context_snippet}\n\n"
+                    f"{user_content}"
+                )
+
+            if not first_system_prompt:
+                first_system_prompt = system_prompt
+                first_user_prompt = user_content
+
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ]
+
+            retry_count = 0
+            while True:
+                try:
+                    log_emit(log_callback, self.rag_engine.config, "DEBUG",
+                             f"Long-text chunk translate call: chunk={idx}/{len(chunks)} "
+                             f"chunk_len={len(chunk)} retry={retry_count}",
+                             module="translator", func="_translate_long_text")
+                    response = self.llm_client.chat_completion(messages, log_callback=log_callback)
+                    chunk_translation = self._response_parser.parse(
+                        response, chunk, messages,
+                        llm_client=self.llm_client, log_callback=log_callback)
+                    if format_shell.has_tokens:
+                        chunk_translation = self._text_analyzer.restore_protected_format_shell(
+                            chunk_translation,
+                            format_shell,
+                        )
+                    translated_chunks.append(str(chunk_translation))
+                    previous_translation = str(chunk_translation)
+                    if isinstance(debug_info, dict):
+                        debug_info["long_text_chunks"].append({
+                            "index": idx,
+                            "source_len": len(chunk),
+                            "translation_len": len(str(chunk_translation)),
+                        })
+                    break
+                except Exception as e:
+                    log_emit(log_callback, self.rag_engine.config, "ERROR",
+                             f"Long-text chunk {idx}/{len(chunks)} translation failed: {e}",
+                             exc=e, module="translator", func="_translate_long_text")
+                    if retry_count >= max_retries:
+                        raise
+                    retry_count += 1
+
+        translation = "".join(translated_chunks)
+        issues = self._quality_checker.check(
+            source_text,
+            translation,
+            matched_terms,
+            reference_id=reference_id,
+            target_lang=str(target_lang),
+        )
+        result_status, result_details = self._result_status_from_issues(issues)
+
+        for issue in issues:
+            log_emit(log_callback, self.rag_engine.config, "DEBUG",
+                     f"Long-text quality issue: {issue.issue_type.value} ({issue.severity}): {issue.details}",
+                     module="translator", func="_translate_long_text")
+
+        if self._quality_checker.should_retry(issues):
+            if isinstance(debug_info, dict):
+                debug_info["system_prompt"] = first_system_prompt
+                debug_info["user_prompt"] = first_user_prompt
+                self._set_debug_result(debug_info, result_status, result_details)
+            raise RuntimeError(f"Long-text translation failed quality check: {result_details}")
+
+        if self._should_cache_translation(source_text, translation, issues):
+            self._translation_cache.put(
+                source_text, prompt_style, target_lang, translation,
+                context_key=runtime_context_key)
+
+        if isinstance(debug_info, dict):
+            debug_info["system_prompt"] = first_system_prompt
+            debug_info["user_prompt"] = first_user_prompt
+            self._set_debug_result(debug_info, result_status, result_details)
+            return translation, debug_info
+        return translation
+
     # --- Internal helpers ---
+
+    def _config_bool(self, section: str, key: str, default: bool) -> bool:
+        try:
+            value = self.rag_engine.config.get(section, key, default)
+        except Exception:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        if value is None:
+            return default
+        return bool(value)
+
+    def _config_int(self, section: str, key: str, default: int,
+                    min_value: int = 1, max_value: int = 100_000) -> int:
+        try:
+            value = int(self.rag_engine.config.get(section, key, default))
+        except Exception:
+            value = default
+        return max(min_value, min(max_value, value))
 
     def _empty_debug_info(self, text, result_status: str = "success",
                           result_details: str = "") -> dict:

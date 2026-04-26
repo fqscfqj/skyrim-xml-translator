@@ -239,20 +239,38 @@ class PromptBuilder:
             "术语表：",
         )
 
-        sections: list[str] = []
-        if in_source_lines:
-            sections.append(
-                "命中术语（优先参考，按语义决定）\n"
-                + "\n".join(in_source_lines)
-            )
-        if reference_lines:
-            sections.append(
-                "注意：以下条目未在原文直接出现，只能辅助理解背景，不得用于补全或改写原文表层词形。\n"
-                "参考术语（仅背景参考，禁止直接代入）\n"
-                + "\n".join(reference_lines)
-            )
+        def build_context() -> str:
+            sections: list[str] = []
+            if in_source_lines:
+                sections.append(
+                    "命中术语（优先参考，按语义决定）\n"
+                    + "\n".join(in_source_lines)
+                )
+            if reference_lines:
+                sections.append(
+                    "注意：以下条目未在原文直接出现，只能辅助理解背景，不得用于补全或改写原文表层词形。\n"
+                    "参考术语（仅背景参考，禁止直接代入）\n"
+                    + "\n".join(reference_lines)
+                )
+            return glossary_header + "\n\n" + "\n\n".join(sections)
 
-        return glossary_header + "\n\n" + "\n\n".join(sections)
+        context = build_context()
+        try:
+            max_chars = int(self.config.get("rag", "glossary_context_max_chars", 4000))
+        except Exception:
+            max_chars = 4000
+        if max_chars <= 0 or len(context) <= max_chars:
+            return context
+
+        while reference_lines and len(context) > max_chars:
+            reference_lines.pop()
+            context = build_context()
+        while in_source_lines and len(context) > max_chars:
+            in_source_lines.pop()
+            context = build_context()
+        if len(context) > max_chars:
+            return context[:max_chars].rstrip()
+        return context
 
     @staticmethod
     def apply_prompt_vars(template: str, variables: dict) -> str:
