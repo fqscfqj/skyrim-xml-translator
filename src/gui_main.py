@@ -1923,8 +1923,98 @@ class MainWindow(QMainWindow):
         widget.setLayout(layout)
         return widget
 
+    @staticmethod
+    def _get_config_tab_style_sheet() -> str:
+        return """
+        #configTab QGroupBox {
+            border: 1px solid #353a45;
+            border-radius: 8px;
+            margin-top: 10px;
+            padding-top: 10px;
+            background-color: #20242b;
+            color: #e6edf3;
+        }
+        #configTab QGroupBox::title {
+            subcontrol-origin: margin;
+            left: 12px;
+            padding: 0 6px;
+            color: #f3f4f6;
+        }
+        #configTab QScrollArea {
+            border: none;
+            background: transparent;
+        }
+        #configTab QLabel {
+            color: #d8dee9;
+        }
+        #configTab QLineEdit,
+        #configTab QComboBox,
+        #configTab QAbstractSpinBox {
+            min-height: 28px;
+            padding: 2px 8px;
+            border: 1px solid #4a5366;
+            border-radius: 5px;
+            background-color: #14181f;
+            color: #f3f4f6;
+            selection-background-color: #4c7dff;
+            selection-color: #ffffff;
+        }
+        #configTab QLineEdit:focus,
+        #configTab QComboBox:focus,
+        #configTab QAbstractSpinBox:focus {
+            border-color: #76a9ff;
+            background-color: #10151c;
+        }
+        #configTab QLineEdit:disabled,
+        #configTab QComboBox:disabled,
+        #configTab QAbstractSpinBox:disabled {
+            border-color: #303541;
+            background-color: #262b34;
+            color: #9099ab;
+        }
+        #configTab QComboBox::drop-down {
+            border: none;
+            width: 24px;
+            background: transparent;
+        }
+        #configTab QCheckBox {
+            spacing: 8px;
+            color: #dce3ec;
+        }
+        #configTab QCheckBox:disabled {
+            color: #9099ab;
+        }
+        #configTab QCheckBox::indicator {
+            width: 16px;
+            height: 16px;
+            border: 1px solid #5a6477;
+            border-radius: 4px;
+            background-color: #14181f;
+        }
+        #configTab QCheckBox::indicator:hover {
+            border-color: #76a9ff;
+            background-color: #19202b;
+        }
+        #configTab QCheckBox::indicator:checked {
+            border-color: #76a9ff;
+            background-color: #4c7dff;
+        }
+        #configTab QCheckBox::indicator:checked:hover {
+            background-color: #5b8cff;
+        }
+        #configTab QCheckBox::indicator:disabled {
+            border-color: #3c4250;
+            background-color: #242932;
+        }
+        #configTab QCheckBox::indicator:checked:disabled {
+            border-color: #55688f;
+            background-color: #3c5cb2;
+        }
+        """
+
     def create_config_tab(self):
         container = QWidget()
+        container.setStyleSheet(self._get_config_tab_style_sheet())
         container_layout = QVBoxLayout(container)
         container_layout.setContentsMargins(0, 0, 0, 0)
 
@@ -1934,6 +2024,7 @@ class MainWindow(QMainWindow):
         scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
         form_widget = QWidget()
+        form_widget.setObjectName("configTab")
         form_layout = QVBoxLayout(form_widget)
         form_layout.setSpacing(10)
 
