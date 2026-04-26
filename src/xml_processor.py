@@ -23,8 +23,20 @@ class XMLProcessor:
         try:
             if LXML_AVAILABLE:
                 # Some versions of lxml may not support all XMLParser named args
+                parser_kwargs = {
+                    "remove_blank_text": False,
+                    "strip_cdata": False,
+                    "resolve_entities": False,
+                    "no_network": True,
+                    "compact": True,
+                }
                 try:
-                    parser = etree.XMLParser(remove_blank_text=False, strip_cdata=False)  # type: ignore[arg-type]
+                    if os.path.getsize(file_path) > 10 * 1024 * 1024:
+                        parser_kwargs["huge_tree"] = True
+                except OSError:
+                    pass
+                try:
+                    parser = etree.XMLParser(**parser_kwargs)  # type: ignore[arg-type]
                 except TypeError:
                     parser = etree.XMLParser(remove_blank_text=False)  # type: ignore[arg-type]
                 self.tree = etree.parse(file_path, parser)

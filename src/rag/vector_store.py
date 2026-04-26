@@ -26,6 +26,7 @@ class VectorStore:
         self.terms: list[str] = []
         self._normalized_terms: list[str] = []
         self._token_to_indices: dict[str, list[int]] = {}
+        self._lexical_index_dirty = False
 
         # Flags for GUI pause/stop control
         self.stop_flag: bool = False
@@ -93,13 +94,23 @@ class VectorStore:
         self._token_to_indices = {}
         for idx, term in enumerate(self.terms):
             self._add_term_to_lexical_index(idx, term)
+        self._lexical_index_dirty = False
+
+    def _mark_lexical_index_dirty(self) -> None:
+        self._lexical_index_dirty = True
+
+    def _ensure_lexical_index(self) -> None:
+        if self._lexical_index_dirty or len(self._normalized_terms) != len(self.terms):
+            self._rebuild_lexical_index()
 
     def _append_terms_to_lexical_index(self, terms: list[str]) -> None:
         if not terms:
             return
+        if self._lexical_index_dirty:
+            return
         start_idx = len(self.terms) - len(terms)
         if start_idx < 0 or len(self._normalized_terms) != start_idx:
-            self._rebuild_lexical_index()
+            self._mark_lexical_index_dirty()
             return
         for offset, term in enumerate(terms):
             self._add_term_to_lexical_index(start_idx + offset, term)
@@ -127,9 +138,9 @@ class VectorStore:
             self.vectors = vec_np
             self.terms = [term]
         else:
-            old = np.array(self.vectors)
+            new_vectors = np.vstack([self.vectors, vec_np])
             self._close_mmap()
-            self.vectors = np.vstack([old, vec_np])
+            self.vectors = new_vectors
             self.terms.append(term)
         self._append_terms_to_lexical_index([term])
         self.save_vectors()
@@ -141,11 +152,11 @@ class VectorStore:
             idx = self.terms.index(term)
             self.terms.pop(idx)
             if self.vectors is not None:
-                old = np.array(self.vectors)
+                new_vectors = np.delete(self.vectors, idx, axis=0)
                 self._close_mmap()
-                self.vectors = np.delete(old, idx, axis=0)
+                self.vectors = new_vectors
                 self.save_vectors()
-            self._rebuild_lexical_index()
+            self._mark_lexical_index_dirty()
             self.save_terms_index()
             return True
         return False
@@ -161,13 +172,13 @@ class VectorStore:
 
         if indices_to_delete and self.vectors is not None:
             indices_to_delete.sort(reverse=True)
-            old = np.array(self.vectors)
+            new_vectors = np.delete(self.vectors, indices_to_delete, axis=0)
             self._close_mmap()
-            self.vectors = np.delete(old, indices_to_delete, axis=0)
+            self.vectors = new_vectors
             self.save_vectors()
             for idx in indices_to_delete:
                 self.terms.pop(idx)
-            self._rebuild_lexical_index()
+            self._mark_lexical_index_dirty()
             self.save_terms_index()
 
         return indices_to_delete
@@ -260,9 +271,9 @@ class VectorStore:
             if self.vectors is None:
                 self.vectors = new_vectors_np
             else:
-                old = np.array(self.vectors)
+                combined_vectors = np.vstack([self.vectors, new_vectors_np])
                 self._close_mmap()
-                self.vectors = np.vstack([old, new_vectors_np])
+                self.vectors = combined_vectors
             self.terms.extend(new_terms_added)
             self._append_terms_to_lexical_index(new_terms_added)
             self.save_vectors()
@@ -352,9 +363,9 @@ class VectorStore:
                     if self.vectors is None:
                         self.vectors = new_vectors_np
                     else:
-                        old = np.array(self.vectors)
+                        combined_vectors = np.vstack([self.vectors, new_vectors_np])
                         self._close_mmap()
-                        self.vectors = np.vstack([old, new_vectors_np])
+                        self.vectors = combined_vectors
                     self.terms.extend(batch_valid_terms)
                     self._append_terms_to_lexical_index(batch_valid_terms)
                     self.save_vectors()
@@ -413,8 +424,7 @@ class VectorStore:
         if not query_norm:
             return []
 
-        if len(self._normalized_terms) != len(self.terms):
-            self._rebuild_lexical_index()
+        self._ensure_lexical_index()
 
         candidate_indices = range(len(self.terms))
         query_tokens = [t for t in query_norm.split() if t]

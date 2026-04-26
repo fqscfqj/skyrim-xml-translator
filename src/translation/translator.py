@@ -89,6 +89,28 @@ class Translator:
             mcm_ui_mode = bool(flags.get("mcm_ui_mode", False))
         self._runtime_flags = {"mcm_ui_mode": mcm_ui_mode}
 
+    def can_batch_translate(self, text, context_hint: Optional[dict] = None,
+                            max_chars: Optional[int] = None) -> bool:
+        """Return whether a text is safe for optional short-text batch mode."""
+        if text is None:
+            return False
+        source_text = str(text)
+        stripped = source_text.strip()
+        if not stripped:
+            return False
+        if "\n" in source_text or "\r" in source_text:
+            return False
+        if max_chars is not None and len(stripped) > max_chars:
+            return False
+        if len(stripped) > 4000:
+            return False
+        if self._text_analyzer.is_only_symbols_or_numbers(source_text):
+            return False
+        if self._should_passthrough_identifier(source_text, context_hint=context_hint):
+            return False
+        format_shell = self._text_analyzer.build_protected_format_shell(source_text)
+        return not format_shell.has_tokens
+
     def get_rag_debug_info(self, text, use_rag=True, log_callback=None,
                            context_hint: Optional[dict] = None):
         """获取RAG处理过程的详细调试信息，用于可视化"""
@@ -432,6 +454,184 @@ class Translator:
 
         # Should not be reachable; keep explicit failure semantics.
         raise RuntimeError("Translation failed after retries")
+
+    def translate_batch_texts(self, texts: list[str], use_rag=True, log_callback=None,
+                              max_retries=2, return_debug_info: bool = False,
+                              context_hints: Optional[list[Optional[dict]]] = None):
+        """Translate multiple short texts in one LLM call when optional batch mode is enabled.
+
+        Any item that cannot be batched, fails parsing, or fails quality checks falls back
+        to translate_text() so correctness remains equivalent to single-item translation.
+        """
+        if not texts:
+            return []
+
+        hints = list(context_hints) if context_hints is not None else [None] * len(texts)
+        if len(hints) != len(texts):
+            hints = list(hints[:len(texts)]) + [None] * max(0, len(texts) - len(hints))
+
+        if len(texts) == 1:
+            result = self.translate_text(
+                texts[0], use_rag=use_rag, log_callback=log_callback,
+                max_retries=max_retries, return_debug_info=return_debug_info,
+                context_hint=hints[0],
+            )
+            return [result]
+
+        try:
+            max_chars = int(self.rag_engine.config.get("general", "short_text_batch_max_chars", 50))
+        except Exception:
+            max_chars = 50
+
+        prompt_style = self.rag_engine.config.get("general", "prompt_style", "default")
+        target_lang = self.rag_engine.config.get("general", "target_language", "zh")
+        runtime_context_key = "mcm_ui" if self._runtime_flags.get("mcm_ui_mode", False) else ""
+        mcm_ui_mode = bool(self._runtime_flags.get("mcm_ui_mode", False))
+
+        results: list[Optional[object]] = [None] * len(texts)
+        batch_entries: list[dict] = []
+        fallback_indices: set[int] = set()
+
+        self._reload_prompts_if_needed()
+
+        for idx, raw_text in enumerate(texts):
+            source_text = str(raw_text)
+            context_hint = hints[idx]
+            if not self.can_batch_translate(source_text, context_hint=context_hint, max_chars=max_chars):
+                fallback_indices.add(idx)
+                continue
+
+            reference_id = ""
+            if isinstance(context_hint, dict):
+                reference_id = str(context_hint.get("entry_id", "") or "")
+
+            cached = self._translation_cache.get(
+                source_text, prompt_style, target_lang, context_key=runtime_context_key)
+            if cached is not None and str(cached).strip() and not self._should_reject_cached_translation(
+                    source=source_text,
+                    translation=str(cached),
+                    target_lang=str(target_lang),
+                    reference_id=reference_id):
+                if return_debug_info:
+                    cached_issues = self._quality_checker.check(
+                        source_text,
+                        str(cached),
+                        reference_id=reference_id,
+                        target_lang=str(target_lang),
+                    )
+                    result_status, result_details = self._result_status_from_issues(cached_issues)
+                    results[idx] = (cached, self._empty_debug_info(
+                        source_text,
+                        result_status=result_status,
+                        result_details=result_details,
+                    ))
+                else:
+                    results[idx] = cached
+                continue
+
+            try:
+                rag_result = self._run_rag_phase(source_text, use_rag=use_rag, log_callback=log_callback)
+            except Exception:
+                fallback_indices.add(idx)
+                continue
+
+            batch_entries.append({
+                "id": idx,
+                "text": source_text,
+                "context_hint": context_hint,
+                "reference_id": reference_id,
+                "keywords": rag_result["keywords"],
+                "keyword_debug": rag_result["keyword_debug"],
+                "search_debug": rag_result["search_debug"],
+                "matched_terms": rag_result["matched_terms"],
+                "glossary_context": rag_result["glossary_context"],
+            })
+
+        if batch_entries:
+            system_prompt, user_content = self._prompt_builder.build_batch(
+                batch_entries, prompt_style, mcm_ui_mode=mcm_ui_mode)
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ]
+
+            try:
+                log_emit(log_callback, self.rag_engine.config, "DEBUG",
+                         f"Batch translate call: items={len(batch_entries)} max_chars={max_chars}",
+                         module="translator", func="translate_batch_texts")
+                response = self.llm_client.chat_completion(messages, log_callback=log_callback)
+                parsed = self._response_parser.parse_batch(response, log_callback=log_callback)
+            except Exception as e:
+                log_emit(log_callback, self.rag_engine.config, "WARNING",
+                         f"Batch translation failed, falling back to single-item calls: {e}",
+                         exc=e, module="translator", func="translate_batch_texts")
+                parsed = None
+
+            if parsed is None:
+                fallback_indices.update(int(item["id"]) for item in batch_entries)
+            else:
+                for item in batch_entries:
+                    idx = int(item["id"])
+                    source_text = str(item["text"])
+                    translation = parsed.get(idx)
+                    if translation is None or not str(translation).strip():
+                        fallback_indices.add(idx)
+                        continue
+
+                    translation = str(translation)
+                    issues = self._quality_checker.check(
+                        source_text,
+                        translation,
+                        item.get("matched_terms", {}),
+                        reference_id=str(item.get("reference_id", "") or ""),
+                        target_lang=str(target_lang),
+                    )
+                    if self._quality_checker.should_retry(issues):
+                        fallback_indices.add(idx)
+                        continue
+
+                    result_status, result_details = self._result_status_from_issues(issues)
+                    if self._should_cache_translation(source_text, translation, issues):
+                        self._translation_cache.put(
+                            source_text, prompt_style, target_lang, translation,
+                            context_key=runtime_context_key)
+
+                    if return_debug_info:
+                        debug_info = {
+                            "original_text": source_text,
+                            "keywords": item.get("keywords", []),
+                            "rag_tasks": item.get("keywords", []),
+                            "keyword_extraction": item.get("keyword_debug", {}),
+                            "search_results": item.get("search_debug", []),
+                            "matched_terms": item.get("matched_terms", {}),
+                            "glossary_context": item.get("glossary_context", ""),
+                            "system_prompt": system_prompt,
+                            "user_prompt": user_content,
+                            "result_status": result_status,
+                            "result_details": result_details,
+                        }
+                        results[idx] = (translation, debug_info)
+                    else:
+                        results[idx] = translation
+
+        for idx in sorted(fallback_indices):
+            if results[idx] is not None:
+                continue
+            results[idx] = self.translate_text(
+                texts[idx], use_rag=use_rag, log_callback=log_callback,
+                max_retries=max_retries, return_debug_info=return_debug_info,
+                context_hint=hints[idx],
+            )
+
+        for idx, result in enumerate(results):
+            if result is None:
+                results[idx] = self.translate_text(
+                    texts[idx], use_rag=use_rag, log_callback=log_callback,
+                    max_retries=max_retries, return_debug_info=return_debug_info,
+                    context_hint=hints[idx],
+                )
+
+        return results
 
     # --- Internal helpers ---
 

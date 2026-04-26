@@ -63,6 +63,9 @@ class GeneralConfig:
     mcm_output_language_suffix: str = "source"
     mcm_auto_export: bool = True
     log_file: str = "logs/app.log"
+    short_text_batch_enabled: bool = False
+    short_text_batch_max_chars: int = 50
+    short_text_batch_size: int = 8
 
 
 @dataclass
@@ -73,14 +76,14 @@ class PathsConfig:
 
 @dataclass
 class ThreadsConfig:
-    translation: int = 5
-    vectorization: int = 5
+    translation: int = 8
+    vectorization: int = 8
 
 
 @dataclass
 class CacheConfig:
     translation_cache_size: int = 50000
-    embedding_cache_size: int = 100000
+    embedding_cache_size: int = 5000
     cache_persist_dir: str = "cache"
     cache_ttl_hours: float = 0  # 0 = no expiry
 

@@ -254,6 +254,7 @@ class RAGSearcher:
 
         max_df = self._get_rag_int("keyword_weight_anchor_max_df", 500, min_value=1, max_value=100_000)
         missing_df = 10 ** 9
+        self.glossary_manager.ensure_token_df()
 
         ranked: list[tuple[int, str]] = []
         for token in query_tokens:
@@ -421,6 +422,19 @@ class RAGSearcher:
 
         Returns {term: translation} or ({term: translation}, debug_info).
         """
+        deduped_keywords: list[str] = []
+        seen_keyword_keys: set[str] = set()
+        for keyword in keywords:
+            if not keyword:
+                continue
+            keyword_text = str(keyword)
+            normalized_key = self.glossary_manager.normalize_term_key(keyword_text) or keyword_text.strip().lower()
+            if normalized_key in seen_keyword_keys:
+                continue
+            seen_keyword_keys.add(normalized_key)
+            deduped_keywords.append(keyword_text)
+        keywords = deduped_keywords
+
         vector_ready = self.vector_store.vectors is not None and len(self.vector_store.terms) > 0
         if not vector_ready and not self.glossary_manager._glossary_lookup:
             log_emit(log_callback, self.config, "DEBUG",

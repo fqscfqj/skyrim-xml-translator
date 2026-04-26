@@ -72,6 +72,7 @@ class GlossaryManager:
         self.glossary: dict[str, str] = {}
         self._glossary_lookup: dict[str, str] = {}
         self._token_df: Dict[str, int] = {}
+        self._token_df_dirty = True
 
         self.load()
 
@@ -104,7 +105,7 @@ class GlossaryManager:
             if normalized and normalized not in lookup:
                 lookup[normalized] = term
         self._glossary_lookup = lookup
-        self._rebuild_token_df()
+        self._token_df_dirty = True
 
     def _rebuild_token_df(self) -> None:
         """Build a token document-frequency map from glossary terms."""
@@ -139,6 +140,11 @@ class GlossaryManager:
             for t in set(tokens):
                 token_df[t] = token_df.get(t, 0) + 1
         self._token_df = token_df
+        self._token_df_dirty = False
+
+    def ensure_token_df(self) -> None:
+        if self._token_df_dirty:
+            self._rebuild_token_df()
 
     def _signal_max_df(self) -> int:
         """Dynamic threshold: tokens seen too often are considered generic."""
@@ -150,6 +156,7 @@ class GlossaryManager:
     def is_signal_token(self, token_norm: str) -> bool:
         if not token_norm or token_norm in self._COMMON_WORDS:
             return False
+        self.ensure_token_df()
         df = self._token_df.get(token_norm, 0)
         return 0 < df <= self._signal_max_df()
 

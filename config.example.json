@@ -58,8 +58,8 @@
         "vector_index_file": "glossary/vector_index.npy"
     },
     "threads": {
-        "translation": 5,
-        "vectorization": 10
+        "translation": 8,
+        "vectorization": 8
     },
     "rag": {
         "similarity_threshold": 0.75,
@@ -88,11 +88,14 @@
         "target_language": "zh",
         "mcm_output_language_suffix": "source",
         "mcm_auto_export": true,
-        "log_file": "logs/app.log"
+        "log_file": "logs/app.log",
+        "short_text_batch_enabled": false,
+        "short_text_batch_max_chars": 50,
+        "short_text_batch_size": 8
     },
     "cache": {
         "translation_cache_size": 50000,
-        "embedding_cache_size": 100000,
+        "embedding_cache_size": 5000,
         "cache_persist_dir": "cache",
         "cache_ttl_hours": 0
     }

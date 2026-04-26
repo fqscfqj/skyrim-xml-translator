@@ -83,6 +83,66 @@ class PromptBuilder:
 
         return system_prompt, user_content
 
+    def build_batch(self, items: list[dict], prompt_style: str = "default",
+                    mcm_ui_mode: bool = False) -> tuple[str, str]:
+        """Build a single prompt for multiple independent short-text translations."""
+        source_lang_setting = self.config.get("general", "source_language", "auto")
+        target_lang_setting = self.config.get("general", "target_language", "zh")
+        source_lang_code = str(source_lang_setting) if source_lang_setting else "auto"
+        target_lang_code = str(target_lang_setting) if target_lang_setting else "zh"
+
+        prompt_vars = {
+            "source_language_code": source_lang_code,
+            "target_language_code": target_lang_code,
+            "source_language": self._text_analyzer.language_display_name(source_lang_code),
+            "target_language": self._text_analyzer.language_display_name(target_lang_code),
+        }
+
+        system_prompt = self.apply_prompt_vars(self._get_system_prompt(prompt_style), prompt_vars)
+        system_prompt += (
+            "\n\n批量短文本模式：忽略单条 translation JSON 输出格式，"
+            "只输出合法 JSON：{\"translations\":[{\"id\":0,\"translation\":\"...\"}]}。"
+            "必须包含每个输入 id，禁止输出解释。"
+        )
+
+        sections = [
+            f"请将以下 {len(items)} 条短文本分别翻译为{prompt_vars['target_language']}。",
+            "每条文本独立处理，保持 id 不变，按原文含义自然表达。",
+            "只输出 JSON，不要输出 Markdown 或说明。",
+        ]
+
+        user_template = self.prompt_manager.get("translator.user_template", "原文：{text}")
+        for item in items:
+            item_id = int(item.get("id", 0))
+            source_text = str(item.get("text", ""))
+            matched_terms = item.get("matched_terms", {}) or {}
+            context_hint = item.get("context_hint")
+            item_parts = [f"[{item_id}]"]
+
+            glossary_context = self.build_glossary_context(source_text, matched_terms)
+            if glossary_context:
+                glossary_append = self.prompt_manager.get(
+                    "translator.glossary_instruction_append",
+                    "\n以上术语仅供参考，语义不符可忽略；不得据此补全原文未出现的成分。",
+                )
+                glossary_append = self.apply_prompt_vars(glossary_append, prompt_vars)
+                item_parts.append(f"{glossary_context}{glossary_append}")
+
+            if mcm_ui_mode:
+                item_parts.append(self._build_mcm_ui_rules(
+                    target_lang_code=target_lang_code,
+                    source_text=source_text,
+                    context_hint=context_hint if isinstance(context_hint, dict) else None,
+                ).strip())
+
+            item_parts.append(self.apply_prompt_vars(
+                user_template,
+                {**prompt_vars, "text": source_text},
+            ))
+            sections.append("\n".join(part for part in item_parts if part))
+
+        return system_prompt, "\n\n".join(sections)
+
     def _build_mcm_ui_rules(self, target_lang_code: str, source_text: str,
                             context_hint: Optional[dict]) -> str:
         entry_id = ""

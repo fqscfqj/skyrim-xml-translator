@@ -77,6 +77,68 @@ class ResponseParser:
 
         return str(response.strip())
 
+    def parse_batch(self, response: str,
+                    log_callback: Optional[Callable] = None) -> Optional[dict[int, str]]:
+        """Parse batch translation response into {item_id: translation}."""
+        clean_response = self._MARKDOWN_CODE_RE.sub("", response).strip()
+        data = None
+        try:
+            data = json.loads(clean_response)
+        except json.JSONDecodeError:
+            data = self._try_parse_first_json_object(clean_response)
+
+        if data is None:
+            data = self._try_parse_first_json_object(response)
+
+        if not isinstance(data, dict):
+            log_emit(log_callback, self.config, "WARNING",
+                     f"Batch JSON parse error. Response: {response}",
+                     module="response_parser", func="parse_batch")
+            return None
+
+        raw_items = data.get("translations")
+        parsed: dict[int, str] = {}
+
+        if isinstance(raw_items, list):
+            for pos, item in enumerate(raw_items):
+                if isinstance(item, dict):
+                    raw_id = item.get("id", pos)
+                    value = item.get("translation", "")
+                else:
+                    raw_id = pos
+                    value = item
+                try:
+                    item_id = int(raw_id)
+                except Exception:
+                    item_id = pos
+                parsed[item_id] = "" if value is None else str(value)
+        elif isinstance(raw_items, dict):
+            for raw_id, value in raw_items.items():
+                try:
+                    item_id = int(raw_id)
+                except Exception:
+                    continue
+                if isinstance(value, dict):
+                    value = value.get("translation", "")
+                parsed[item_id] = "" if value is None else str(value)
+        else:
+            # Accept {"0":"...", "1":"..."} as a compact fallback.
+            for raw_id, value in data.items():
+                try:
+                    item_id = int(raw_id)
+                except Exception:
+                    continue
+                if isinstance(value, dict):
+                    value = value.get("translation", "")
+                parsed[item_id] = "" if value is None else str(value)
+
+        if not parsed:
+            log_emit(log_callback, self.config, "WARNING",
+                     f"Batch response did not contain translations: {response}",
+                     module="response_parser", func="parse_batch")
+            return None
+        return parsed
+
     @staticmethod
     def _looks_like_broken_json_fragment(text: str) -> bool:
         if not text:

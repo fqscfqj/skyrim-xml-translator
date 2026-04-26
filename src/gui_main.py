@@ -33,6 +33,7 @@ from src.xml_processor import XMLProcessor
 from src.mcm_processor import MCMProcessor
 from src.translation.text_analyzer import TextAnalyzer
 from src.translation.translator import Translator
+from src.cache.lru_cache import LRUCache
 from src.logging_helper import emit as log_emit
 from src.i18n import i18n
 
@@ -240,6 +241,84 @@ class Worker(QThread):
             return 1
         return min(requested_threads, unique_count)
 
+    @staticmethod
+    def _config_bool(value, default: bool = False) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        if value is None:
+            return default
+        return bool(value)
+
+    @staticmethod
+    def _config_int(value, default: int, min_value: int, max_value: int) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = default
+        return max(min_value, min(max_value, parsed))
+
+    def _build_work_units(self, unique_items: list[tuple]) -> list:
+        config = self.translator.rag_engine.config
+        enabled = self._config_bool(
+            config.get("general", "short_text_batch_enabled", False),
+            default=False,
+        )
+        if not enabled:
+            return list(unique_items)
+
+        max_chars = self._config_int(
+            config.get("general", "short_text_batch_max_chars", 50),
+            default=50,
+            min_value=1,
+            max_value=500,
+        )
+        batch_size = self._config_int(
+            config.get("general", "short_text_batch_size", 8),
+            default=8,
+            min_value=2,
+            max_value=50,
+        )
+
+        work_units = []
+        current_batch = []
+
+        def flush_batch():
+            nonlocal current_batch
+            if not current_batch:
+                return
+            if len(current_batch) == 1:
+                work_units.append(current_batch[0])
+            else:
+                work_units.append(current_batch)
+            current_batch = []
+
+        for item in unique_items:
+            source = item[1]
+            context_hint = item[2] if len(item) > 2 else None
+            if self.translator.can_batch_translate(
+                    source, context_hint=context_hint, max_chars=max_chars):
+                current_batch.append(item)
+                if len(current_batch) >= batch_size:
+                    flush_batch()
+            else:
+                flush_batch()
+                work_units.append(item)
+
+        flush_batch()
+        batched_items = sum(len(unit) for unit in work_units if isinstance(unit, list))
+        if batched_items > 0:
+            log_emit(
+                self.log.emit,
+                config,
+                "INFO",
+                f"Short-text batch mode enabled: grouped {batched_items} items into {len(work_units)} work units.",
+                module="gui_main",
+                func="Worker._build_work_units",
+            )
+        return work_units
+
     def run(self):
         try:
             total = len(self.items_to_process)
@@ -263,6 +342,7 @@ class Worker(QThread):
                 for source, rows in source_to_rows.items()
             ]
             unique_count = len(unique_items)
+            work_units = self._build_work_units(unique_items)
             duplicates_saved = total - unique_count
             
             if duplicates_saved > 0:
@@ -278,6 +358,87 @@ class Worker(QThread):
             completed_sources = set()
 
             def translate_task(item):
+                if isinstance(item, list):
+                    task_logs: list[str] = []
+                    if not self.is_running or self.stop_receiving:
+                        return None
+                    self._pause_event.wait()
+                    if not self.is_running or self.stop_receiving:
+                        return None
+
+                    def _batch_log_callback(msg):
+                        text = str(msg)
+                        task_logs.append(text)
+                        self.log.emit(text)
+
+                    try:
+                        sources = [str(batch_item[1]) for batch_item in item]
+                        context_hints = [batch_item[2] if len(batch_item) > 2 else None for batch_item in item]
+                        batch_results = self.translator.translate_batch_texts(
+                            sources,
+                            log_callback=_batch_log_callback,
+                            return_debug_info=True,
+                            context_hints=context_hints,
+                        )
+                        results = []
+                        for batch_item, batch_result in zip(item, batch_results):
+                            row_idx = batch_item[0]
+                            source = batch_item[1]
+                            translation, debug_info = batch_result
+                            result_status = "success"
+                            result_details = ""
+                            if isinstance(debug_info, dict):
+                                result_status = str(debug_info.get("result_status", "success") or "success")
+                                result_details = str(debug_info.get("result_details", "") or "")
+                            results.append({
+                                "ok": True,
+                                "row_idx": row_idx,
+                                "source": source,
+                                "translation": translation,
+                                "debug_info": debug_info,
+                                "task_logs": task_logs,
+                                "result_status": result_status,
+                                "result_details": result_details,
+                            })
+                        return results
+                    except Exception as batch_error:
+                        results = []
+                        for batch_item in item:
+                            row_idx = batch_item[0]
+                            source = batch_item[1]
+                            context_hint = batch_item[2] if len(batch_item) > 2 else None
+                            try:
+                                translation, debug_info = self.translator.translate_text(
+                                    source,
+                                    log_callback=_batch_log_callback,
+                                    return_debug_info=True,
+                                    context_hint=context_hint,
+                                )
+                                result_status = "success"
+                                result_details = ""
+                                if isinstance(debug_info, dict):
+                                    result_status = str(debug_info.get("result_status", "success") or "success")
+                                    result_details = str(debug_info.get("result_details", "") or "")
+                                results.append({
+                                    "ok": True,
+                                    "row_idx": row_idx,
+                                    "source": source,
+                                    "translation": translation,
+                                    "debug_info": debug_info,
+                                    "task_logs": task_logs,
+                                    "result_status": result_status,
+                                    "result_details": result_details,
+                                })
+                            except Exception as e:
+                                results.append({
+                                    "ok": False,
+                                    "row_idx": row_idx,
+                                    "source": source,
+                                    "error": f"{batch_error}; fallback failed: {e}",
+                                    "task_logs": task_logs,
+                                })
+                        return results
+
                 row_idx = item[0]
                 source = item[1]
                 context_hint = item[2] if len(item) > 2 else None
@@ -328,7 +489,7 @@ class Worker(QThread):
 
             # Honor the configured thread count while avoiding idle workers when
             # there are fewer unique items than requested threads.
-            max_concurrent = self._effective_max_concurrent(unique_count)
+            max_concurrent = self._effective_max_concurrent(len(work_units))
             
             from concurrent.futures import wait, FIRST_COMPLETED
             
@@ -337,7 +498,7 @@ class Worker(QThread):
                 # Use a set to keep track of active futures
                 active_futures = set()
                 # Iterator for unique items only
-                items_iter = iter(unique_items)
+                items_iter = iter(work_units)
                 
                 # Fill the pool initially - only max_concurrent tasks at a time
                 for _ in range(max_concurrent):
@@ -371,8 +532,11 @@ class Worker(QThread):
                             continue
                             
                         result = future.result()
-                        
-                        if result:
+                        result_items = result if isinstance(result, list) else [result]
+                        result_items = [r for r in result_items if r]
+                        future_processed_count = 0
+
+                        for result in result_items:
                             if result.get("ok"):
                                 row_idx = int(result.get("row_idx", 0))
                                 source = result.get("source", "")
@@ -383,13 +547,9 @@ class Worker(QThread):
                                 result_details = str(result.get("result_details", "") or "")
                                 safe_translation = str(translation) if translation is not None else ""
                                 safe_source = str(source) if source is not None else ""
-                                
-                                # 获取所有具有相同源文本的行
                                 all_rows = source_to_rows.get(source, [row_idx])
-                                
-                                # Check stop_receiving again before emitting results
+
                                 if not self.stop_receiving:
-                                    # 为所有相同内容的行发送翻译结果
                                     for target_row in all_rows:
                                         self.result_ready.emit(
                                             target_row,
@@ -397,27 +557,26 @@ class Worker(QThread):
                                             result_status,
                                             result_details,
                                         )
-                                    
-                                    # 缓存翻译结果
+
                                     translation_cache[source] = safe_translation
                                     completed_sources.add(source)
-                                    
+
                                     status_line = ""
                                     status_suffix = ""
                                     if result_status == MainWindow.ROW_STATUS_WARNING:
                                         status_suffix = " [warning]"
+                                    display_count = min(unique_count, processed_count + future_processed_count + 1)
                                     if len(all_rows) > 1:
-                                        status_line = f"[{processed_count+1}/{unique_count}] {safe_source[:20]}... -> {safe_translation[:20]}...{status_suffix} (x{len(all_rows)} {i18n.t('msg_duplicate_applied')})"
-                                        log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', 
-                                                status_line, 
+                                        status_line = f"[{display_count}/{unique_count}] {safe_source[:20]}... -> {safe_translation[:20]}...{status_suffix} (x{len(all_rows)} {i18n.t('msg_duplicate_applied')})"
+                                        log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO',
+                                                status_line,
                                                 module='gui_main', func='Worker.run')
                                     else:
-                                        status_line = f"[{processed_count+1}/{unique_count}] {safe_source[:20]}... -> {safe_translation[:20]}...{status_suffix}"
-                                        log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', 
-                                                status_line, 
+                                        status_line = f"[{display_count}/{unique_count}] {safe_source[:20]}... -> {safe_translation[:20]}...{status_suffix}"
+                                        log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO',
+                                                status_line,
                                                 module='gui_main', func='Worker.run')
 
-                                    # Cache debug info for visualization
                                     if debug_info and safe_source:
                                         if isinstance(debug_info, dict):
                                             flow_logs = list(task_logs)
@@ -450,10 +609,11 @@ class Worker(QThread):
                                             "rag_tasks": [],
                                             "keywords": [],
                                         })
+                            future_processed_count += 1
 
                         # Only update progress when not stopping to avoid inaccurate calculations
-                        if not self.stop_receiving:
-                            processed_count += 1
+                        if not self.stop_receiving and future_processed_count > 0:
+                            processed_count += future_processed_count
                             # 进度基于总项目数而非唯一项目数，以反映实际完成进度
                             completed_total = sum(len(source_to_rows.get(s, [])) for s in completed_sources)
                             self.progress.emit(int(completed_total / total * 100))
@@ -1385,7 +1545,7 @@ class MainWindow(QMainWindow):
 
         # Cache for RAG debug info to avoid re-running translation for visualization
         # Key: original_text, Value: debug_info dict
-        self.rag_debug_cache = {}
+        self.rag_debug_cache = LRUCache(max_size=500)
         self.row_status_map = {}
         self.row_error_map = {}
         self.status_summary_counts = self._create_empty_status_summary_counts()
@@ -2273,17 +2433,54 @@ class MainWindow(QMainWindow):
         self.trans_threads = NoWheelSpinBox()
         self.trans_threads.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.trans_threads.setRange(1, 99)
-        self.trans_threads.setValue(self.config_manager.get("threads", "translation", 5))
+        self.trans_threads.setValue(self.config_manager.get("threads", "translation", 8))
         self.trans_threads.setToolTip(i18n.t("tooltip_trans_threads"))
         
         self.vec_threads = NoWheelSpinBox()
         self.vec_threads.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.vec_threads.setRange(1, 99)
-        self.vec_threads.setValue(self.config_manager.get("threads", "vectorization", 5))
+        self.vec_threads.setValue(self.config_manager.get("threads", "vectorization", 8))
         self.vec_threads.setToolTip(i18n.t("tooltip_vec_threads"))
+
+        self.short_text_batch_enabled = QCheckBox(i18n.t(
+            "label_short_text_batch_enabled", "Enable short-text LLM batching"
+        ))
+        self.short_text_batch_enabled.setChecked(bool(
+            self.config_manager.get("general", "short_text_batch_enabled", False)
+        ))
+        self.short_text_batch_enabled.setToolTip(i18n.t(
+            "tooltip_short_text_batch_enabled",
+            "Optional: combine several short translation items into one LLM request. Falls back to single-item translation on errors."
+        ))
+
+        self.short_text_batch_max_chars = NoWheelSpinBox()
+        self.short_text_batch_max_chars.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.short_text_batch_max_chars.setRange(1, 500)
+        self.short_text_batch_max_chars.setValue(self.config_manager.get("general", "short_text_batch_max_chars", 50))
+        self.short_text_batch_max_chars.setToolTip(i18n.t(
+            "tooltip_short_text_batch_max_chars",
+            "Only texts at or below this character count are eligible for batching."
+        ))
+
+        self.short_text_batch_size = NoWheelSpinBox()
+        self.short_text_batch_size.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.short_text_batch_size.setRange(2, 50)
+        self.short_text_batch_size.setValue(self.config_manager.get("general", "short_text_batch_size", 8))
+        self.short_text_batch_size.setToolTip(i18n.t(
+            "tooltip_short_text_batch_size",
+            "Maximum number of short texts sent in one LLM request."
+        ))
+
+        self.short_text_batch_max_chars.setEnabled(self.short_text_batch_enabled.isChecked())
+        self.short_text_batch_size.setEnabled(self.short_text_batch_enabled.isChecked())
+        self.short_text_batch_enabled.toggled.connect(self.short_text_batch_max_chars.setEnabled)
+        self.short_text_batch_enabled.toggled.connect(self.short_text_batch_size.setEnabled)
 
         threads_layout.addRow(i18n.t("label_trans_threads"), self.trans_threads)
         threads_layout.addRow(i18n.t("label_vec_threads"), self.vec_threads)
+        threads_layout.addRow(self.short_text_batch_enabled)
+        threads_layout.addRow(i18n.t("label_short_text_batch_max_chars", "Batch max chars:"), self.short_text_batch_max_chars)
+        threads_layout.addRow(i18n.t("label_short_text_batch_size", "Batch size:"), self.short_text_batch_size)
         form_layout.addWidget(threads_group)
 
         rag_group = QGroupBox(i18n.t('group_rag_settings'))
@@ -2741,7 +2938,7 @@ class MainWindow(QMainWindow):
             self.on_translation_finished()
             return
 
-        num_threads = self.config_manager.get("threads", "translation", 5)
+        num_threads = self.config_manager.get("threads", "translation", 8)
         self.translator.llm_client.reload_config()  # Reinitialize HTTP clients in case they were closed
         self.worker = Worker(items_to_process, self.translator, num_threads)
         self.worker.log.connect(self.log)
@@ -3105,7 +3302,7 @@ class MainWindow(QMainWindow):
     def cache_rag_debug_info(self, original_text, debug_info):
         """缓存RAG调试信息以供可视化使用"""
         if original_text and debug_info:
-            self.rag_debug_cache[original_text] = debug_info
+            self.rag_debug_cache.put(original_text, debug_info)
 
     def stop_translation(self):
         # Immediately set flag to stop receiving results in the UI
@@ -3252,7 +3449,7 @@ class MainWindow(QMainWindow):
         self.pause_btn.setEnabled(True)
         self.resume_btn.setEnabled(False)
         
-        num_threads = self.config_manager.get("threads", "vectorization", 5)
+        num_threads = self.config_manager.get("threads", "vectorization", 8)
         self.glossary_worker = GlossaryWorker(self.rag_engine, 'rebuild', num_threads=num_threads)
         self.glossary_worker.log.connect(self.log)
         self.glossary_worker.progress.connect(self.glossary_progress.setValue)
@@ -3271,7 +3468,7 @@ class MainWindow(QMainWindow):
         self.pause_btn.setEnabled(True)
         self.resume_btn.setEnabled(False)
         
-        num_threads = self.config_manager.get("threads", "vectorization", 5)
+        num_threads = self.config_manager.get("threads", "vectorization", 8)
         self.glossary_worker = GlossaryWorker(self.rag_engine, 'import', data=fname, num_threads=num_threads)
         self.glossary_worker.log.connect(self.log)
         self.glossary_worker.progress.connect(self.glossary_progress.setValue)
@@ -3412,6 +3609,9 @@ class MainWindow(QMainWindow):
                 "target_language": target_lang,
                 "mcm_output_language_suffix": mcm_suffix,
                 "mcm_auto_export": mcm_auto_export,
+                "short_text_batch_enabled": bool(self.short_text_batch_enabled.isChecked()),
+                "short_text_batch_max_chars": self.short_text_batch_max_chars.value(),
+                "short_text_batch_size": self.short_text_batch_size.value(),
             },
         }, save=False)
 
@@ -3492,7 +3692,7 @@ class MainWindow(QMainWindow):
                 context_hint = self._build_translation_context(row)
                 items_to_process.append((row, source_item.text(), context_hint))
 
-        num_threads = self.config_manager.get("threads", "translation", 5)
+        num_threads = self.config_manager.get("threads", "translation", 8)
         self.translator.llm_client.reload_config()  # Reinitialize HTTP clients in case they were closed
         self.worker = Worker(items_to_process, self.translator, num_threads)
         self.worker.log.connect(self.log)
@@ -3592,7 +3792,7 @@ class MainWindow(QMainWindow):
             return
 
         for source in selected_sources:
-            self.rag_debug_cache.pop(source, None)
+            self.rag_debug_cache.invalidate(source)
 
     def visualize_rag_process(self):
         """可视化显示选中行的RAG处理过程"""
