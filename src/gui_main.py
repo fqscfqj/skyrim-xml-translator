@@ -1350,6 +1350,55 @@ class RAGVisualizationDialog(QDialog):
         lines.append(str(dst or ""))
         lines.append("")
 
+        translation_attempts = di.get("translation_attempts") or []
+        if isinstance(translation_attempts, list) and translation_attempts:
+            lines.append("[Translation Attempts]")
+            for idx, attempt in enumerate(translation_attempts, start=1):
+                if not isinstance(attempt, dict):
+                    continue
+                header_parts = []
+                stage = str(attempt.get("stage", "") or "")
+                if stage:
+                    header_parts.append(stage)
+                retry = attempt.get("retry")
+                if isinstance(retry, int):
+                    header_parts.append(f"retry={retry}")
+                chunk_index = attempt.get("chunk_index")
+                if isinstance(chunk_index, int):
+                    header_parts.append(f"chunk={chunk_index}")
+                accepted = attempt.get("accepted")
+                if accepted is True:
+                    header_parts.append("accepted")
+                elif accepted is False:
+                    header_parts.append("rejected")
+                suffix = f" [{'; '.join(header_parts)}]" if header_parts else ""
+                lines.append(f"Attempt {idx}{suffix}")
+
+                response_text = str(attempt.get("response_text", "") or "")
+                if response_text:
+                    lines.append("  Response:")
+                    for line in response_text.splitlines() or [response_text]:
+                        lines.append(f"  {line}")
+
+                parsed_translation = attempt.get("parsed_translation")
+                if parsed_translation is not None and str(parsed_translation) != "":
+                    lines.append("  Parsed Translation:")
+                    for line in str(parsed_translation).splitlines() or [str(parsed_translation)]:
+                        lines.append(f"  {line}")
+
+                result_status = str(attempt.get("result_status", "") or "")
+                result_details = str(attempt.get("result_details", "") or "")
+                if result_status:
+                    lines.append(f"  Result Status: {result_status}")
+                if result_details:
+                    lines.append(f"  Result Details: {result_details}")
+
+                error_text = str(attempt.get("error", "") or "")
+                if error_text:
+                    lines.append(f"  Error: {error_text}")
+
+                lines.append("")
+
         rag_tasks = di.get("rag_tasks") or di.get("keywords") or []
         keyword_debug = di.get("keyword_extraction") or {}
         self._append_keyword_section(lines, keyword_debug, rag_tasks)

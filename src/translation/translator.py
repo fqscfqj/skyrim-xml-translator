@@ -124,6 +124,7 @@ class Translator:
             "glossary_context": "",
             "system_prompt": "",
             "user_prompt": "",
+            "translation_attempts": [],
         }
 
         if not text or not str(text).strip():
@@ -358,6 +359,7 @@ class Translator:
                 "glossary_context": glossary_context,
                 "system_prompt": system_prompt,
                 "user_prompt": user_content,
+                "translation_attempts": [],
             }
 
         messages = [
@@ -370,6 +372,7 @@ class Translator:
         issues: list[QualityIssue] = []
         retry_count = 0
         while True:
+            attempt_info = None
             try:
                 if retry_count > 0:
                     retry_limit = max_retries + (
@@ -391,6 +394,14 @@ class Translator:
 
                 response = self.llm_client.chat_completion(
                     current_messages, log_callback=log_callback)
+                if isinstance(debug_info, dict):
+                    attempt_info = {
+                        "stage": "translate",
+                        "retry": retry_count,
+                        "message_count": len(current_messages),
+                        "response_text": "" if response is None else str(response),
+                    }
+                    debug_info.setdefault("translation_attempts", []).append(attempt_info)
 
                 translation = self._response_parser.parse(
                     response, text, messages,
@@ -413,6 +424,11 @@ class Translator:
                 has_untranslated_error = self._has_untranslated_error(issues)
                 has_format_error = self._has_format_error(issues)
                 result_status, result_details = self._result_status_from_issues(issues)
+                if isinstance(attempt_info, dict):
+                    attempt_info["parsed_translation"] = translation
+                    attempt_info["result_status"] = result_status
+                    attempt_info["result_details"] = result_details
+                    attempt_info["accepted"] = not issues or not self._quality_checker.should_retry(issues)
 
                 # Log issues (if any)
                 for issue in issues:
@@ -458,6 +474,8 @@ class Translator:
                 retry_count += 1
 
             except Exception as e:
+                if isinstance(attempt_info, dict):
+                    attempt_info["error"] = str(e)
                 log_emit(log_callback, self.rag_engine.config, "ERROR",
                          f"Translation failed: {e}", exc=e,
                          module="translator", func="translate_text")
@@ -623,6 +641,16 @@ class Translator:
                             "glossary_context": item.get("glossary_context", ""),
                             "system_prompt": system_prompt,
                             "user_prompt": user_content,
+                            "translation_attempts": [{
+                                "stage": "batch_translate",
+                                "retry": 0,
+                                "message_count": len(messages),
+                                "response_text": "" if response is None else str(response),
+                                "parsed_translation": translation,
+                                "result_status": result_status,
+                                "result_details": result_details,
+                                "accepted": True,
+                            }],
                             "result_status": result_status,
                             "result_details": result_details,
                         }
@@ -721,6 +749,7 @@ class Translator:
                 "glossary_context": rag_result["glossary_context"],
                 "system_prompt": "",
                 "user_prompt": "",
+                "translation_attempts": [],
                 "long_text_chunks": [],
             }
 
@@ -765,6 +794,16 @@ class Translator:
                              f"chunk_len={len(chunk)} retry={retry_count}",
                              module="translator", func="_translate_long_text")
                     response = self.llm_client.chat_completion(messages, log_callback=log_callback)
+                    chunk_attempt = None
+                    if isinstance(debug_info, dict):
+                        chunk_attempt = {
+                            "stage": "long_text_chunk",
+                            "chunk_index": idx,
+                            "retry": retry_count,
+                            "message_count": len(messages),
+                            "response_text": "" if response is None else str(response),
+                        }
+                        debug_info.setdefault("translation_attempts", []).append(chunk_attempt)
                     chunk_translation = self._response_parser.parse(
                         response, chunk, messages,
                         llm_client=self.llm_client, log_callback=log_callback)
@@ -773,6 +812,9 @@ class Translator:
                             chunk_translation,
                             format_shell,
                         )
+                    if isinstance(chunk_attempt, dict):
+                        chunk_attempt["parsed_translation"] = str(chunk_translation)
+                        chunk_attempt["accepted"] = True
                     translated_chunks.append(str(chunk_translation))
                     previous_translation = str(chunk_translation)
                     if isinstance(debug_info, dict):
@@ -859,6 +901,7 @@ class Translator:
             "glossary_context": "",
             "system_prompt": "",
             "user_prompt": "",
+            "translation_attempts": [],
             "result_status": result_status,
             "result_details": result_details,
         }
