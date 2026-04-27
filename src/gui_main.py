@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QTableWidget, QTableWidgetItem, QHeaderView, QSplitter, QDoubleSpinBox,
                              QComboBox, QAbstractSpinBox, QScrollArea, QDialog, QTreeWidget, QTreeWidgetItem,
                              QAbstractItemView)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QRectF
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QRectF, QEvent
 from PyQt6.QtGui import (
     QDragEnterEvent, QDropEvent, QIcon, QWheelEvent, QGuiApplication, QCloseEvent,
     QPaintEvent, QMouseEvent,
@@ -1557,12 +1557,30 @@ class MainWindow(QMainWindow):
         self.status_summary_warning_label: Optional[QLabel] = None
         self.status_summary_failed_label: Optional[QLabel] = None
         self.status_summary_success_label: Optional[QLabel] = None
+        self.config_tab_container: Optional[QWidget] = None
 
         # Pagination state
         self.current_page = 1
         self.items_per_page = 200
 
         self.init_ui()
+
+    def changeEvent(self, a0: Optional[QEvent]) -> None:
+        super().changeEvent(a0)
+        if a0 is not None and a0.type() in (
+            QEvent.Type.PaletteChange,
+            QEvent.Type.ApplicationPaletteChange,
+        ):
+            self._apply_config_tab_style_sheet()
+
+    def _is_dark_palette(self) -> bool:
+        return self.palette().color(self.backgroundRole()).lightness() < 128
+
+    def _apply_config_tab_style_sheet(self) -> None:
+        if self.config_tab_container is not None:
+            self.config_tab_container.setStyleSheet(
+                self._get_config_tab_style_sheet(self._is_dark_palette())
+            )
 
     def closeEvent(self, a0: Optional[QCloseEvent]) -> None:
         """Handle window close event to properly cleanup threads"""
@@ -2086,7 +2104,95 @@ class MainWindow(QMainWindow):
         return widget
 
     @staticmethod
-    def _get_config_tab_style_sheet() -> str:
+    def _get_config_tab_style_sheet(is_dark: bool) -> str:
+        if not is_dark:
+            return """
+            #configTab QGroupBox {
+                border: 1px solid #c7cdd6;
+                border-radius: 8px;
+                margin-top: 10px;
+                padding-top: 10px;
+                background-color: #ffffff;
+                color: #202124;
+            }
+            #configTab QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 12px;
+                padding: 0 6px;
+                color: #202124;
+            }
+            #configTab QScrollArea {
+                border: none;
+                background: transparent;
+            }
+            #configTab QLabel {
+                color: #202124;
+            }
+            #configTab QLineEdit,
+            #configTab QComboBox,
+            #configTab QAbstractSpinBox {
+                min-height: 28px;
+                padding: 2px 8px;
+                border: 1px solid #aeb7c3;
+                border-radius: 5px;
+                background-color: #ffffff;
+                color: #202124;
+                selection-background-color: #2563eb;
+                selection-color: #ffffff;
+            }
+            #configTab QLineEdit:focus,
+            #configTab QComboBox:focus,
+            #configTab QAbstractSpinBox:focus {
+                border-color: #2563eb;
+                background-color: #ffffff;
+            }
+            #configTab QLineEdit:disabled,
+            #configTab QComboBox:disabled,
+            #configTab QAbstractSpinBox:disabled {
+                border-color: #d4dae3;
+                background-color: #eef1f5;
+                color: #6b7280;
+            }
+            #configTab QComboBox::drop-down {
+                border: none;
+                width: 24px;
+                background: transparent;
+            }
+            #configTab QCheckBox {
+                spacing: 8px;
+                color: #202124;
+            }
+            #configTab QCheckBox:disabled {
+                color: #6b7280;
+            }
+            #configTab QCheckBox::indicator {
+                width: 16px;
+                height: 16px;
+                border: 1px solid #9aa4b2;
+                border-radius: 4px;
+                background-color: #ffffff;
+            }
+            #configTab QCheckBox::indicator:hover {
+                border-color: #2563eb;
+                background-color: #eef4ff;
+            }
+            #configTab QCheckBox::indicator:checked {
+                border-color: #2563eb;
+                background-color: #3b82f6;
+            }
+            #configTab QCheckBox::indicator:checked:hover {
+                background-color: #2563eb;
+            }
+            #configTab QCheckBox::indicator:disabled {
+                border-color: #cfd6df;
+                background-color: #eef1f5;
+            }
+            #configTab QCheckBox::indicator:checked:disabled {
+                border-color: #93a8cf;
+                background-color: #9bbcf8;
+            }
+            """
+
         return """
         #configTab QGroupBox {
             border: 1px solid #353a45;
@@ -2176,7 +2282,8 @@ class MainWindow(QMainWindow):
 
     def create_config_tab(self):
         container = QWidget()
-        container.setStyleSheet(self._get_config_tab_style_sheet())
+        self.config_tab_container = container
+        self._apply_config_tab_style_sheet()
         container_layout = QVBoxLayout(container)
         container_layout.setContentsMargins(0, 0, 0, 0)
 
