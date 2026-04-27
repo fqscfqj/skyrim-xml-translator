@@ -283,6 +283,57 @@ class KeywordExtractor:
         return self._get_default_keyword_prompt_template()
 
     @staticmethod
+    def _split_keyword_prompt_template(prompt_template: str) -> tuple[str, str]:
+        template = str(prompt_template or "").strip()
+        if not template:
+            return "", ""
+
+        placeholder = "{text}"
+        if placeholder not in template:
+            return "", template
+
+        sections = template.rsplit("\n\n", 1)
+        if len(sections) == 2 and placeholder in sections[1]:
+            return sections[0].strip(), sections[1].strip()
+
+        for marker in ("原文：", "Input:", "Text:"):
+            marker_index = template.rfind(marker)
+            if marker_index >= 0 and placeholder in template[marker_index:]:
+                return template[:marker_index].rstrip(), template[marker_index:].strip()
+
+        return "", template
+
+    def _build_keyword_messages(self, text: str) -> tuple[str, str, str, list[dict[str, str]]]:
+        prompt_template = self._get_keyword_prompt_template()
+        system_template, user_template = self._split_keyword_prompt_template(prompt_template)
+
+        prompt = self._apply_prompt_vars(
+            prompt_template,
+            {"text": text},
+        )
+
+        if not user_template:
+            user_template = prompt_template
+
+        system_prompt = self._apply_prompt_vars(system_template, {}).strip() if system_template else ""
+        user_prompt = self._apply_prompt_vars(
+            user_template,
+            {"text": text},
+        ).strip()
+
+        if system_prompt and user_prompt:
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
+        else:
+            messages = [{"role": "user", "content": prompt}]
+            system_prompt = ""
+            user_prompt = prompt
+
+        return prompt, system_prompt, user_prompt, messages
+
+    @staticmethod
     def _clone_keyword_list(values) -> list[str]:
         if not isinstance(values, list):
             return []
@@ -294,6 +345,8 @@ class KeywordExtractor:
             "cache_hit": False,
             "result_source": "",
             "prompt": "",
+            "system_prompt": "",
+            "user_prompt": "",
             "attempts": [],
             "raw_keywords": [],
             "processed_keywords": [],
@@ -436,15 +489,11 @@ class KeywordExtractor:
 
     def _extract_via_llm(self, text: str, log_callback, debug_info: Optional[dict] = None) -> list[str]:
         """Use LLM to extract fine-grained glossary lookup keywords."""
-        prompt_template = self._get_keyword_prompt_template()
-
-        prompt = self._apply_prompt_vars(
-            prompt_template,
-            {"text": text},
-        )
+        prompt, system_prompt, user_prompt, messages = self._build_keyword_messages(text)
         if isinstance(debug_info, dict):
             debug_info["prompt"] = prompt
-        messages = [{"role": "user", "content": prompt}]
+            debug_info["system_prompt"] = system_prompt
+            debug_info["user_prompt"] = user_prompt
 
         primary_error: Optional[Exception] = None
         primary_response_text = ""
