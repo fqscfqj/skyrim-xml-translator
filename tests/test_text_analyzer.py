@@ -90,6 +90,20 @@ class TextAnalyzerPercentProtectionTests(unittest.TestCase):
         self.assertEqual(["<mag>", "%", "<dur>"], self.non_space_tokens(format_tokens))
         self.assertNotIn("% m", format_tokens)
 
+    def test_numeric_percent_in_prose_is_not_protected(self):
+        examples = [
+            "There's a 100% chance that I'm going to say yes to that one.",
+            "There's a 100 % chance that I'm going to say yes to that one.",
+        ]
+
+        for source in examples:
+            with self.subTest(source=source):
+                shell = self.assert_round_trips(source)
+
+                self.assertEqual([], self.non_space_tokens(shell.tokens))
+                self.assertEqual([], self.analyzer.extract_placeholder_tokens(source))
+                self.assertEqual([], self.analyzer.extract_protected_format_tokens(source))
+
     def test_chunk_text_preserves_content_and_respects_limit(self):
         source = (
             "First sentence stays together. Second sentence can split here.\n\n"

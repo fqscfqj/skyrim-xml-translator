@@ -85,9 +85,13 @@ class TextAnalyzer:
         if not text:
             return []
 
+        source = str(text)
         tokens: list[str] = []
-        for match in self._PLACEHOLDER_TOKEN_RE.finditer(str(text)):
+        for match in self._PLACEHOLDER_TOKEN_RE.finditer(source):
             token = match.group(0)
+            start, end = match.span()
+            if token == "%" and not self._is_protected_percent_literal(source, start, end):
+                continue
             if token.startswith("[") and token.endswith("]"):
                 if self._is_protected_bracket_token(token):
                     tokens.append(token)
@@ -113,6 +117,8 @@ class TextAnalyzer:
 
             if self._FORMAT_SENTINEL_RE.fullmatch(token):
                 should_protect = True
+            elif token == "%":
+                should_protect = self._is_protected_percent_literal(source, start, end)
             elif token.startswith("<") and token.endswith(">"):
                 should_protect = self._is_protected_angle_token(token)
             elif token.startswith("[") and token.endswith("]"):
@@ -238,6 +244,10 @@ class TextAnalyzer:
             if self._FORMAT_SENTINEL_RE.fullmatch(token):
                 tokens.append(token)
                 continue
+            if token == "%":
+                if self._is_protected_percent_literal(source, start, end):
+                    tokens.append(token)
+                continue
             if token.startswith("<") and token.endswith(">"):
                 if self._is_protected_angle_token(token):
                     tokens.append(token)
@@ -260,6 +270,8 @@ class TextAnalyzer:
 
     def _strip_placeholder_match(self, match: re.Match[str]) -> str:
         token = match.group(0)
+        if token == "%":
+            return "" if self._is_protected_percent_literal(match.string, match.start(), match.end()) else token
         if token.startswith("[") and token.endswith("]"):
             return "" if self._is_protected_bracket_token(token) else token
         return ""
@@ -332,6 +344,31 @@ class TextAnalyzer:
                 return prefix
             salt += 1
 
+    def _is_protected_percent_literal(self, text: str, start: int, end: int) -> bool:
+        """Keep structural percent tokens, but allow numeric percentages in prose to translate naturally."""
+        if start < 0 or end > len(text) or text[start:end] != "%":
+            return False
+
+        prev_visible = self._nearest_non_space_char(text, start, step=-1)
+        if prev_visible == ">":
+            return True
+
+        next_visible = self._nearest_non_space_char(text, end, step=1)
+        if (prev_visible and prev_visible.isdigit()) or (next_visible and next_visible.isdigit()):
+            return False
+
+        return True
+
+    @staticmethod
+    def _nearest_non_space_char(text: str, index: int, step: int) -> str:
+        pos = index - 1 if step < 0 else index
+        while 0 <= pos < len(text):
+            ch = text[pos]
+            if not ch.isspace():
+                return ch
+            pos += step
+        return ""
+
     def _should_protect_whitespace(self, text: str, start: int, end: int) -> bool:
         """Preserve structural whitespace without freezing word separators inside prose."""
         token = text[start:end]
@@ -347,6 +384,10 @@ class TextAnalyzer:
 
         prev_char = text[start - 1] if start > 0 else ""
         next_char = text[end] if end < len(text) else ""
+        if prev_char == "%" and not self._is_protected_percent_literal(text, start - 1, start):
+            return False
+        if next_char == "%" and not self._is_protected_percent_literal(text, end, end + 1):
+            return False
         if prev_char == "%" and next_char.isalpha():
             return False
         return self._is_format_boundary_char(prev_char) or self._is_format_boundary_char(next_char)

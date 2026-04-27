@@ -74,6 +74,17 @@ class QualityCheckerPlaceholderResidueTests(unittest.TestCase):
             issues,
         )
 
+    def test_accepts_semantic_translation_of_numeric_percent_prose(self):
+        source = "There's a 100% chance that I'm going to say yes to that one."
+        translation = "我百分之百会答应那件事。"
+
+        issues = self.checker.check(source, translation, target_lang="zh")
+
+        self.assertFalse(
+            any(issue.severity == "error" for issue in issues),
+            issues,
+        )
+
     def test_non_cjk_targets_skip_residue_rule(self):
         source = "Stamina regenerates <mag>% faster."
         translation = "Stamina regenerates <mag>% f."
