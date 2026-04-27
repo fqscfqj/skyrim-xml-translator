@@ -92,8 +92,11 @@ class LLMClient:
     def _extract_usage_stats(cls, response: Any) -> dict[str, Optional[int]]:
         usage = cls._usage_to_dict(getattr(response, "usage", None))
         prompt_details = usage.get("prompt_tokens_details") or {}
+        completion_details = usage.get("completion_tokens_details") or {}
         if not isinstance(prompt_details, dict):
             prompt_details = {}
+        if not isinstance(completion_details, dict):
+            completion_details = {}
 
         def _safe_int(value: Any) -> Optional[int]:
             if value is None:
@@ -112,6 +115,9 @@ class LLMClient:
             ),
             "cache_creation_input_tokens": _safe_int(
                 prompt_details.get("cache_creation_input_tokens", usage.get("cache_creation_input_tokens"))
+            ),
+            "reasoning_tokens": _safe_int(
+                completion_details.get("reasoning_tokens")
             ),
         }
 
@@ -245,6 +251,7 @@ class LLMClient:
             completion_tokens = usage_stats.get("completion_tokens")
             cached_tokens = usage_stats.get("cached_tokens")
             cache_creation_tokens = usage_stats.get("cache_creation_input_tokens")
+            reasoning_tokens = usage_stats.get("reasoning_tokens")
 
             if prompt_tokens is not None or completion_tokens is not None:
                 log_emit(
@@ -253,7 +260,8 @@ class LLMClient:
                     "DEBUG",
                     f"{operation} usage: model={model} prompt_tokens={prompt_tokens or 0} "
                     f"completion_tokens={completion_tokens or 0} total_tokens={usage_stats.get('total_tokens') or 0} "
-                    f"cached_tokens={cached_tokens or 0} cache_creation_input_tokens={cache_creation_tokens or 0}",
+                    f"cached_tokens={cached_tokens or 0} cache_creation_input_tokens={cache_creation_tokens or 0} "
+                    f"reasoning_tokens={reasoning_tokens or 0}",
                     module="llm_client",
                     func="_call",
                 )
