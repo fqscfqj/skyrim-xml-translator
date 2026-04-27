@@ -282,83 +282,6 @@ class KeywordExtractor:
 
         return self._get_default_keyword_prompt_template()
 
-    def _get_keyword_system_prompt(self) -> str:
-        """Return the static system prompt for keyword extraction (no {text} placeholder)."""
-        prompt_config = self.prompt_manager.get("rag.keywords")
-
-        if isinstance(prompt_config, str):
-            # For raw string templates, try to split at a known input marker
-            for marker in ("原文：\"{text}\"", "原文：", "\n原文"):
-                idx = prompt_config.find(marker)
-                if idx >= 0:
-                    return prompt_config[:idx].rstrip()
-            return prompt_config
-
-        if isinstance(prompt_config, list):
-            prompt_template = "\n".join(self._flatten_prompt_lines(prompt_config)).strip()
-            for marker in ("原文：\"{text}\"", "原文：", "\n原文"):
-                idx = prompt_template.find(marker)
-                if idx >= 0:
-                    return prompt_template[:idx].rstrip()
-            return prompt_template
-
-        if isinstance(prompt_config, dict):
-            structured_keys = ("task", "output", "rules", "input")
-            has_structured = any(key in prompt_config for key in structured_keys)
-            if not has_structured:
-                raw = prompt_config.get("prompt", "")
-                if isinstance(raw, str):
-                    for marker in ("原文：\"{text}\"", "原文：", "\n原文"):
-                        idx = raw.find(marker)
-                        if idx >= 0:
-                            return raw[:idx].rstrip()
-                    return raw.strip()
-                return ""
-
-            lines: list[str] = []
-            for key in ("task", "output"):
-                lines.extend(self._flatten_prompt_lines(prompt_config.get(key)))
-
-            rule_lines: list[str] = []
-            rules = prompt_config.get("rules")
-            if isinstance(rules, dict):
-                for value in rules.values():
-                    rule_lines.extend(self._flatten_prompt_lines(value))
-            else:
-                rule_lines.extend(self._flatten_prompt_lines(rules))
-
-            if rule_lines:
-                if lines:
-                    lines.append("")
-                lines.append("规则：")
-                lines.extend(f"- {line}" for line in rule_lines)
-
-            return "\n".join(lines).strip()
-
-        raw = self.prompt_manager.get("rag.keywords.prompt")
-        if isinstance(raw, str) and raw.strip():
-            for marker in ("原文：\"{text}\"", "原文：", "\n原文"):
-                idx = raw.find(marker)
-                if idx >= 0:
-                    return raw[:idx].rstrip()
-            return raw.strip()
-
-        return self._get_default_keyword_prompt_template()
-
-    def _get_keyword_user_template(self) -> str:
-        """Return the user-message template containing the {text} placeholder."""
-        prompt_config = self.prompt_manager.get("rag.keywords")
-
-        if isinstance(prompt_config, dict):
-            structured_keys = ("task", "output", "rules", "input")
-            has_structured = any(key in prompt_config for key in structured_keys)
-            if has_structured:
-                input_lines = self._flatten_prompt_lines(prompt_config.get("input"))
-                if input_lines:
-                    return "\n".join(input_lines).strip()
-
-        return '原文："{text}"'
-
     @staticmethod
     def _clone_keyword_list(values) -> list[str]:
         if not isinstance(values, list):
@@ -513,15 +436,15 @@ class KeywordExtractor:
 
     def _extract_via_llm(self, text: str, log_callback, debug_info: Optional[dict] = None) -> list[str]:
         """Use LLM to extract fine-grained glossary lookup keywords."""
-        system_prompt = self._get_keyword_system_prompt()
-        user_template = self._get_keyword_user_template()
-        user_prompt = self._apply_prompt_vars(user_template, {"text": text})
+        prompt_template = self._get_keyword_prompt_template()
+
+        prompt = self._apply_prompt_vars(
+            prompt_template,
+            {"text": text},
+        )
         if isinstance(debug_info, dict):
-            debug_info["prompt"] = system_prompt + "\n\n" + user_prompt
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
+            debug_info["prompt"] = prompt
+        messages = [{"role": "user", "content": prompt}]
 
         primary_error: Optional[Exception] = None
         primary_response_text = ""
