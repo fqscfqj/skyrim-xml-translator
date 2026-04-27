@@ -19,6 +19,7 @@ class LLMConfig:
         "temperature": None,
         "top_p": None,
         "enable_thinking": None,
+        "reasoning_effort": None,
     })
 
 

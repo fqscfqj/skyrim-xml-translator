@@ -2310,6 +2310,10 @@ class MainWindow(QMainWindow):
                 "tooltip_param_enable_thinking",
                 "When enabled, explicitly sends the provider-specific thinking switch. Only use with compatible models."
             ),
+            "reasoning_effort": i18n.t(
+                "tooltip_param_reasoning_effort",
+                "When enabled, sends reasoning_effort parameter. Only effective when Thinking is on."
+            ),
         }
 
         # Wrap settings in a scroll area so controls remain usable on smaller windows.
@@ -2376,6 +2380,13 @@ class MainWindow(QMainWindow):
         thinking_combo.addItem(i18n.t("option_thinking_on"), True)
         thinking_combo.addItem(i18n.t("option_thinking_off"), False)
         add_param_control("enable_thinking", i18n.t("param_enable_thinking"), thinking_combo)
+
+        effort_combo = NoWheelComboBox()
+        effort_combo.addItem(i18n.t("option_effort_low"), "low")
+        effort_combo.addItem(i18n.t("option_effort_medium"), "medium")
+        effort_combo.addItem(i18n.t("option_effort_high"), "high")
+        effort_combo.addItem(i18n.t("option_effort_max"), "xhigh")
+        add_param_control("reasoning_effort", i18n.t("param_reasoning_effort"), effort_combo)
         form_layout.addWidget(llm_group)
 
         # --- Search LLM Settings ---
@@ -2442,6 +2453,13 @@ class MainWindow(QMainWindow):
         s_thinking_combo.addItem(i18n.t("option_thinking_on"), True)
         s_thinking_combo.addItem(i18n.t("option_thinking_off"), False)
         add_search_param_control("enable_thinking", i18n.t("param_enable_thinking"), s_thinking_combo)
+
+        s_effort_combo = NoWheelComboBox()
+        s_effort_combo.addItem(i18n.t("option_effort_low"), "low")
+        s_effort_combo.addItem(i18n.t("option_effort_medium"), "medium")
+        s_effort_combo.addItem(i18n.t("option_effort_high"), "high")
+        s_effort_combo.addItem(i18n.t("option_effort_max"), "xhigh")
+        add_search_param_control("reasoning_effort", i18n.t("param_reasoning_effort"), s_effort_combo)
         form_layout.addWidget(search_group)
 
         # --- Search Fallback LLM Settings ---
@@ -2507,6 +2525,13 @@ class MainWindow(QMainWindow):
         sf_thinking_combo.addItem(i18n.t("option_thinking_on"), True)
         sf_thinking_combo.addItem(i18n.t("option_thinking_off"), False)
         add_search_fallback_param_control("enable_thinking", i18n.t("param_enable_thinking"), sf_thinking_combo)
+
+        sf_effort_combo = NoWheelComboBox()
+        sf_effort_combo.addItem(i18n.t("option_effort_low"), "low")
+        sf_effort_combo.addItem(i18n.t("option_effort_medium"), "medium")
+        sf_effort_combo.addItem(i18n.t("option_effort_high"), "high")
+        sf_effort_combo.addItem(i18n.t("option_effort_max"), "xhigh")
+        add_search_fallback_param_control("reasoning_effort", i18n.t("param_reasoning_effort"), sf_effort_combo)
         form_layout.addWidget(search_fallback_group)
         # ---------------------------
 

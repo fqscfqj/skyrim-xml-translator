@@ -198,6 +198,23 @@ class LLMClient:
             if key not in _STANDARD_KWARGS:
                 extra_body[key] = final_params.pop(key)
 
+        # --- DeepSeek thinking mode control ---
+        # Transform the custom enable_thinking parameter into the official
+        # DeepSeek thinking format: {"thinking": {"type": "enabled"/"disabled"}}
+        # Ref: https://api-docs.deepseek.com/zh-cn/guides/thinking_mode
+        if "enable_thinking" in extra_body:
+            thinking_enabled = bool(extra_body.pop("enable_thinking"))
+            extra_body["thinking"] = {"type": "enabled" if thinking_enabled else "disabled"}
+            # DeepSeek thinking mode does NOT support temperature, top_p,
+            # frequency_penalty, or presence_penalty. Strip them when thinking is on.
+            if thinking_enabled:
+                for unsupported in ("temperature", "top_p",
+                                    "frequency_penalty", "presence_penalty"):
+                    final_params.pop(unsupported, None)
+            else:
+                # thinking disabled → reasoning_effort is meaningless, drop it
+                final_params.pop("reasoning_effort", None)
+
         request_args.update(final_params)
         if extra_body:
             request_args["extra_body"] = extra_body
