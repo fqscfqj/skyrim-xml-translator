@@ -804,6 +804,37 @@ class KeywordExtractor:
             pass
         return limited
 
+    def _filter_keyword_is_source_text(self, keywords: list[str], text: str, log_callback) -> list[str]:
+        """Drop keywords whose normalized form is identical to the source text.
+
+        When the LLM returns the full sentence as a keyword (e.g., ["Give it to me"]),
+        this prevents it from wasting vector search effort on a known-no-op query.
+        """
+        if not keywords:
+            return keywords
+        source_norm = self._normalize_for_source_match(text)
+        if not source_norm:
+            return keywords
+        kept: list[str] = []
+        dropped: list[str] = []
+        for kw in keywords:
+            if not isinstance(kw, str):
+                continue
+            if self._normalize_for_source_match(kw) == source_norm:
+                dropped.append(kw.strip())
+            else:
+                kept.append(kw)
+        if dropped:
+            try:
+                preview = dropped[:10]
+                suffix = "..." if len(dropped) > 10 else ""
+                log_emit(log_callback, self.config, "DEBUG",
+                         f"[RAG] Dropped {len(dropped)} keyword(s) identical to source text: {preview}{suffix}",
+                         module="keyword_extractor", func="_filter_keyword_is_source_text")
+            except Exception:
+                pass
+        return kept
+
     def _filter_low_signal_keywords(self, keywords: list[str], log_callback) -> list[str]:
         kept: list[str] = []
         dropped: list[str] = []
@@ -981,6 +1012,21 @@ class KeywordExtractor:
             note="Keep only terms that still appear in the source text after normalization.",
         )
         current = present
+
+        # Drop keywords that are identical to the source text after normalization.
+        # LLMs sometimes regurgitate the full sentence as a "keyword" even when
+        # instructed to return [] for texts without proper nouns. This guard catches
+        # those cases early, before low-signal filters.
+        pruned = self._filter_keyword_is_source_text(current, text, log_callback)
+        self._record_keyword_step(
+            debug_info,
+            phase=phase,
+            name="filter_keyword_is_source_text",
+            before=current,
+            after=pruned,
+            note="Drop keywords that are identical to the source text after normalization.",
+        )
+        current = pruned
 
         filtered = self._filter_low_signal_keywords(current, log_callback)
         self._record_keyword_step(
