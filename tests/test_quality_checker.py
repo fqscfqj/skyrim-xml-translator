@@ -96,6 +96,17 @@ class QualityCheckerPlaceholderResidueTests(unittest.TestCase):
             issues,
         )
 
+    def test_accepts_translated_sentence_with_preserved_internal_identifier(self):
+        source = "< FreeformValdDebt is completed. >"
+        translation = "< FreeformValdDebt 已完成。 >"
+
+        issues = self.checker.check(source, translation, target_lang="zh")
+
+        self.assertFalse(
+            any(issue.rule_id == "latin_ratio" for issue in issues),
+            issues,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

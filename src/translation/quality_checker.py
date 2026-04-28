@@ -209,7 +209,9 @@ class QualityChecker:
                 continue
             if span.lower() not in source_visible_lower:
                 continue
-            if self._looks_like_proper_noun_label(span):
+            if (
+                    self._looks_like_proper_noun_label(span)
+                    or self._text_analyzer.looks_like_internal_identifier(span)):
                 spans_to_strip.add(span)
 
         for span in sorted(spans_to_strip, key=len, reverse=True):

@@ -1,0 +1,134 @@
+import re
+import unittest
+
+import numpy as np
+
+from src.rag.search import RAGSearcher
+
+
+class _DummyConfig:
+    def __init__(self, values=None):
+        self._values = values or {}
+
+    def get(self, section, key, default=None):
+        return self._values.get((section, key), default)
+
+
+class _DummyGlossaryManager:
+    _COMMON_WORDS = {"a", "after", "all", "is", "it", "of", "the"}
+    _NORMALIZE_RE = re.compile(r"[^0-9a-zA-Z\u4e00-\u9fff]+")
+    _WHITESPACE_RE = re.compile(r"\s+")
+
+    def __init__(self, glossary):
+        self.glossary = glossary
+        self._glossary_lookup = {
+            self.normalize_term_key(term): term for term in glossary
+        }
+        self._token_df = {}
+
+    @classmethod
+    def normalize_term_key(cls, value: str) -> str:
+        cleaned = str(value or "").strip().lower()
+        cleaned = cls._NORMALIZE_RE.sub(" ", cleaned)
+        return cls._WHITESPACE_RE.sub(" ", cleaned).strip()
+
+    def lookup_normalized(self, normalized: str):
+        return self._glossary_lookup.get(normalized)
+
+    @staticmethod
+    def is_signal_token(token: str) -> bool:
+        return len(str(token or "")) >= 3
+
+    def ensure_token_df(self):
+        self._token_df = {}
+
+
+class _DummyVectorStore:
+    def __init__(self, terms, scores):
+        self.terms = terms
+        self.scores = np.array(scores, dtype=np.float32)
+        self.vectors = np.ones((len(terms), 2), dtype=np.float32)
+
+    def search_cosine_full(self, _query_vec):
+        return self.scores.copy()
+
+    def search_containment(self, query_lower: str, top_k: int = 5, similarities=None):
+        query = _DummyGlossaryManager.normalize_term_key(query_lower)
+        hits = []
+        for idx, term in enumerate(self.terms):
+            if query and query in _DummyGlossaryManager.normalize_term_key(term):
+                hits.append((idx, term))
+        if similarities is not None:
+            hits.sort(key=lambda hit: similarities[hit[0]], reverse=True)
+        return hits[:top_k]
+
+
+class _DummyLLMClient:
+    def get_embedding(self, value, log_callback=None):
+        if isinstance(value, list):
+            return [[1.0, 0.0] for _ in value]
+        return [1.0, 0.0]
+
+
+class RAGSearchSentenceLikeFilterTests(unittest.TestCase):
+    def test_filters_sentence_like_candidates_not_present_in_source(self):
+        sentence_term = "So, it is real after all."
+        short_term = "Real"
+        glossary = _DummyGlossaryManager({
+            sentence_term: "原来这一切是真的。",
+            short_term: "真实",
+        })
+        searcher = RAGSearcher(
+            _DummyVectorStore([sentence_term, short_term], [0.99, 0.95]),
+            glossary,
+            _DummyConfig({
+                ("rag", "keyword_weight_enabled"): False,
+                ("rag", "min_vector_score"): 0.0,
+                ("rag", "short_term_max_results"): 5,
+                ("rag", "long_term_max_results"): 5,
+            }),
+            _DummyLLMClient(),
+        )
+
+        results, debug = searcher.search(
+            ["Real"],
+            source_text="The Real Barenziah walked through Riften.",
+            threshold=0.1,
+            top_k=5,
+            return_debug=True,
+        )
+
+        self.assertNotIn(sentence_term, results)
+        self.assertEqual(results[short_term], "真实")
+        self.assertEqual(debug[0]["sentence_like_candidate_count"], 1)
+        self.assertEqual(debug[0]["sentence_like_filtered_count"], 1)
+
+    def test_keeps_exact_sentence_candidate_that_appears_in_source(self):
+        sentence_term = "So, it is real after all."
+        glossary = _DummyGlossaryManager({sentence_term: "原来这一切是真的。"})
+        searcher = RAGSearcher(
+            _DummyVectorStore([sentence_term], [0.99]),
+            glossary,
+            _DummyConfig({
+                ("rag", "keyword_weight_enabled"): False,
+                ("rag", "min_vector_score"): 0.0,
+                ("rag", "short_term_max_results"): 5,
+                ("rag", "long_term_max_results"): 5,
+            }),
+            _DummyLLMClient(),
+        )
+
+        results, debug = searcher.search(
+            [sentence_term],
+            source_text=sentence_term,
+            threshold=0.1,
+            top_k=5,
+            return_debug=True,
+        )
+
+        self.assertEqual(results[sentence_term], "原来这一切是真的。")
+        self.assertEqual(debug[0]["sentence_like_filtered_count"], 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

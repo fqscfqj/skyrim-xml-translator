@@ -499,8 +499,10 @@ class RAGSearcher:
             candidate_scores: Dict[str, float] = {}
             source_boosted_seen: set[str] = set()
             sentence_like_candidate_terms: set[str] = set()
+            sentence_like_filtered_count = 0
 
             def add_candidate(term: str, score: float, apply_query_bonus: bool = True) -> bool:
+                nonlocal sentence_like_filtered_count
                 if not term:
                     return False
                 normalized = self.glossary_manager.normalize_term_key(term)
@@ -509,8 +511,12 @@ class RAGSearcher:
                     canonical_term = term
                 if canonical_term not in self.glossary_manager.glossary:
                     return False
-                if self._is_sentence_like_term(canonical_term):
+                is_sentence_like = self._is_sentence_like_term(canonical_term)
+                if is_sentence_like:
                     sentence_like_candidate_terms.add(canonical_term)
+                    if not self._raw_term_appears_in_source(canonical_term, source_text):
+                        sentence_like_filtered_count += 1
+                        return False
                 # For semantic candidates, require signal-token overlap with query
                 # to reduce unrelated high-similarity noise.
                 if score < 1.0 and not self._has_signal_overlap(query, canonical_term):
@@ -616,7 +622,7 @@ class RAGSearcher:
                     add_candidate(term, score, apply_query_bonus=False)
 
                 if return_debug:
-                    query_details["sentence_like_filtered_count"] = 0
+                    query_details["sentence_like_filtered_count"] = sentence_like_filtered_count
                     query_details["sentence_like_candidate_count"] = len(sentence_like_candidate_terms)
 
                 # 2) Rank by semantic score

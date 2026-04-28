@@ -214,6 +214,12 @@ class PromptBuilder:
         if not matched_terms:
             return ""
 
+        try:
+            entry_max_chars = int(self.config.get("rag", "glossary_entry_max_chars", 240))
+        except Exception:
+            entry_max_chars = 240
+        entry_max_chars = max(60, min(entry_max_chars, 2000))
+
         in_source_lines: list[str] = []
         reference_lines: list[str] = []
 
@@ -225,11 +231,12 @@ class PromptBuilder:
 
             v_str = "" if translation is None else str(translation)
             display_term = self._strip_term_edge_punct(term) or term
+            display_translation = self._compact_glossary_value(v_str, entry_max_chars)
 
             if self._term_appears_in_source(display_term, source_text):
-                in_source_lines.append(f"- {display_term} -> {v_str}")
+                in_source_lines.append(f"- {display_term} -> {display_translation}")
             else:
-                reference_lines.append(f"- {display_term} -> {v_str}")
+                reference_lines.append(f"- {display_term} -> {display_translation}")
 
         if not in_source_lines and not reference_lines:
             return ""
@@ -352,3 +359,10 @@ class PromptBuilder:
         stripped = term.strip()
         stripped = self._TERM_EDGE_PUNCT_RE.sub("", stripped)
         return stripped
+
+    def _compact_glossary_value(self, value: str, max_chars: int) -> str:
+        text = self._text_analyzer.normalize_text(value)
+        text = re.sub(r"\s+", " ", text).strip()
+        if len(text) <= max_chars:
+            return text
+        return text[:max_chars].rstrip() + "…"

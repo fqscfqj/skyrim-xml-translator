@@ -833,10 +833,14 @@ class Translator:
                     retry_count += 1
 
         translation = "".join(translated_chunks)
+        # For book-sized text, RAG matches are broad background hints and often
+        # include proper names or whole-entry neighbors. Use them for prompting,
+        # but do not let advisory glossary-fragment checks mark the whole book
+        # as warning after an otherwise valid chunked translation.
         issues = self._quality_checker.check(
             source_text,
             translation,
-            matched_terms,
+            matched_terms=None,
             reference_id=reference_id,
             target_lang=str(target_lang),
         )

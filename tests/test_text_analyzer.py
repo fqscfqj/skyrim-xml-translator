@@ -142,6 +142,27 @@ class PromptBuilderGlossaryContextTests(unittest.TestCase):
         self.assertLessEqual(len(context), 120)
         self.assertIn("Dragon -> 龙", context)
 
+    def test_glossary_context_compacts_long_translation_values(self):
+        builder = PromptBuilder(
+            _DummyPromptManager(),
+            _DummyConfig({
+                ("rag", "glossary_context_max_chars"): 500,
+                ("rag", "glossary_entry_max_chars"): 60,
+            }),
+        )
+        matched_terms = {
+            "Reference": "第一段\n第二段 " + "很长" * 50,
+        }
+
+        context = builder.build_glossary_context("Reference appears.", matched_terms)
+
+        self.assertIn("Reference -> 第一段 第二段", context)
+        self.assertIn("…", context)
+        self.assertNotIn("\n第二段", context)
+        line = next(line for line in context.splitlines() if "Reference ->" in line)
+        value = line.split("->", 1)[1].strip()
+        self.assertLessEqual(len(value), 61)
+
 
 if __name__ == "__main__":
     unittest.main()
