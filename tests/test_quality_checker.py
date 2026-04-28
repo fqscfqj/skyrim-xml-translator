@@ -107,6 +107,43 @@ class QualityCheckerPlaceholderResidueTests(unittest.TestCase):
             issues,
         )
 
+    def test_relaxed_format_whitespace_accepts_only_whitespace_drift(self):
+        source = "Intro \n\n[pagebreak]\n<p align=\"left\">World</p>"
+        translation = "前言[pagebreak]\n<p align=\"left\">世界</p>"
+
+        strict_issues = self.checker.check(source, translation, target_lang="zh")
+        relaxed_issues = self.checker.check(
+            source,
+            translation,
+            target_lang="zh",
+            strict_format_whitespace=False,
+        )
+
+        self.assertTrue(
+            any(issue.rule_id == "protected_token_sequence" for issue in strict_issues),
+            strict_issues,
+        )
+        self.assertFalse(
+            any(issue.rule_id == "protected_token_sequence" for issue in relaxed_issues),
+            relaxed_issues,
+        )
+
+    def test_relaxed_format_whitespace_still_rejects_missing_pagebreak(self):
+        source = "Intro \n\n[pagebreak]\n<p align=\"left\">World</p>"
+        translation = "前言\n<p align=\"left\">世界</p>"
+
+        issues = self.checker.check(
+            source,
+            translation,
+            target_lang="zh",
+            strict_format_whitespace=False,
+        )
+
+        self.assertTrue(
+            any(issue.rule_id == "protected_token_sequence" for issue in issues),
+            issues,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

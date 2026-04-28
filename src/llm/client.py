@@ -182,7 +182,9 @@ class LLMClient:
             if value is not None:
                 final_params[key] = value
 
-        for key in ("temperature", "top_p", "frequency_penalty", "presence_penalty", "max_tokens"):
+        for key in (
+            "temperature", "top_p", "frequency_penalty", "presence_penalty",
+            "max_tokens", "enable_thinking", "reasoning_effort"):
             value = overrides.get(key)
             if value is not None:
                 final_params[key] = value
@@ -287,7 +289,8 @@ class LLMClient:
 
     def chat_completion(self, messages, temperature=None, top_p=None,
                         frequency_penalty=None, presence_penalty=None,
-                        max_tokens=None, log_callback=None) -> str:
+                        max_tokens=None, log_callback=None,
+                        enable_thinking=None, reasoning_effort=None) -> str:
         """LLM 对话补全"""
         return self._call(
             client=self.llm_client,
@@ -299,6 +302,8 @@ class LLMClient:
                 "frequency_penalty": frequency_penalty,
                 "presence_penalty": presence_penalty,
                 "max_tokens": max_tokens,
+                "enable_thinking": enable_thinking,
+                "reasoning_effort": reasoning_effort,
             },
             log_callback=log_callback,
             operation="translate",
@@ -307,6 +312,7 @@ class LLMClient:
     def chat_completion_search(self, messages, temperature=None, top_p=None,
                                frequency_penalty=None, presence_penalty=None,
                                max_tokens=None, log_callback=None,
+                               enable_thinking=None, reasoning_effort=None,
                                operation: str = "search",
                                force_search_fallback: bool = False) -> str:
         """LLM 对话补全 (用于搜索/关键词提取)"""
@@ -328,6 +334,8 @@ class LLMClient:
                 "frequency_penalty": frequency_penalty,
                 "presence_penalty": presence_penalty,
                 "max_tokens": max_tokens,
+                "enable_thinking": enable_thinking,
+                "reasoning_effort": reasoning_effort,
             },
             log_callback=log_callback,
             operation=operation,

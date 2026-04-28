@@ -67,7 +67,8 @@ class GeneralConfig:
     log_file: str = "logs/app.log"
     long_text_chunking_enabled: bool = True
     long_text_chunk_threshold_chars: int = 4000
-    long_text_chunk_target_chars: int = 1800
+    long_text_chunk_target_chars: int = 8000
+    long_text_disable_thinking: bool = True
     short_text_batch_enabled: bool = False
     short_text_batch_max_chars: int = 50
     short_text_batch_size: int = 8

@@ -45,7 +45,8 @@ class QualityChecker:
     def check(self, source: str, translation: str,
               matched_terms: Optional[dict] = None,
               reference_id: Optional[str] = None,
-              target_lang: str = "zh") -> list[QualityIssue]:
+              target_lang: str = "zh",
+              strict_format_whitespace: bool = True) -> list[QualityIssue]:
         """Run quality checks and return a list of issues."""
         issues: list[QualityIssue] = []
         source_text = "" if source is None else str(source)
@@ -61,7 +62,11 @@ class QualityChecker:
                 details="Translation is empty",
                 rule_id="empty",
             ))
-            issues.extend(self._check_format_preservation(source_text, translation_text))
+            issues.extend(self._check_format_preservation(
+                source_text,
+                translation_text,
+                strict_whitespace=strict_format_whitespace,
+            ))
             return issues
 
         # Layer 1: Complete untranslated detection
@@ -88,7 +93,11 @@ class QualityChecker:
             issues.append(residue_issue)
 
         # Layer 3: Format preservation
-        format_issues = self._check_format_preservation(source_text, translation_text)
+        format_issues = self._check_format_preservation(
+            source_text,
+            translation_text,
+            strict_whitespace=strict_format_whitespace,
+        )
         issues.extend(format_issues)
 
         return issues
@@ -329,24 +338,28 @@ class QualityChecker:
 
     # --- Layer 3: Format preservation ---
 
-    def _check_format_preservation(self, source: str, translation: str) -> list[QualityIssue]:
+    def _check_format_preservation(self, source: str, translation: str,
+                                   strict_whitespace: bool = True) -> list[QualityIssue]:
         """Check that protected formatting tokens are preserved exactly."""
         issues = []
 
         source_format_tokens = self._text_analyzer.extract_protected_format_tokens(source)
         translation_format_tokens = self._text_analyzer.extract_protected_format_tokens(translation)
         if source_format_tokens != translation_format_tokens:
-            issues.append(QualityIssue(
-                issue_type=QualityIssueType.FORMAT_VIOLATION,
-                severity="error",
-                details=self._describe_token_sequence_mismatch(
-                    "Protected format sequence mismatch",
-                    source_format_tokens,
-                    translation_format_tokens,
-                ),
-                rule_id="protected_token_sequence",
-                fragments=self._collect_sequence_fragments(source_format_tokens, translation_format_tokens),
-            ))
+            source_non_space_tokens = self._drop_whitespace_tokens(source_format_tokens)
+            translation_non_space_tokens = self._drop_whitespace_tokens(translation_format_tokens)
+            if strict_whitespace or source_non_space_tokens != translation_non_space_tokens:
+                issues.append(QualityIssue(
+                    issue_type=QualityIssueType.FORMAT_VIOLATION,
+                    severity="error",
+                    details=self._describe_token_sequence_mismatch(
+                        "Protected format sequence mismatch",
+                        source_format_tokens,
+                        translation_format_tokens,
+                    ),
+                    rule_id="protected_token_sequence",
+                    fragments=self._collect_sequence_fragments(source_format_tokens, translation_format_tokens),
+                ))
 
         source_placeholders = self._text_analyzer.extract_placeholder_tokens(source)
         translation_placeholders = self._text_analyzer.extract_placeholder_tokens(translation)
@@ -364,6 +377,10 @@ class QualityChecker:
             ))
 
         return issues
+
+    @staticmethod
+    def _drop_whitespace_tokens(tokens: list[str]) -> list[str]:
+        return [token for token in tokens if not str(token).isspace()]
 
     @staticmethod
     def _collect_sequence_fragments(source_tokens: list[str], translation_tokens: list[str]) -> list[str]:
