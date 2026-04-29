@@ -20,11 +20,12 @@ class KeywordExtractor:
     _WHITESPACE_RE = re.compile(r"\s+")
     _WORD_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9'\-]*")
     _STRIP_PUNCT_RE = re.compile(r"^[^\w\u4e00-\u9fff]+|[^\w\u4e00-\u9fff]+$")
-    _KW_CACHE_VERSION = "kw_v16"
+    _KW_CACHE_VERSION = "kw_v17"
     _LOW_SIGNAL_SINGLE_TOKENS = frozenset({
         "honestly", "kinda", "kindof", "sorta", "sortof",
         "really", "actually", "basically", "seriously", "literally",
         "maybe", "perhaps", "probably", "hopefully",
+        "wow", "whoa", "woah",
     })
     _LOW_SIGNAL_LEADING_TOKENS = frozenset({
         "my", "your", "his", "her", "its", "our", "their",
@@ -744,15 +745,33 @@ class KeywordExtractor:
             if "'s " in kw or "\u2019s " in kw:
                 parts = self._POSSESSIVE_S_RE.split(kw, maxsplit=1)
                 if parts and parts[0].strip():
-                    processed.append(parts[0].strip())
+                    processed.append(self._strip_leading_possessive_keyword(parts[0].strip()))
             elif kw.endswith("'s") or kw.endswith("\u2019s"):
                 stem = kw[:-2].strip()
                 if stem:
-                    processed.append(stem)
+                    processed.append(self._strip_leading_possessive_keyword(stem))
             else:
-                processed.append(kw)
+                processed.append(self._strip_leading_possessive_keyword(kw))
 
         return self._deduplicate(processed)
+
+    def _strip_leading_possessive_keyword(self, keyword: str) -> str:
+        raw = (keyword or "").strip()
+        words = self._WORD_TOKEN_RE.findall(raw)
+        if len(words) != 2:
+            return raw
+        if words[0].lower() not in self._LOW_SIGNAL_LEADING_TOKENS:
+            return raw
+
+        candidate = words[1].strip()
+        normalized = self.glossary_manager.normalize_term_key(candidate)
+        if not normalized or " " in normalized:
+            return raw
+        if self.glossary_manager.lookup_normalized(normalized) is not None:
+            return candidate
+        if self.glossary_manager.is_signal_token(normalized):
+            return candidate
+        return raw
 
     def _deduplicate(self, keywords: list[str]) -> list[str]:
         seen: set[str] = set()
@@ -1078,9 +1097,26 @@ class KeywordExtractor:
 
     def _extract_proper_nouns_regex(self, text: str) -> list[str]:
         """Minimal fallback for extractor outages."""
-        matches = self._PROPER_NOUN_RE.findall(text)
         result = []
         seen: set[str] = set()
+
+        for token in self._WORD_TOKEN_RE.findall(text or ""):
+            token_norm = self.glossary_manager.normalize_term_key(token)
+            if not token_norm or " " in token_norm:
+                continue
+            if len(token_norm) < 3:
+                continue
+            if token_norm in self.glossary_manager._COMMON_WORDS:
+                continue
+            direct_glossary_hit = self.glossary_manager.lookup_normalized(token_norm) is not None
+            if not direct_glossary_hit and not self.glossary_manager.is_signal_token(token_norm):
+                continue
+            if token_norm in seen:
+                continue
+            seen.add(token_norm)
+            result.append(token)
+
+        matches = self._PROPER_NOUN_RE.findall(text)
         for word in matches:
             lw = word.lower()
             if lw in self.glossary_manager._COMMON_WORDS:

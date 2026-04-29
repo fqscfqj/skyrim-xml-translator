@@ -23,6 +23,7 @@ class RAGSearcher:
         "honestly", "kinda", "kindof", "sorta", "sortof",
         "really", "actually", "basically", "seriously", "literally",
         "maybe", "perhaps", "probably", "hopefully",
+        "wow", "whoa", "woah",
     })
     _LOW_SIGNAL_LEADING_TOKENS = frozenset({
         "my", "your", "his", "her", "its", "our", "their",
