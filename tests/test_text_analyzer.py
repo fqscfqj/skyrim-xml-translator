@@ -104,6 +104,15 @@ class TextAnalyzerPercentProtectionTests(unittest.TestCase):
                 self.assertEqual([], self.analyzer.extract_placeholder_tokens(source))
                 self.assertEqual([], self.analyzer.extract_protected_format_tokens(source))
 
+    def test_parenthesized_stage_direction_is_not_frozen_as_format_token(self):
+        source = "(Take her virginity)"
+
+        shell = self.assert_round_trips(source)
+
+        self.assertEqual([], self.non_space_tokens(shell.tokens))
+        self.assertEqual([], self.analyzer.extract_placeholder_tokens(source))
+        self.assertEqual([], self.analyzer.extract_protected_format_tokens(source))
+
     def test_chunk_text_preserves_content_and_respects_limit(self):
         source = (
             "First sentence stays together. Second sentence can split here.\n\n"

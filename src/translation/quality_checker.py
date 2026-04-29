@@ -37,6 +37,16 @@ class QualityChecker:
     )
     _WHITESPACE_RE = re.compile(r"\s+")
     _ALLOW_CONNECTORS = {"of", "the", "and", "de", "la", "du", "da"}
+    _OUTER_WRAPPER_GROUPS = (
+        ("paren", (("(", ")"), ("（", "）"))),
+        ("square", (("[", "]"), ("【", "】"))),
+        ("quote", (("\"", "\""), ("'", "'"), ("“", "”"), ("‘", "’"), ("「", "」"), ("『", "』"))),
+    )
+    _WRAPPER_GROUP_LABELS = {
+        "paren": "parentheses",
+        "square": "brackets",
+        "quote": "quotes",
+    }
 
     def __init__(self, latin_ratio_threshold: float = 2.0):
         self._text_analyzer = TextAnalyzer()
@@ -99,6 +109,13 @@ class QualityChecker:
             strict_whitespace=strict_format_whitespace,
         )
         issues.extend(format_issues)
+
+        wrapper_issue = self._check_paired_wrapper_preservation(
+            source_text,
+            translation_text,
+        )
+        if wrapper_issue:
+            issues.append(wrapper_issue)
 
         return issues
 
@@ -377,6 +394,115 @@ class QualityChecker:
             ))
 
         return issues
+
+    def _check_paired_wrapper_preservation(
+            self,
+            source: str,
+            translation: str) -> Optional[QualityIssue]:
+        """Ensure outer paired wrappers like () and quotes are not dropped.
+
+        The goal is structural preservation, not exact punctuation identity:
+        ASCII parentheses may become full-width Chinese parentheses, and English
+        quotes may become Chinese quote marks, but the outer wrapper sequence
+        must still exist when the source text is wrapped.
+        """
+        source_wrappers = self._extract_outer_wrapper_groups(source)
+        if not source_wrappers:
+            return None
+
+        translation_wrappers = self._extract_outer_wrapper_groups(translation)
+        if source_wrappers == translation_wrappers:
+            return None
+
+        expected = self._describe_wrapper_groups(source_wrappers)
+        actual = self._describe_wrapper_groups(translation_wrappers)
+        is_missing = (
+            not translation_wrappers
+            or (
+                len(translation_wrappers) < len(source_wrappers)
+                and source_wrappers[:len(translation_wrappers)] == translation_wrappers
+            )
+        )
+
+        if is_missing:
+            return QualityIssue(
+                issue_type=QualityIssueType.FORMAT_VIOLATION,
+                severity="error",
+                details=(
+                    f"Missing outer paired wrapper(s): expected {expected}, "
+                    f"got {actual}"
+                ),
+                rule_id="paired_wrapper_missing",
+            )
+
+        return QualityIssue(
+            issue_type=QualityIssueType.FORMAT_VIOLATION,
+            severity="error",
+            details=f"Outer paired wrapper mismatch: expected {expected}, got {actual}",
+            rule_id="paired_wrapper_mismatch",
+        )
+
+    def _extract_outer_wrapper_groups(self, text: str) -> list[str]:
+        remaining = self._wrapper_visible_text(text)
+        groups: list[str] = []
+
+        while remaining:
+            wrapper = self._detect_outer_wrapper(remaining)
+            if not wrapper:
+                break
+
+            group_id, open_ch, close_ch = wrapper
+            groups.append(group_id)
+            remaining = remaining[len(open_ch):len(remaining) - len(close_ch)].strip()
+
+        return groups
+
+    def _wrapper_visible_text(self, text: str) -> str:
+        if text is None:
+            return ""
+        return self._text_analyzer.strip_markup_and_placeholders(text).strip()
+
+    def _detect_outer_wrapper(self, text: str) -> Optional[tuple[str, str, str]]:
+        if not text or len(text) < 2:
+            return None
+
+        for group_id, pairs in self._OUTER_WRAPPER_GROUPS:
+            for open_ch, close_ch in pairs:
+                if self._has_outer_wrapper(text, open_ch, close_ch):
+                    return group_id, open_ch, close_ch
+
+        return None
+
+    @staticmethod
+    def _has_outer_wrapper(text: str, open_ch: str, close_ch: str) -> bool:
+        if not text or len(text) < len(open_ch) + len(close_ch):
+            return False
+        if not text.startswith(open_ch) or not text.endswith(close_ch):
+            return False
+        if open_ch == close_ch:
+            return len(text) >= len(open_ch) + len(close_ch)
+
+        depth = 0
+        last_index = len(text) - len(close_ch)
+        for idx, ch in enumerate(text):
+            if ch == open_ch:
+                depth += 1
+            elif ch == close_ch:
+                depth -= 1
+                if depth < 0:
+                    return False
+                if depth == 0 and idx != last_index:
+                    return False
+
+        return depth == 0
+
+    def _describe_wrapper_groups(self, groups: list[str]) -> str:
+        if not groups:
+            return "no outer wrapper"
+        return " -> ".join(
+            self._WRAPPER_GROUP_LABELS.get(group, group)
+            for group in groups
+        )
 
     @staticmethod
     def _drop_whitespace_tokens(tokens: list[str]) -> list[str]:

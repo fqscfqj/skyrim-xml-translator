@@ -3,6 +3,6 @@
     "generic": "上次结果存在质量问题，请重新翻译为{target_language}。要求：先理解整句含义再用自然地道的{target_language}重新表达，禁止逐词硬译；完整翻译不残留源语言词或源语言字母（包括单个字母）；保留所有标签和占位符；术语表仅作参考；忠实原文形式不扩写；仅输出 JSON：{\"translation\":\"...\"}。",
     "untranslated": "上次译文几乎未翻译，大量源语言词被保留。请完整翻译为{target_language}：先理解原文的真实含义（注意口语称呼、习语、俚语不可取字面义），然后用自然地道的{target_language}重新表达，不得残留源语言词或源语言字母（专有名词、通用缩写与占位符除外）。保留标签和占位符。仅输出 JSON：{\"translation\":\"...\"}。",
     "fragment_retention": "上次译文中以下片段仍保留了英文或源语言字母：{error_fragments}。请重新翻译为{target_language}：先理解这些词在语境中的实际含义，再用地道的{target_language}表达；不得出现百分号旁残留的单个源语言字母（如 % m 应译为完整含义而非保留字母），比较级形容词（more/faster/stronger/effective 等）必须完整译为目标语言。仅输出 JSON：{\"translation\":\"...\"}。",
-    "format_error": "上次译文破坏了格式壳：{error_details}。请重新翻译为{target_language}，严格保留所有标签、[pagebreak]、占位符和结构性空白；不要新增、删除、重排或修复任何标签/标记；若原文中出现形如 __FMT_*__ 的哨兵，必须原样保留并保持顺序完全一致。仅输出 JSON：{\"translation\":\"...\"}。"
+    "format_error": "上次译文破坏了格式壳：{error_details}。请重新翻译为{target_language}，严格保留所有标签、[pagebreak]、占位符、结构性空白，以及原文自带的外层括号/引号等成对结构；若原文整体被括号或引号包裹，译文也必须保留等价包裹结构（可用中文全角形式）；不要新增、删除、重排或修复任何标签/标记；若原文中出现形如 __FMT_*__ 的哨兵，必须原样保留并保持顺序完全一致。仅输出 JSON：{\"translation\":\"...\"}。"
   }
 }

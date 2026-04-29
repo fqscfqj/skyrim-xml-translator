@@ -145,5 +145,64 @@ class QualityCheckerPlaceholderResidueTests(unittest.TestCase):
         )
 
 
+class QualityCheckerPairedWrapperTests(unittest.TestCase):
+    def setUp(self):
+        self.checker = QualityChecker()
+
+    def assert_has_wrapper_error(self, source: str, translation: str, rule_id: str):
+        issues = self.checker.check(source, translation, target_lang="zh")
+        self.assertTrue(
+            any(
+                issue.rule_id == rule_id
+                and issue.severity == "error"
+                for issue in issues
+            ),
+            issues,
+        )
+
+    def assert_no_wrapper_error(self, source: str, translation: str):
+        issues = self.checker.check(source, translation, target_lang="zh")
+        self.assertFalse(
+            any(issue.rule_id.startswith("paired_wrapper_") for issue in issues),
+            issues,
+        )
+
+    def test_rejects_missing_parenthesis_wrapper(self):
+        source = "(Take her virginity)"
+        translation = "夺走她的初夜"
+
+        self.assert_has_wrapper_error(source, translation, "paired_wrapper_missing")
+
+    def test_accepts_full_width_parenthesis_wrapper(self):
+        source = "(Take her virginity)"
+        translation = "（夺走她的初夜）"
+
+        self.assert_no_wrapper_error(source, translation)
+
+    def test_rejects_missing_quote_wrapper(self):
+        source = '"Take her virginity"'
+        translation = "夺走她的初夜"
+
+        self.assert_has_wrapper_error(source, translation, "paired_wrapper_missing")
+
+    def test_accepts_chinese_quote_wrapper(self):
+        source = '"Take her virginity"'
+        translation = "“夺走她的初夜”"
+
+        self.assert_no_wrapper_error(source, translation)
+
+    def test_nested_wrappers_must_all_be_preserved(self):
+        source = '"(Take her virginity)"'
+        translation = "“夺走她的初夜”"
+
+        self.assert_has_wrapper_error(source, translation, "paired_wrapper_missing")
+
+    def test_unwrapped_source_does_not_trigger_false_positive(self):
+        source = "Take her virginity"
+        translation = "夺走她的初夜"
+
+        self.assert_no_wrapper_error(source, translation)
+
+
 if __name__ == "__main__":
     unittest.main()
