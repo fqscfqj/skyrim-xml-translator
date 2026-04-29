@@ -77,12 +77,17 @@ class StatusSegmentedProgressBar(QProgressBar):
         if rect.width() <= 0 or rect.height() <= 0:
             return
 
+        is_dark = self.palette().color(self.backgroundRole()).lightness() < 128
+        bg_color = QColor("#2b2d30") if is_dark else self.BACKGROUND_COLOR
+        border_color = QColor("#4a4e5a") if is_dark else self.BORDER_COLOR
+        text_color = QColor("#cdd3de") if is_dark else self.TEXT_COLOR
+
         radius = min(4.0, rect.height() / 2.0)
         rect_f = QRectF(rect)
         frame_path = QPainterPath()
         frame_path.addRoundedRect(rect_f, radius, radius)
 
-        painter.fillPath(frame_path, self.BACKGROUND_COLOR)
+        painter.fillPath(frame_path, bg_color)
 
         progress_width = self._progress_width(rect.width())
         if progress_width > 0:
@@ -93,11 +98,11 @@ class StatusSegmentedProgressBar(QProgressBar):
                 self._paint_segments(painter, rect_f, progress_width, processed_count)
                 painter.restore()
 
-        painter.setPen(self.BORDER_COLOR)
+        painter.setPen(border_color)
         painter.drawPath(frame_path)
 
         if self.isTextVisible():
-            painter.setPen(self.TEXT_COLOR)
+            painter.setPen(text_color)
             painter.drawText(rect, int(Qt.AlignmentFlag.AlignCenter), self.text())
 
     def _progress_width(self, total_width: int) -> int:
@@ -717,17 +722,31 @@ class LogHighlighter(QSyntaxHighlighter):
 
     def __init__(self, parent):
         super().__init__(parent)
+        is_dark = QGuiApplication.palette().window().color().lightness() < 128
+        self._build_formats(is_dark)
+
+    def _build_formats(self, is_dark: bool) -> None:
+        ts_color = "#8a9ba8" if is_dark else "#7f8c8d"
+        dbg_color = "#7a8799" if is_dark else "#7f8c8d"
+        info_color = "#4ec9b0" if is_dark else "#1f9d8b"
+        warn_color = "#e9a83a" if is_dark else "#d17b0f"
+        err_color = "#f47b78" if is_dark else "#c0392b"
+
         self._timestamp_format = QTextCharFormat()
-        self._timestamp_format.setForeground(QColor("#7f8c8d"))
+        self._timestamp_format.setForeground(QColor(ts_color))
 
         self._level_formats: dict[str, QTextCharFormat] = {}
-        self._level_formats["DEBUG"] = self._build_level_format("#7f8c8d", bold=False)
-        self._level_formats["INFO"] = self._build_level_format("#1f9d8b", bold=False)
-        self._level_formats["WARNING"] = self._build_level_format("#d17b0f", bold=False)
-        self._level_formats["ERROR"] = self._build_level_format("#c0392b", bold=True)
+        self._level_formats["DEBUG"] = self._build_level_format(dbg_color, bold=False)
+        self._level_formats["INFO"] = self._build_level_format(info_color, bold=False)
+        self._level_formats["WARNING"] = self._build_level_format(warn_color, bold=False)
+        self._level_formats["ERROR"] = self._build_level_format(err_color, bold=True)
 
         self._error_continuation_format = QTextCharFormat()
-        self._error_continuation_format.setForeground(QColor("#c0392b"))
+        self._error_continuation_format.setForeground(QColor(err_color))
+
+    def update_colors(self, is_dark: bool) -> None:
+        self._build_formats(is_dark)
+        self.rehighlight()
 
     @staticmethod
     def _build_level_format(color: str, bold: bool) -> QTextCharFormat:
@@ -1653,7 +1672,7 @@ class MainWindow(QMainWindow):
             QEvent.Type.PaletteChange,
             QEvent.Type.ApplicationPaletteChange,
         ):
-            self._apply_config_tab_style_sheet()
+            self._apply_dynamic_styles()
 
     def _is_dark_palette(self) -> bool:
         return self.palette().color(self.backgroundRole()).lightness() < 128
@@ -1663,6 +1682,23 @@ class MainWindow(QMainWindow):
             self.config_tab_container.setStyleSheet(
                 self._get_config_tab_style_sheet(self._is_dark_palette())
             )
+
+    def _update_summary_title_style(self) -> None:
+        if not hasattr(self, "_status_summary_title_label") or self._status_summary_title_label is None:
+            return
+        is_dark = self._is_dark_palette()
+        color = "#8fa8c0" if is_dark else "#455A64"
+        self._status_summary_title_label.setStyleSheet(f"font-weight: 600; color: {color};")
+
+    def _apply_dynamic_styles(self) -> None:
+        self._apply_config_tab_style_sheet()
+        self._update_summary_title_style()
+        self._update_status_filter_bubble_styles()
+        if hasattr(self, "row_status_map"):
+            for row in range(getattr(self, "trans_table", None) and self.trans_table.rowCount() or 0):
+                self._apply_row_status_style(row)
+        if self._log_highlighter is not None:
+            self._log_highlighter.update_colors(self._is_dark_palette())
 
     def closeEvent(self, a0: Optional[QCloseEvent]) -> None:
         """Handle window close event to properly cleanup threads"""
@@ -1848,9 +1884,9 @@ class MainWindow(QMainWindow):
         summary_layout.setContentsMargins(0, 0, 0, 0)
         summary_layout.setSpacing(8)
 
-        summary_title = QLabel(i18n.t("label_status_summary"))
-        summary_title.setStyleSheet("font-weight: 600; color: #455A64;")
-        summary_layout.addWidget(summary_title)
+        self._status_summary_title_label = QLabel(i18n.t("label_status_summary"))
+        self._update_summary_title_style()
+        summary_layout.addWidget(self._status_summary_title_label)
 
         self.status_summary_total_label = StatusFilterBubbleLabel("all")
         self.status_summary_total_label.clicked.connect(self._on_status_filter_bubble_clicked)
@@ -1922,28 +1958,53 @@ class MainWindow(QMainWindow):
             self._refresh_status_summary_labels()
 
     def _get_status_filter_bubble_style(self, status: str, selected: bool) -> str:
-        style_map = {
-            "all": {
-                "normal": ("#CFD8DC", "#ECEFF1", "#37474F", "#90A4AE"),
-                "selected": ("#78909C", "#DDE5EA", "#263238", "#607D8B"),
-            },
-            self.ROW_STATUS_UNTRANSLATED: {
-                "normal": ("#CFD8DC", "#F5F5F5", "#455A64", "#90A4AE"),
-                "selected": ("#78909C", "#E0E0E0", "#263238", "#607D8B"),
-            },
-            self.ROW_STATUS_WARNING: {
-                "normal": ("#FDD835", "#FFF9C4", "#795548", "#F9A825"),
-                "selected": ("#F9A825", "#FFEEA5", "#5D4037", "#F57F17"),
-            },
-            self.ROW_STATUS_FAILED: {
-                "normal": ("#EF9A9A", "#FFEBEE", "#C62828", "#E57373"),
-                "selected": ("#E57373", "#FFD7DB", "#B71C1C", "#D32F2F"),
-            },
-            self.ROW_STATUS_SUCCESS: {
-                "normal": ("#A5D6A7", "#E8F5E9", "#2E7D32", "#66BB6A"),
-                "selected": ("#81C784", "#D0ECD3", "#1B5E20", "#43A047"),
-            },
-        }
+        is_dark = self._is_dark_palette()
+        if is_dark:
+            style_map = {
+                "all": {
+                    "normal": ("#4a5568", "#2d3340", "#a8b4c8", "#6b7fa0"),
+                    "selected": ("#6b82a8", "#353d50", "#d0daea", "#8aa0c8"),
+                },
+                self.ROW_STATUS_UNTRANSLATED: {
+                    "normal": ("#4a5568", "#252b36", "#98a8bc", "#6b7fa0"),
+                    "selected": ("#6b82a8", "#2e3645", "#c8d4e4", "#8aa0c8"),
+                },
+                self.ROW_STATUS_WARNING: {
+                    "normal": ("#b8960a", "#2a2500", "#e0c060", "#d4aa30"),
+                    "selected": ("#d4aa30", "#332c00", "#f0d070", "#e8c040"),
+                },
+                self.ROW_STATUS_FAILED: {
+                    "normal": ("#a03030", "#2e1010", "#e89090", "#c04040"),
+                    "selected": ("#c04040", "#381414", "#f0a0a0", "#d45050"),
+                },
+                self.ROW_STATUS_SUCCESS: {
+                    "normal": ("#2a6e30", "#102010", "#80c888", "#3a8a42"),
+                    "selected": ("#3a8a42", "#142814", "#98d8a0", "#4aaa54"),
+                },
+            }
+        else:
+            style_map = {
+                "all": {
+                    "normal": ("#CFD8DC", "#ECEFF1", "#37474F", "#90A4AE"),
+                    "selected": ("#78909C", "#DDE5EA", "#263238", "#607D8B"),
+                },
+                self.ROW_STATUS_UNTRANSLATED: {
+                    "normal": ("#CFD8DC", "#F5F5F5", "#455A64", "#90A4AE"),
+                    "selected": ("#78909C", "#E0E0E0", "#263238", "#607D8B"),
+                },
+                self.ROW_STATUS_WARNING: {
+                    "normal": ("#FDD835", "#FFF9C4", "#795548", "#F9A825"),
+                    "selected": ("#F9A825", "#FFEEA5", "#5D4037", "#F57F17"),
+                },
+                self.ROW_STATUS_FAILED: {
+                    "normal": ("#EF9A9A", "#FFEBEE", "#C62828", "#E57373"),
+                    "selected": ("#E57373", "#FFD7DB", "#B71C1C", "#D32F2F"),
+                },
+                self.ROW_STATUS_SUCCESS: {
+                    "normal": ("#A5D6A7", "#E8F5E9", "#2E7D32", "#66BB6A"),
+                    "selected": ("#81C784", "#D0ECD3", "#1B5E20", "#43A047"),
+                },
+            }
         spec = style_map.get(status, style_map["all"])
         border_color, background_color, text_color, hover_border_color = spec["selected" if selected else "normal"]
         border_width = "2px" if selected else "1px"
@@ -2059,14 +2120,25 @@ class MainWindow(QMainWindow):
 
     def _apply_row_status_style(self, row: int) -> None:
         status = self.row_status_map.get(row, self.ROW_STATUS_UNTRANSLATED)
-        if status == self.ROW_STATUS_SUCCESS:
-            color = QColor("#E8F5E9")
-        elif status == self.ROW_STATUS_WARNING:
-            color = QColor("#FFF9C4")
-        elif status == self.ROW_STATUS_FAILED:
-            color = QColor("#FFEBEE")
+        is_dark = self._is_dark_palette()
+        if is_dark:
+            if status == self.ROW_STATUS_SUCCESS:
+                color = QColor("#1a3320")
+            elif status == self.ROW_STATUS_WARNING:
+                color = QColor("#2e2800")
+            elif status == self.ROW_STATUS_FAILED:
+                color = QColor("#321010")
+            else:
+                color = QColor("#1e2228")
         else:
-            color = QColor("#F5F5F5")
+            if status == self.ROW_STATUS_SUCCESS:
+                color = QColor("#E8F5E9")
+            elif status == self.ROW_STATUS_WARNING:
+                color = QColor("#FFF9C4")
+            elif status == self.ROW_STATUS_FAILED:
+                color = QColor("#FFEBEE")
+            else:
+                color = QColor("#F5F5F5")
 
         error_text = self.row_error_map.get(row, "")
         for col in range(self.trans_table.columnCount()):
