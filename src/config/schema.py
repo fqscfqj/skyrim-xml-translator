@@ -12,6 +12,7 @@ class LLMConfig:
     max_retries: int = 3
     backoff_base: float = 0.5
     stream: bool = False
+    json_response_format_enabled: bool = True
     request_timeout: int = 30
     request_timeout_step: int = 15
     request_timeout_max: int = 180

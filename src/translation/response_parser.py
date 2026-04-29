@@ -26,7 +26,14 @@ class ResponseParser:
     def parse(self, response: str, original_text: str, messages: list,
               llm_client=None, log_callback: Optional[Callable] = None) -> str:
         """Parse translation from LLM response. Handles JSON, plain text, and recovery."""
-        clean_response = self._MARKDOWN_CODE_RE.sub("", response).strip()
+        response_text = "" if response is None else str(response)
+        clean_response = self._MARKDOWN_CODE_RE.sub("", response_text).strip()
+
+        if not clean_response:
+            log_emit(log_callback, self.config, "WARNING",
+                     "Empty JSON response content",
+                     module="response_parser", func="parse")
+            return ""
 
         if self._looks_like_broken_json_fragment(clean_response):
             log_emit(log_callback, self.config, "WARNING",
@@ -44,59 +51,64 @@ class ResponseParser:
             pass
 
         # Accept valid leading JSON even when extra explanatory text is appended.
-        data = self._try_parse_first_json_object(clean_response)
+        data = self._try_parse_first_json_object(clean_response, required_keys=("translation",))
         found, translation = self._extract_translation_value(data)
         if found:
             return translation
 
         # Try extracting JSON substring
-        data = self._try_parse_first_json_object(response)
+        data = self._try_parse_first_json_object(response_text, required_keys=("translation",))
         found, translation = self._extract_translation_value(data)
         if found:
             return translation
 
-        log_emit(log_callback, self.config, "WARNING",
-                 f"JSON Parse Error. Response: {response}",
-                 module="response_parser", func="parse")
-
         # Try relaxed JSON extraction (trailing commas, single quotes, bare KV)
-        result = self._try_relaxed_json_extract(response, log_callback)
+        result = self._try_relaxed_json_extract(response_text, log_callback)
         if result is not None:
             return result
 
         # Try asking LLM to reformat as JSON
         if llm_client:
-            result = self._try_followup_reformat(response, messages, llm_client, log_callback)
+            result = self._try_followup_reformat(response_text, messages, llm_client, log_callback)
             if result is not None:
                 return result
 
         # Plain text fallback
-        result = self._try_plain_text_fallback(response)
+        result = self._try_plain_text_fallback(response_text)
         if result is not None:
             return result
 
-        return str(response.strip())
+        log_emit(log_callback, self.config, "WARNING",
+                 f"JSON Parse Error. Response: {response_text}",
+                 module="response_parser", func="parse")
+
+        return response_text.strip()
 
     def parse_batch(self, response: str,
                     log_callback: Optional[Callable] = None) -> Optional[dict[int, str]]:
         """Parse batch translation response into {item_id: translation}."""
-        clean_response = self._MARKDOWN_CODE_RE.sub("", response).strip()
+        response_text = "" if response is None else str(response)
+        clean_response = self._MARKDOWN_CODE_RE.sub("", response_text).strip()
         data = None
         try:
             data = json.loads(clean_response)
         except json.JSONDecodeError:
             data = self._try_parse_first_json_object(clean_response)
+            if data is None:
+                data = self._try_parse_first_json_array(clean_response)
 
         if data is None:
-            data = self._try_parse_first_json_object(response)
+            data = self._try_parse_first_json_object(response_text)
+            if data is None:
+                data = self._try_parse_first_json_array(response_text)
 
-        if not isinstance(data, dict):
+        if not isinstance(data, (dict, list)):
             log_emit(log_callback, self.config, "WARNING",
-                     f"Batch JSON parse error. Response: {response}",
+                     f"Batch JSON parse error. Response: {response_text}",
                      module="response_parser", func="parse_batch")
             return None
 
-        raw_items = data.get("translations")
+        raw_items = data if isinstance(data, list) else data.get("translations")
         parsed: dict[int, str] = {}
 
         if isinstance(raw_items, list):
@@ -121,7 +133,7 @@ class ResponseParser:
                 if isinstance(value, dict):
                     value = value.get("translation", "")
                 parsed[item_id] = "" if value is None else str(value)
-        else:
+        elif isinstance(data, dict):
             # Accept {"0":"...", "1":"..."} as a compact fallback.
             for raw_id, value in data.items():
                 try:
@@ -134,7 +146,7 @@ class ResponseParser:
 
         if not parsed:
             log_emit(log_callback, self.config, "WARNING",
-                     f"Batch response did not contain translations: {response}",
+                     f"Batch response did not contain translations: {response_text}",
                      module="response_parser", func="parse_batch")
             return None
         return parsed
@@ -153,19 +165,27 @@ class ResponseParser:
         return False
 
     @staticmethod
-    def _try_parse_first_json_object(text: str) -> Optional[dict]:
+    def _try_parse_first_json_object(text: str,
+                                     required_keys: Optional[tuple[str, ...]] = None) -> Optional[dict]:
         """Parse the first valid JSON object from text, ignoring trailing content."""
         if not text:
             return None
 
         decoder = json.JSONDecoder()
 
+        def _matches(parsed: object) -> bool:
+            if not isinstance(parsed, dict):
+                return False
+            if not required_keys:
+                return True
+            return any(key in parsed for key in required_keys)
+
         # Fast path: string starts with JSON object.
         compact = text.lstrip()
         if compact.startswith("{"):
             try:
                 parsed, _ = decoder.raw_decode(compact)
-                if isinstance(parsed, dict):
+                if _matches(parsed):
                     return parsed
             except json.JSONDecodeError:
                 pass
@@ -174,7 +194,34 @@ class ResponseParser:
         for match in re.finditer(r"\{", text):
             try:
                 parsed, _ = decoder.raw_decode(text[match.start():])
-                if isinstance(parsed, dict):
+                if _matches(parsed):
+                    return parsed
+            except json.JSONDecodeError:
+                continue
+
+        return None
+
+    @staticmethod
+    def _try_parse_first_json_array(text: str) -> Optional[list]:
+        """Parse the first valid JSON array from text, ignoring trailing content."""
+        if not text:
+            return None
+
+        decoder = json.JSONDecoder()
+
+        compact = text.lstrip()
+        if compact.startswith("["):
+            try:
+                parsed, _ = decoder.raw_decode(compact)
+                if isinstance(parsed, list):
+                    return parsed
+            except json.JSONDecodeError:
+                pass
+
+        for match in re.finditer(r"\[", text):
+            try:
+                parsed, _ = decoder.raw_decode(text[match.start():])
+                if isinstance(parsed, list):
                     return parsed
             except json.JSONDecodeError:
                 continue

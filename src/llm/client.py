@@ -55,6 +55,43 @@ class LLMClient:
                     pass
 
     @staticmethod
+    def _coerce_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in ("1", "true", "yes", "on", "enabled"):
+                return True
+            if normalized in ("0", "false", "no", "off", "disabled"):
+                return False
+        return default
+
+    @staticmethod
+    def _is_response_format_rejection(exc: Exception) -> bool:
+        status_code = getattr(exc, "status_code", None)
+        try:
+            if status_code is not None and int(status_code) not in (400, 422):
+                return False
+        except Exception:
+            pass
+
+        parts = [str(exc or "")]
+        body = getattr(exc, "body", None)
+        if body is not None:
+            parts.append(str(body))
+        message = "\n".join(parts).lower()
+        return any(marker in message for marker in (
+            "response_format",
+            "json_object",
+            "json mode",
+            "json output",
+        ))
+
+    @staticmethod
     def _usage_to_dict(usage: Any) -> dict[str, Any]:
         if usage is None:
             return {}
@@ -189,6 +226,16 @@ class LLMClient:
             if value is not None:
                 final_params[key] = value
 
+        json_response_format_enabled = self._coerce_bool(
+            self.config.get(config_section, "json_response_format_enabled", True),
+            default=True,
+        )
+        if (config_section == "llm"
+                and operation == "translate"
+                and json_response_format_enabled
+                and "response_format" not in final_params):
+            final_params["response_format"] = {"type": "json_object"}
+
         request_args = {"model": model, "messages": messages}
         # Some OpenAI-compatible providers support non-standard fields.
         # Known standard kwargs accepted by the OpenAI SDK at top level;
@@ -232,6 +279,7 @@ class LLMClient:
                  module="llm_client", func="_call")
 
         attempt_counter = {"count": 0}
+        response_format_fallback = {"used": False}
 
         def do_call():
             attempt_counter["count"] += 1
@@ -246,7 +294,21 @@ class LLMClient:
 
             call_args = dict(request_args)
             call_args["timeout"] = call_timeout
-            response = client.chat.completions.create(**call_args)
+            try:
+                response = client.chat.completions.create(**call_args)
+            except Exception as exc:
+                if (call_args.get("response_format") is not None
+                        and not response_format_fallback["used"]
+                        and self._is_response_format_rejection(exc)):
+                    response_format_fallback["used"] = True
+                    request_args.pop("response_format", None)
+                    call_args.pop("response_format", None)
+                    log_emit(callback, self.config, "WARNING",
+                             "Provider rejected response_format; retrying without JSON response format",
+                             module="llm_client", func="_call")
+                    response = client.chat.completions.create(**call_args)
+                else:
+                    raise
             usage_stats = self._extract_usage_stats(response)
 
             prompt_tokens = usage_stats.get("prompt_tokens")
@@ -276,7 +338,10 @@ class LLMClient:
                     response.usage.completion_tokens or 0,
                     operation,
                 )
-            return response.choices[0].message.content
+            content = response.choices[0].message.content
+            if content is None:
+                return ""
+            return content if isinstance(content, str) else str(content)
 
         return execute_with_retry(
             fn=do_call,
