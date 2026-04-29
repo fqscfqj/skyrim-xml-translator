@@ -1,5 +1,6 @@
 import re
 import unittest
+from typing import Any, cast
 
 import numpy as np
 
@@ -79,8 +80,8 @@ class RAGSearchSentenceLikeFilterTests(unittest.TestCase):
             short_term: "真实",
         })
         searcher = RAGSearcher(
-            _DummyVectorStore([sentence_term, short_term], [0.99, 0.95]),
-            glossary,
+            cast(Any, _DummyVectorStore([sentence_term, short_term], [0.99, 0.95])),
+            cast(Any, glossary),
             _DummyConfig({
                 ("rag", "keyword_weight_enabled"): False,
                 ("rag", "min_vector_score"): 0.0,
@@ -90,12 +91,15 @@ class RAGSearchSentenceLikeFilterTests(unittest.TestCase):
             _DummyLLMClient(),
         )
 
-        results, debug = searcher.search(
-            ["Real"],
-            source_text="The Real Barenziah walked through Riften.",
-            threshold=0.1,
-            top_k=5,
-            return_debug=True,
+        results, debug = cast(
+            tuple[dict[str, str], list[dict[str, Any]]],
+            searcher.search(
+                ["Real"],
+                source_text="The Real Barenziah walked through Riften.",
+                threshold=0.1,
+                top_k=5,
+                return_debug=True,
+            ),
         )
 
         self.assertNotIn(sentence_term, results)
@@ -107,8 +111,8 @@ class RAGSearchSentenceLikeFilterTests(unittest.TestCase):
         sentence_term = "So, it is real after all."
         glossary = _DummyGlossaryManager({sentence_term: "原来这一切是真的。"})
         searcher = RAGSearcher(
-            _DummyVectorStore([sentence_term], [0.99]),
-            glossary,
+            cast(Any, _DummyVectorStore([sentence_term], [0.99])),
+            cast(Any, glossary),
             _DummyConfig({
                 ("rag", "keyword_weight_enabled"): False,
                 ("rag", "min_vector_score"): 0.0,
@@ -118,16 +122,54 @@ class RAGSearchSentenceLikeFilterTests(unittest.TestCase):
             _DummyLLMClient(),
         )
 
-        results, debug = searcher.search(
-            [sentence_term],
-            source_text=sentence_term,
-            threshold=0.1,
-            top_k=5,
-            return_debug=True,
+        results, debug = cast(
+            tuple[dict[str, str], list[dict[str, Any]]],
+            searcher.search(
+                [sentence_term],
+                source_text=sentence_term,
+                threshold=0.1,
+                top_k=5,
+                return_debug=True,
+            ),
         )
 
         self.assertEqual(results[sentence_term], "原来这一切是真的。")
         self.assertEqual(debug[0]["sentence_like_filtered_count"], 0)
+
+
+class RAGSearchPluralDirectMatchTests(unittest.TestCase):
+    def test_plural_title_queries_resolve_to_singular_glossary_terms(self):
+        glossary = _DummyGlossaryManager({
+            "Thane": "武卫",
+            "Housecarl": "侍卫",
+        })
+        searcher = RAGSearcher(
+            cast(Any, _DummyVectorStore([], [])),
+            cast(Any, glossary),
+            _DummyConfig({
+                ("rag", "keyword_weight_enabled"): False,
+                ("rag", "min_vector_score"): 0.0,
+                ("rag", "short_term_max_results"): 5,
+                ("rag", "long_term_max_results"): 5,
+            }),
+            _DummyLLMClient(),
+        )
+
+        results, debug = cast(
+            tuple[dict[str, str], list[dict[str, Any]]],
+            searcher.search(
+                ["thanes", "housecarls"],
+                source_text="I wonder how many thanes have taken their housecarls for wives... hmmmm...",
+                threshold=0.1,
+                top_k=5,
+                return_debug=True,
+            ),
+        )
+
+        self.assertEqual(results["Thane"], "武卫")
+        self.assertEqual(results["Housecarl"], "侍卫")
+        self.assertEqual(debug[0]["direct_match"], "Thane")
+        self.assertEqual(debug[1]["direct_match"], "Housecarl")
 
 
 if __name__ == "__main__":

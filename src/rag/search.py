@@ -141,6 +141,50 @@ class RAGSearcher:
                 return t[:-len(suffix)]
         return t
 
+    def _build_query_lookup_variants(self, normalized_query: str) -> list[str]:
+        variants: list[str] = []
+        seen: set[str] = set()
+
+        def add(value: str) -> None:
+            normalized_value = self.glossary_manager.normalize_term_key(value)
+            if not normalized_value or normalized_value in seen:
+                return
+            seen.add(normalized_value)
+            variants.append(normalized_value)
+
+        add(normalized_query)
+
+        tokens = [t for t in normalized_query.split() if t]
+        if not tokens:
+            return variants
+
+        if len(tokens) == 1:
+            token = tokens[0]
+            stem = self._simple_stem_token(token)
+            if stem and stem != token:
+                add(stem)
+            if (
+                token.endswith("es")
+                and len(token) > 4
+                and not token.endswith(("ses", "xes", "zes", "ches", "shes"))
+            ):
+                add(token[:-1])
+            if token.endswith("ves") and len(token) > 4:
+                add(token[:-3] + "f")
+                add(token[:-3] + "fe")
+            return variants
+
+        stemmed_tokens: list[str] = []
+        changed = False
+        for token in tokens:
+            stem = self._simple_stem_token(token)
+            stemmed_tokens.append(stem or token)
+            if stem and stem != token:
+                changed = True
+        if changed:
+            add(" ".join(stemmed_tokens))
+        return variants
+
     def _build_signal_signature(self, text: str) -> set[str]:
         normalized = self.glossary_manager.normalize_term_key(text)
         if not normalized:
@@ -402,15 +446,20 @@ class RAGSearcher:
         normalized_query = self.glossary_manager.normalize_term_key(query)
         if not normalized_query:
             return None
-        candidate = self.glossary_manager.lookup_normalized(normalized_query)
-        if not candidate:
-            return None
+        lookup_variants = self._build_query_lookup_variants(normalized_query)
+        for lookup_key in lookup_variants:
+            candidate = self.glossary_manager.lookup_normalized(lookup_key)
+            if not candidate:
+                continue
 
-        # 3) Keep only if surface form matches or candidate appears in source.
-        if candidate.strip().lower() == query.strip().lower():
-            return candidate
-        if source_text and self._raw_term_appears_in_source(candidate, source_text):
-            return candidate
+            # 3) Keep only if surface form matches, candidate appears in source,
+            # or this is a morphology-derived fallback variant (e.g. thanes -> Thane).
+            if candidate.strip().lower() == query.strip().lower():
+                return candidate
+            if source_text and self._raw_term_appears_in_source(candidate, source_text):
+                return candidate
+            if lookup_key != normalized_query:
+                return candidate
         return None
 
     # --- Public API ---
