@@ -1282,8 +1282,22 @@ class RAGVisualizationDialog(QDialog):
                     vector_matches = query_result.get("vector_matches", [])
                     if vector_matches:
                         vector_node = self._create_tree_item(query_node, "Vector Matches")
+                        candidate_decisions = query_result.get("candidate_decisions", {})
+                        if not isinstance(candidate_decisions, dict):
+                            candidate_decisions = {}
                         for term, score in vector_matches:
-                            self._create_tree_item(vector_node, str(term), score=score, full_text=term)
+                            label = str(term)
+                            decision = candidate_decisions.get(label) or {}
+                            if isinstance(decision, dict):
+                                status = str(decision.get("status", "") or "")
+                                reason = str(decision.get("reason", "") or "")
+                                if status == "selected":
+                                    label += " [selected]"
+                                elif status == "accepted":
+                                    label += " [accepted]"
+                                elif status == "rejected" and reason:
+                                    label += f" [rejected: {reason}]"
+                            self._create_tree_item(vector_node, label, score=score, full_text=term)
                         vector_node.setExpanded(True)
                     
                     # 包含匹配
@@ -1470,11 +1484,30 @@ class RAGVisualizationDialog(QDialog):
                 vector_matches = qr.get("vector_matches", []) if isinstance(qr, dict) else []
                 if vector_matches:
                     lines.append("  Vector Matches:")
+                    candidate_decisions = qr.get("candidate_decisions", {}) if isinstance(qr, dict) else {}
+                    if not isinstance(candidate_decisions, dict):
+                        candidate_decisions = {}
                     for term, score in vector_matches:
+                        suffix = ""
+                        decision = candidate_decisions.get(str(term)) or {}
+                        if isinstance(decision, dict):
+                            status = str(decision.get("status", "") or "")
+                            reason = str(decision.get("reason", "") or "")
+                            if status == "selected":
+                                suffix = " [selected]"
+                            elif status == "accepted":
+                                suffix = " [accepted]"
+                            elif status == "rejected" and reason:
+                                suffix = f" [rejected: {reason}]"
                         try:
-                            lines.append(f"    - {term} ({float(score):.4f})")
+                            lines.append(f"    - {term} ({float(score):.4f}){suffix}")
                         except Exception:
-                            lines.append(f"    - {term} ({score})")
+                            lines.append(f"    - {term} ({score}){suffix}")
+
+                rejection_counts = qr.get("candidate_rejection_counts", {}) if isinstance(qr, dict) else {}
+                if isinstance(rejection_counts, dict) and rejection_counts:
+                    parts = [f"{reason}={count}" for reason, count in rejection_counts.items()]
+                    lines.append(f"  Rejection Summary: {', '.join(parts)}")
 
                 containment_matches = qr.get("containment_matches", []) if isinstance(qr, dict) else []
                 if containment_matches:

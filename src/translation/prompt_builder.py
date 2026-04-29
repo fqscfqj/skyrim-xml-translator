@@ -343,15 +343,53 @@ class PromptBuilder:
             return True
 
         if self._ALNUM_UNDERSCORE_RE.search(term_lower):
-            escaped = re.escape(term_lower)
-            pattern = escaped
-            if self._ALNUM_START_RE.match(term_lower):
-                pattern = r"(?<![a-z0-9_])" + pattern
-            if self._ALNUM_END_RE.search(term_lower):
-                pattern = pattern + r"(?![a-z0-9_])"
-            return re.search(pattern, src_lower) is not None
+            for variant in self._build_source_term_variants(term_lower):
+                escaped = re.escape(variant)
+                pattern = escaped
+                if self._ALNUM_START_RE.match(variant):
+                    pattern = r"(?<![a-z0-9_])" + pattern
+                if self._ALNUM_END_RE.search(variant):
+                    pattern = pattern + r"(?![a-z0-9_])"
+                if re.search(pattern, src_lower) is not None:
+                    return True
+            return False
 
         return term in src
+
+    def _build_source_term_variants(self, term_lower: str) -> list[str]:
+        variants: list[str] = []
+        seen: set[str] = set()
+
+        def add(value: str) -> None:
+            if not value or value in seen:
+                return
+            seen.add(value)
+            variants.append(value)
+
+        add(term_lower)
+
+        if not re.fullmatch(r"[a-z0-9_]+(?:\s+[a-z0-9_]+)*", term_lower):
+            return variants
+
+        parts = term_lower.split()
+        last = parts[-1]
+        plural_last_forms = []
+        if last.endswith("y") and len(last) > 1 and last[-2] not in "aeiou":
+            plural_last_forms.append(last[:-1] + "ies")
+        elif last.endswith(("s", "x", "z", "ch", "sh")):
+            plural_last_forms.append(last + "es")
+        elif last.endswith("fe"):
+            plural_last_forms.append(last[:-2] + "ves")
+        elif last.endswith("f"):
+            plural_last_forms.append(last[:-1] + "ves")
+        else:
+            plural_last_forms.append(last + "s")
+
+        for plural_last in plural_last_forms:
+            plural_parts = list(parts)
+            plural_parts[-1] = plural_last
+            add(" ".join(plural_parts))
+        return variants
 
     def _strip_term_edge_punct(self, term: str) -> str:
         if not term or not isinstance(term, str):

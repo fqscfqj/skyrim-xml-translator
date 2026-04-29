@@ -524,6 +524,9 @@ class RAGSearcher:
 
             query_selected_terms: list[str] = []
             source_boosted_terms: list[str] = []
+            candidate_decisions: Dict[str, Dict[str, Any]] = {}
+            candidate_rejections: list[Dict[str, Any]] = []
+            candidate_rejection_counts: Dict[str, int] = {}
             query_details: Dict[str, Any] = {
                 "query": query,
                 "task_limit": total_limit,
@@ -542,6 +545,11 @@ class RAGSearcher:
                 "sentence_like_filtered_count": 0,
                 "sentence_like_candidate_count": 0,
                 "source_boosted_terms": source_boosted_terms,
+                "candidate_decisions": candidate_decisions,
+                "candidate_rejections": candidate_rejections,
+                "candidate_rejection_counts": candidate_rejection_counts,
+                "threshold_filtered_terms": [],
+                "bucket_filtered_terms": [],
             }
             if debug_info is not None:
                 debug_info.append(query_details)
@@ -551,7 +559,50 @@ class RAGSearcher:
             sentence_like_candidate_terms: set[str] = set()
             sentence_like_filtered_count = 0
 
-            def add_candidate(term: str, score: float, apply_query_bonus: bool = True) -> bool:
+            def record_candidate_decision(term: str, score: float, status: str,
+                                          reason: str = "", canonical_term: str = "",
+                                          source: str = "") -> None:
+                if not term:
+                    return
+                key = str(term)
+                current = candidate_decisions.get(key)
+                if current and current.get("status") == "selected" and status != "selected":
+                    return
+                if (
+                    current
+                    and current.get("status") in ("accepted", "selected")
+                    and status == "rejected"
+                    and reason not in ("below_threshold", "bucket_limit")
+                ):
+                    return
+
+                decision: Dict[str, Any] = {"status": status}
+                if reason:
+                    decision["reason"] = reason
+                if canonical_term:
+                    decision["canonical_term"] = canonical_term
+                if source:
+                    decision["source"] = source
+                try:
+                    decision["score"] = float(score)
+                except Exception:
+                    decision["score"] = score
+                candidate_decisions[key] = decision
+
+            def sync_candidate_rejection_debug() -> None:
+                candidate_rejections.clear()
+                candidate_rejection_counts.clear()
+                for term, decision in candidate_decisions.items():
+                    if decision.get("status") != "rejected":
+                        continue
+                    reason = str(decision.get("reason", "unknown") or "unknown")
+                    candidate_rejection_counts[reason] = candidate_rejection_counts.get(reason, 0) + 1
+                    row = {"term": term}
+                    row.update(decision)
+                    candidate_rejections.append(row)
+
+            def add_candidate(term: str, score: float, apply_query_bonus: bool = True,
+                              candidate_source: str = "semantic") -> bool:
                 nonlocal sentence_like_filtered_count
                 if not term:
                     return False
@@ -560,16 +611,28 @@ class RAGSearcher:
                 if canonical_term is None:
                     canonical_term = term
                 if canonical_term not in self.glossary_manager.glossary:
+                    record_candidate_decision(
+                        term, score, "rejected", "not_in_glossary",
+                        canonical_term=canonical_term, source=candidate_source,
+                    )
                     return False
                 is_sentence_like = self._is_sentence_like_term(canonical_term)
                 if is_sentence_like:
                     sentence_like_candidate_terms.add(canonical_term)
                     if not self._raw_term_appears_in_source(canonical_term, source_text):
                         sentence_like_filtered_count += 1
+                        record_candidate_decision(
+                            term, score, "rejected", "sentence_like_not_in_source",
+                            canonical_term=canonical_term, source=candidate_source,
+                        )
                         return False
                 # For semantic candidates, require signal-token overlap with query
                 # to reduce unrelated high-similarity noise.
                 if score < 1.0 and not self._has_signal_overlap(query, canonical_term):
+                    record_candidate_decision(
+                        term, score, "rejected", "no_signal_overlap",
+                        canonical_term=canonical_term, source=candidate_source,
+                    )
                     return False
 
                 adjusted_score = score
@@ -589,6 +652,10 @@ class RAGSearcher:
                 prev_score = candidate_scores.get(canonical_term)
                 if prev_score is None or adjusted_score > prev_score:
                     candidate_scores[canonical_term] = adjusted_score
+                record_candidate_decision(
+                    term, adjusted_score, "accepted",
+                    canonical_term=canonical_term, source=candidate_source,
+                )
                 return True
 
             try:
@@ -605,7 +672,7 @@ class RAGSearcher:
                 if not skip_semantic_recall:
                     direct_term = self._resolve_direct_match_term(query, source_text)
                     if direct_term:
-                        add_candidate(direct_term, 1.2)
+                        add_candidate(direct_term, 1.2, candidate_source="direct")
                         if return_debug:
                             query_details["direct_match"] = direct_term
 
@@ -667,9 +734,9 @@ class RAGSearcher:
                     query_details["keyword_weighted_count"] = len(keyword_weighted_matches)
 
                 for term, score in semantic_matches:
-                    add_candidate(term, score)
+                    add_candidate(term, score, candidate_source="semantic")
                 for term, score in keyword_weighted_matches:
-                    add_candidate(term, score, apply_query_bonus=False)
+                    add_candidate(term, score, apply_query_bonus=False, candidate_source="keyword_weighted")
 
                 if return_debug:
                     query_details["sentence_like_filtered_count"] = sentence_like_filtered_count
@@ -690,6 +757,26 @@ class RAGSearcher:
                     for term, _score in ranked_candidates:
                         if term not in preselected_terms:
                             preselected_terms.append(term)
+                threshold_filtered_terms = [
+                    {
+                        "term": term,
+                        "score": float(score),
+                        "threshold": float(threshold),
+                    }
+                    for term, score in ranked_candidates
+                    if term not in preselected_terms
+                ]
+                if return_debug:
+                    query_details["threshold_filtered_terms"] = threshold_filtered_terms
+                for item in threshold_filtered_terms:
+                    record_candidate_decision(
+                        str(item["term"]),
+                        float(item["score"]),
+                        "rejected",
+                        "below_threshold",
+                        canonical_term=str(item["term"]),
+                        source="rank",
+                    )
 
                 limited_terms, selected_short_count, selected_long_count = self._apply_bucket_limits(
                     preselected_terms,
@@ -697,12 +784,33 @@ class RAGSearcher:
                     long_limit=long_limit,
                     short_term_max_chars=short_term_max_chars,
                 )
+                bucket_filtered_terms = [term for term in preselected_terms if term not in limited_terms]
+                if return_debug:
+                    query_details["bucket_filtered_terms"] = list(bucket_filtered_terms)
+                for term in bucket_filtered_terms:
+                    record_candidate_decision(
+                        term,
+                        candidate_scores.get(term, 0.0),
+                        "rejected",
+                        "bucket_limit",
+                        canonical_term=term,
+                        source="bucket",
+                    )
                 query_selected_terms.extend(limited_terms)
+                for term in limited_terms:
+                    record_candidate_decision(
+                        term,
+                        candidate_scores.get(term, 0.0),
+                        "selected",
+                        canonical_term=term,
+                        source="final",
+                    )
                 if return_debug:
                     query_details["selected_short_count"] = selected_short_count
                     query_details["selected_long_count"] = selected_long_count
                     query_details["long_terms_selected_count"] = selected_long_count
                     query_details["selected_total_count"] = len(limited_terms)
+                    sync_candidate_rejection_debug()
 
                 # 5) Add {term: translation} directly to results
                 for term in query_selected_terms:

@@ -5,6 +5,7 @@ from typing import Any, cast
 import numpy as np
 
 from src.rag.search import RAGSearcher
+from src.translation.prompt_builder import PromptBuilder
 
 
 class _DummyConfig:
@@ -13,6 +14,11 @@ class _DummyConfig:
 
     def get(self, section, key, default=None):
         return self._values.get((section, key), default)
+
+
+class _DummyPromptManager:
+    def get(self, _key, default=None):
+        return default
 
 
 class _DummyGlossaryManager:
@@ -106,6 +112,14 @@ class RAGSearchSentenceLikeFilterTests(unittest.TestCase):
         self.assertEqual(results[short_term], "真实")
         self.assertEqual(debug[0]["sentence_like_candidate_count"], 1)
         self.assertEqual(debug[0]["sentence_like_filtered_count"], 1)
+        self.assertEqual(
+            debug[0]["candidate_decisions"][sentence_term]["reason"],
+            "sentence_like_not_in_source",
+        )
+        self.assertEqual(
+            debug[0]["candidate_rejection_counts"]["sentence_like_not_in_source"],
+            1,
+        )
 
     def test_keeps_exact_sentence_candidate_that_appears_in_source(self):
         sentence_term = "So, it is real after all."
@@ -170,6 +184,87 @@ class RAGSearchPluralDirectMatchTests(unittest.TestCase):
         self.assertEqual(results["Housecarl"], "侍卫")
         self.assertEqual(debug[0]["direct_match"], "Thane")
         self.assertEqual(debug[1]["direct_match"], "Housecarl")
+
+
+class RAGSearchCandidateRejectionDebugTests(unittest.TestCase):
+    def test_records_no_signal_overlap_rejection_reason(self):
+        glossary = _DummyGlossaryManager({"Aloe Vera": "芦荟"})
+        searcher = RAGSearcher(
+            cast(Any, _DummyVectorStore(["Aloe Vera"], [0.96])),
+            cast(Any, glossary),
+            _DummyConfig({
+                ("rag", "keyword_weight_enabled"): False,
+                ("rag", "min_vector_score"): 0.0,
+                ("rag", "short_term_max_results"): 5,
+                ("rag", "long_term_max_results"): 5,
+            }),
+            _DummyLLMClient(),
+        )
+
+        results, debug = cast(
+            tuple[dict[str, str], list[dict[str, Any]]],
+            searcher.search(
+                ["Dragonborn"],
+                source_text="Dragonborn",
+                threshold=0.1,
+                top_k=5,
+                return_debug=True,
+            ),
+        )
+
+        self.assertEqual(results, {})
+        self.assertEqual(
+            debug[0]["candidate_decisions"]["Aloe Vera"]["reason"],
+            "no_signal_overlap",
+        )
+        self.assertEqual(debug[0]["candidate_rejection_counts"]["no_signal_overlap"], 1)
+
+    def test_records_stale_vector_candidate_not_in_glossary(self):
+        glossary = _DummyGlossaryManager({})
+        searcher = RAGSearcher(
+            cast(Any, _DummyVectorStore(["Removed Term"], [0.96])),
+            cast(Any, glossary),
+            _DummyConfig({
+                ("rag", "keyword_weight_enabled"): False,
+                ("rag", "min_vector_score"): 0.0,
+                ("rag", "short_term_max_results"): 5,
+                ("rag", "long_term_max_results"): 5,
+            }),
+            _DummyLLMClient(),
+        )
+
+        results, debug = cast(
+            tuple[dict[str, str], list[dict[str, Any]]],
+            searcher.search(
+                ["Removed"],
+                source_text="Removed",
+                threshold=0.1,
+                top_k=5,
+                return_debug=True,
+            ),
+        )
+
+        self.assertEqual(results, {})
+        self.assertEqual(
+            debug[0]["candidate_decisions"]["Removed Term"]["reason"],
+            "not_in_glossary",
+        )
+        self.assertEqual(debug[0]["candidate_rejection_counts"]["not_in_glossary"], 1)
+
+
+class PromptBuilderGlossaryContextTests(unittest.TestCase):
+    def test_plural_source_forms_count_as_in_source_terms(self):
+        builder = PromptBuilder(_DummyPromptManager(), _DummyConfig())
+
+        context = builder.build_glossary_context(
+            "I wonder how many thanes have taken their housecarls for wives... hmmmm...",
+            {"Thane": "武卫", "Housecarl": "侍卫"},
+        )
+
+        self.assertIn("命中术语（优先参考，按语义决定）", context)
+        self.assertIn("- Thane -> 武卫", context)
+        self.assertIn("- Housecarl -> 侍卫", context)
+        self.assertNotIn("参考术语（仅背景参考，禁止直接代入）", context)
 
 
 if __name__ == "__main__":
