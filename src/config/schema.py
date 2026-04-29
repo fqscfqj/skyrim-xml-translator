@@ -61,6 +61,7 @@ class GeneralConfig:
     log_level: str = "INFO"
     prompt_style: str = "default"
     language: str = "auto"
+    color_mode: str = "auto"
     source_language: str = "auto"
     target_language: str = "zh"
     mcm_output_language_suffix: str = "source"
