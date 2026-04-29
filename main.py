@@ -7,6 +7,7 @@ import tempfile
 import faulthandler
 from typing import Optional, TextIO
 from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtGui import QPalette, QColor
 from src.gui_main import MainWindow
 from src.logging_helper import emit as log_emit
 from src.config.manager import ConfigManager
@@ -14,6 +15,46 @@ from src.config.manager import ConfigManager
 
 _FAULT_LOG_STREAM: Optional[TextIO] = None
 
+
+def _build_dark_palette() -> QPalette:
+    """Construct a polished Fusion dark palette."""
+    pal = QPalette()
+    bg       = QColor("#1e2228")
+    mid_bg   = QColor("#252b35")
+    base     = QColor("#161a20")
+    text     = QColor("#dce3ec")
+    dim_text = QColor("#6e7a8a")
+    highlight     = QColor("#2f6fd4")
+    highlight_txt = QColor("#ffffff")
+    link          = QColor("#5ba3f5")
+    btn           = QColor("#2a2f3a")
+    btn_text      = QColor("#c8d4e4")
+    shadow        = QColor("#10131a")
+    mid_light     = QColor("#2a3040")
+
+    pal.setColor(QPalette.ColorRole.Window,          bg)
+    pal.setColor(QPalette.ColorRole.WindowText,      text)
+    pal.setColor(QPalette.ColorRole.Base,            base)
+    pal.setColor(QPalette.ColorRole.AlternateBase,   mid_bg)
+    pal.setColor(QPalette.ColorRole.ToolTipBase,     mid_bg)
+    pal.setColor(QPalette.ColorRole.ToolTipText,     text)
+    pal.setColor(QPalette.ColorRole.Text,            text)
+    pal.setColor(QPalette.ColorRole.Button,          btn)
+    pal.setColor(QPalette.ColorRole.ButtonText,      btn_text)
+    pal.setColor(QPalette.ColorRole.BrightText,      QColor("#ffffff"))
+    pal.setColor(QPalette.ColorRole.Link,            link)
+    pal.setColor(QPalette.ColorRole.Highlight,       highlight)
+    pal.setColor(QPalette.ColorRole.HighlightedText, highlight_txt)
+    pal.setColor(QPalette.ColorRole.Mid,             mid_bg)
+    pal.setColor(QPalette.ColorRole.Midlight,        mid_light)
+    pal.setColor(QPalette.ColorRole.Dark,            base)
+    pal.setColor(QPalette.ColorRole.Shadow,          shadow)
+    pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text,       dim_text)
+    pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, dim_text)
+    pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText, dim_text)
+    pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Highlight,  QColor("#2e3440"))
+    pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.HighlightedText, dim_text)
+    return pal
 
 def _resolve_configured_log_path(config_manager: Optional[ConfigManager]) -> Optional[str]:
     if not config_manager:
@@ -167,6 +208,10 @@ def main():
 
     # 设置样式
     app.setStyle("Fusion")
+
+    # Apply polished dark palette when the system is in dark mode
+    if app.palette().window().color().lightness() < 128:
+        app.setPalette(_build_dark_palette())
 
     window = MainWindow()
     window.show()

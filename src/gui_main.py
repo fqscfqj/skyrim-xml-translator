@@ -41,9 +41,9 @@ from src.i18n import i18n
 class StatusSegmentedProgressBar(QProgressBar):
     SEGMENT_ORDER = ("success", "warning", "failed")
     SEGMENT_COLORS = {
-        "success": QColor("#43A047"),
-        "warning": QColor("#FBC02D"),
-        "failed": QColor("#E53935"),
+        "success": QColor("#2ecc71"),
+        "warning": QColor("#f39c12"),
+        "failed": QColor("#e74c3c"),
     }
     BACKGROUND_COLOR = QColor("#F5F5F5")
     BORDER_COLOR = QColor("#B0BEC5")
@@ -1691,14 +1691,288 @@ class MainWindow(QMainWindow):
         self._status_summary_title_label.setStyleSheet(f"font-weight: 600; color: {color};")
 
     def _apply_dynamic_styles(self) -> None:
+        is_dark = self._is_dark_palette()
+        self.setStyleSheet(self._get_window_stylesheet(is_dark))
         self._apply_config_tab_style_sheet()
         self._update_summary_title_style()
         self._update_status_filter_bubble_styles()
         if hasattr(self, "row_status_map"):
-            for row in range(getattr(self, "trans_table", None) and self.trans_table.rowCount() or 0):
+            for row in range(self.trans_table.rowCount() if hasattr(self, "trans_table") else 0):
                 self._apply_row_status_style(row)
         if self._log_highlighter is not None:
             self._log_highlighter.update_colors(self._is_dark_palette())
+
+    @staticmethod
+    def _get_window_stylesheet(is_dark: bool) -> str:
+        if not is_dark:
+            return """
+            QTableWidget {
+                gridline-color: #dde2ea;
+                border: 1px solid #c8d0dc;
+                alternate-background-color: #f8fafc;
+            }
+            QTableWidget::item:selected {
+                background-color: #bbdefb;
+                color: #1a237e;
+            }
+            QHeaderView::section {
+                background-color: #eef2f7;
+                color: #37474f;
+                border: none;
+                border-right: 1px solid #d0d8e4;
+                border-bottom: 1px solid #d0d8e4;
+                padding: 4px 8px;
+                font-weight: 600;
+            }
+            QSplitter::handle {
+                background: #dde2ea;
+            }
+            """
+        return """
+        QTableWidget {
+            gridline-color: #2a3040;
+            border: 1px solid #2a3040;
+            background-color: #161a20;
+            alternate-background-color: #1c2028;
+            color: #dce3ec;
+        }
+        QTableWidget::item:selected {
+            background-color: #1d4a9a;
+            color: #e8f0fc;
+        }
+        QHeaderView::section {
+            background-color: #252b35;
+            color: #aab4c4;
+            border: none;
+            border-right: 1px solid #2a3040;
+            border-bottom: 1px solid #2a3040;
+            padding: 5px 8px;
+            font-weight: 600;
+        }
+        QTabWidget::pane {
+            border: 1px solid #2a3040;
+            background-color: #1e2228;
+        }
+        QTabBar::tab {
+            background-color: #181c22;
+            color: #7a8799;
+            padding: 7px 18px;
+            border: 1px solid #2a3040;
+            border-bottom: none;
+            margin-right: 2px;
+        }
+        QTabBar::tab:selected {
+            background-color: #1e2228;
+            color: #e0e8f8;
+            border-bottom: 2px solid #2f6fd4;
+        }
+        QTabBar::tab:hover:!selected {
+            background-color: #222830;
+            color: #b0bcd0;
+        }
+        QPushButton {
+            border: 1px solid #353d4e;
+            border-radius: 4px;
+            padding: 5px 14px;
+            background-color: #252b38;
+            color: #c8d4e4;
+            min-height: 22px;
+        }
+        QPushButton:hover {
+            background-color: #2e3648;
+            border-color: #4a5870;
+            color: #e0e8f8;
+        }
+        QPushButton:pressed {
+            background-color: #1a2030;
+            border-color: #2f6fd4;
+        }
+        QPushButton:disabled {
+            background-color: #1e2228;
+            color: #4a5468;
+            border-color: #252b35;
+        }
+        QLineEdit {
+            border: 1px solid #353d4e;
+            border-radius: 4px;
+            padding: 4px 8px;
+            background-color: #161a20;
+            color: #dce3ec;
+            selection-background-color: #2f6fd4;
+            selection-color: #ffffff;
+            min-height: 22px;
+        }
+        QLineEdit:focus {
+            border-color: #4a80e4;
+        }
+        QPlainTextEdit {
+            border: 1px solid #2a3040;
+            border-radius: 4px;
+            background-color: #13171d;
+            color: #c8d4e4;
+            selection-background-color: #1d4a9a;
+            selection-color: #e8f0fc;
+        }
+        QGroupBox {
+            border: 1px solid #2a3040;
+            border-radius: 6px;
+            margin-top: 10px;
+            padding-top: 8px;
+            color: #aab4c4;
+        }
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            left: 10px;
+            padding: 0 6px;
+            color: #c0cad8;
+        }
+        QListWidget {
+            border: 1px solid #2a3040;
+            background-color: #161a20;
+            color: #dce3ec;
+            alternate-background-color: #1c2028;
+        }
+        QListWidget::item:selected {
+            background-color: #1d4a9a;
+            color: #e8f0fc;
+        }
+        QProgressBar {
+            border: 1px solid #2a3040;
+            border-radius: 4px;
+            background-color: #1e2228;
+            color: #c0d0e0;
+            text-align: center;
+        }
+        QProgressBar::chunk {
+            background-color: #2f6fd4;
+            border-radius: 3px;
+        }
+        QScrollBar:vertical {
+            background: #1a1e24;
+            width: 10px;
+            margin: 0;
+            border-radius: 5px;
+        }
+        QScrollBar::handle:vertical {
+            background: #3a4252;
+            border-radius: 5px;
+            min-height: 20px;
+        }
+        QScrollBar::handle:vertical:hover {
+            background: #4a5468;
+        }
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+            height: 0;
+        }
+        QScrollBar:horizontal {
+            background: #1a1e24;
+            height: 10px;
+            margin: 0;
+            border-radius: 5px;
+        }
+        QScrollBar::handle:horizontal {
+            background: #3a4252;
+            border-radius: 5px;
+            min-width: 20px;
+        }
+        QScrollBar::handle:horizontal:hover {
+            background: #4a5468;
+        }
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+            width: 0;
+        }
+        QSplitter::handle {
+            background: #2a3040;
+        }
+        QToolTip {
+            background-color: #252b35;
+            color: #dce3ec;
+            border: 1px solid #3a4252;
+            padding: 4px 6px;
+            border-radius: 4px;
+        }
+        QComboBox {
+            border: 1px solid #353d4e;
+            border-radius: 4px;
+            padding: 4px 8px;
+            background-color: #161a20;
+            color: #dce3ec;
+            min-height: 22px;
+        }
+        QComboBox:focus {
+            border-color: #4a80e4;
+        }
+        QComboBox::drop-down {
+            border: none;
+            width: 24px;
+        }
+        QComboBox QAbstractItemView {
+            background-color: #1e2228;
+            color: #dce3ec;
+            border: 1px solid #2a3040;
+            selection-background-color: #1d4a9a;
+            selection-color: #e8f0fc;
+        }
+        QAbstractSpinBox {
+            border: 1px solid #353d4e;
+            border-radius: 4px;
+            padding: 4px 8px;
+            background-color: #161a20;
+            color: #dce3ec;
+            min-height: 22px;
+        }
+        QAbstractSpinBox:focus {
+            border-color: #4a80e4;
+        }
+        QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {
+            background-color: #252b35;
+            border: none;
+        }
+        QAbstractSpinBox::up-button:hover, QAbstractSpinBox::down-button:hover {
+            background-color: #2e3648;
+        }
+        QLabel {
+            color: #c8d4e4;
+        }
+        QCheckBox {
+            color: #c8d4e4;
+            spacing: 8px;
+        }
+        QCheckBox::indicator {
+            width: 16px;
+            height: 16px;
+            border: 1px solid #4a5468;
+            border-radius: 3px;
+            background-color: #161a20;
+        }
+        QCheckBox::indicator:hover {
+            border-color: #4a80e4;
+            background-color: #1a2030;
+        }
+        QCheckBox::indicator:checked {
+            border-color: #4a80e4;
+            background-color: #2f6fd4;
+        }
+        QTreeWidget {
+            border: 1px solid #2a3040;
+            background-color: #161a20;
+            color: #dce3ec;
+            alternate-background-color: #1c2028;
+        }
+        QTreeWidget::item:selected {
+            background-color: #1d4a9a;
+            color: #e8f0fc;
+        }
+        QTreeWidget QHeaderView::section {
+            background-color: #252b35;
+            color: #aab4c4;
+            border: none;
+            border-right: 1px solid #2a3040;
+            border-bottom: 1px solid #2a3040;
+            padding: 4px 8px;
+            font-weight: 600;
+        }
+        """
 
     def closeEvent(self, a0: Optional[QCloseEvent]) -> None:
         """Handle window close event to properly cleanup threads"""
@@ -1765,6 +2039,7 @@ class MainWindow(QMainWindow):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
+        self._apply_dynamic_styles()
 
         # Splitter for Tabs and Log
         splitter = QSplitter(Qt.Orientation.Vertical)
@@ -1970,16 +2245,16 @@ class MainWindow(QMainWindow):
                     "selected": ("#6b82a8", "#2e3645", "#c8d4e4", "#8aa0c8"),
                 },
                 self.ROW_STATUS_WARNING: {
-                    "normal": ("#b8960a", "#2a2500", "#e0c060", "#d4aa30"),
-                    "selected": ("#d4aa30", "#332c00", "#f0d070", "#e8c040"),
+                    "normal": ("#f0a500", "#352800", "#ffc107", "#ffb300"),
+                    "selected": ("#ffb300", "#403100", "#ffd740", "#ffca28"),
                 },
                 self.ROW_STATUS_FAILED: {
-                    "normal": ("#a03030", "#2e1010", "#e89090", "#c04040"),
-                    "selected": ("#c04040", "#381414", "#f0a0a0", "#d45050"),
+                    "normal": ("#e53935", "#3b1010", "#ff5252", "#ef5350"),
+                    "selected": ("#ef5350", "#4a1414", "#ff6e6e", "#f44336"),
                 },
                 self.ROW_STATUS_SUCCESS: {
-                    "normal": ("#2a6e30", "#102010", "#80c888", "#3a8a42"),
-                    "selected": ("#3a8a42", "#142814", "#98d8a0", "#4aaa54"),
+                    "normal": ("#2ecc71", "#0e3320", "#2ecc71", "#39d96e"),
+                    "selected": ("#39d96e", "#154d2e", "#55e080", "#4de878"),
                 },
             }
         else:
@@ -2123,11 +2398,11 @@ class MainWindow(QMainWindow):
         is_dark = self._is_dark_palette()
         if is_dark:
             if status == self.ROW_STATUS_SUCCESS:
-                color = QColor("#1a3320")
+                color = QColor("#1a5c30")
             elif status == self.ROW_STATUS_WARNING:
-                color = QColor("#2e2800")
+                color = QColor("#5c4500")
             elif status == self.ROW_STATUS_FAILED:
-                color = QColor("#321010")
+                color = QColor("#5c1c1c")
             else:
                 color = QColor("#1e2228")
         else:
