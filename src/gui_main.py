@@ -1753,7 +1753,10 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _system_prefers_dark() -> bool:
         try:
-            return QGuiApplication.styleHints().colorScheme() == Qt.ColorScheme.Dark
+            style_hints = QGuiApplication.styleHints()
+            if style_hints is None:
+                return QGuiApplication.palette().color(QPalette.ColorRole.Window).lightness() < 128
+            return style_hints.colorScheme() == Qt.ColorScheme.Dark
         except Exception:
             return QGuiApplication.palette().color(QPalette.ColorRole.Window).lightness() < 128
 
@@ -1765,7 +1768,7 @@ class MainWindow(QMainWindow):
 
     def _apply_color_mode(self, color_mode: object) -> None:
         app = QApplication.instance()
-        if app is None:
+        if not isinstance(app, QApplication):
             return
 
         mode = self._normalize_color_mode(color_mode)
