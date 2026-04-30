@@ -179,6 +179,8 @@
     "msg_loading_file": "Loading file: {path}",
     "msg_failed_load_xml": "Failed to load XML file.",
     "msg_failed_load_mcm": "Failed to load MCM text file.",
+    "msg_raw_plugin_not_supported": "Raw plugin files ({ext}) are not supported. Export them to XML in xTranslator or ESP-ESM Translator first, then open the exported XML.",
+    "msg_unsupported_translation_file": "Unsupported file type: {ext}. Only XML translation files (*.xml) and MCM text files (*.txt) are supported.",
     "msg_loaded_strings": "Loaded {count} strings.",
     "msg_saving_file": "Saving file...",
     "msg_file_saved": "File saved successfully.",

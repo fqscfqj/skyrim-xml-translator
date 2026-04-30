@@ -178,6 +178,8 @@
     "msg_loading_file": "正在加载文件: {path}",
     "msg_failed_load_xml": "加载 XML 文件失败。",
     "msg_failed_load_mcm": "加载 MCM 文本失败。",
+    "msg_raw_plugin_not_supported": "不支持直接加载原始插件文件（{ext}）。请先在 xTranslator 或 ESP-ESM Translator 中导出为 XML，再打开导出的 XML 文件。",
+    "msg_unsupported_translation_file": "不支持的文件类型：{ext}。当前仅支持 XML 翻译文件（*.xml）和 MCM 文本文件（*.txt）。",
     "msg_loaded_strings": "已加载 {count} 个字符串。",
     "msg_saving_file": "正在保存文件...",
     "msg_file_saved": "文件保存成功。",

@@ -34,6 +34,15 @@ from src.mcm_processor import MCMProcessor
 from src.translation.text_analyzer import TextAnalyzer
 from src.translation.translator import Translator
 from src.cache.lru_cache import LRUCache
+from src.file_formats import (
+    FILE_TYPE_ESP_XML,
+    FILE_TYPE_MCM,
+    FILE_TYPE_RAW_PLUGIN,
+    FILE_TYPE_UNSUPPORTED,
+    FILE_TYPE_XML,
+    describe_extension,
+    detect_translation_file_type_from_extension,
+)
 from src.logging_helper import emit as log_emit
 from src.i18n import i18n
 
@@ -1637,7 +1646,7 @@ class MainWindow(QMainWindow):
         self.esp_xml_processor = ESPXMLProcessor()
         self.mcm_processor = MCMProcessor()
         self.current_processor = self.xml_processor
-        self.current_file_type = "xml"
+        self.current_file_type = FILE_TYPE_XML
         self._text_analyzer = TextAnalyzer()
         self.translator = Translator(self.llm_client, self.rag_engine)
         self.translator.set_runtime_flags({"mcm_ui_mode": False})
@@ -3875,12 +3884,22 @@ class MainWindow(QMainWindow):
         self.worker.start()
 
     def _detect_file_type(self, file_path: str) -> str:
-        ext = os.path.splitext(file_path)[1].lower()
-        if ext == ".txt":
-            return "mcm"
-        if ext == ".xml":
+        file_type = detect_translation_file_type_from_extension(file_path)
+        if file_type == FILE_TYPE_XML:
             return self._detect_xml_variant(file_path)
-        return "xml"
+        return file_type
+
+    def _build_unsupported_file_message(self, file_path: str, file_type: str) -> str:
+        extension = describe_extension(file_path)
+        if file_type == FILE_TYPE_RAW_PLUGIN:
+            return i18n.t(
+                "msg_raw_plugin_not_supported",
+                "Raw plugin files ({ext}) are not supported. Export them to XML in xTranslator or ESP-ESM Translator first, then open the exported XML.",
+            ).format(ext=extension)
+        return i18n.t(
+            "msg_unsupported_translation_file",
+            "Unsupported file type: {ext}. Only XML translation files (*.xml) and MCM text files (*.txt) are supported.",
+        ).format(ext=extension)
 
     @staticmethod
     def _strip_xml_tag(tag_name: str) -> str:
@@ -3927,10 +3946,10 @@ class MainWindow(QMainWindow):
 
     def _set_active_file_type(self, file_type: str) -> None:
         self.current_file_type = file_type
-        if file_type == "mcm":
+        if file_type == FILE_TYPE_MCM:
             self.current_processor = self.mcm_processor
             self.translator.set_runtime_flags({"mcm_ui_mode": True})
-        elif file_type == "esp_xml":
+        elif file_type == FILE_TYPE_ESP_XML:
             self.current_processor = self.esp_xml_processor
             self.translator.set_runtime_flags({"mcm_ui_mode": False})
         else:
@@ -3976,12 +3995,18 @@ class MainWindow(QMainWindow):
             return False
 
         file_type = self._detect_file_type(file_path)
+        if file_type in {FILE_TYPE_RAW_PLUGIN, FILE_TYPE_UNSUPPORTED}:
+            message = self._build_unsupported_file_message(file_path, file_type)
+            self.log(message)
+            QMessageBox.warning(self, i18n.t("title_warning"), message)
+            return False
+
         self._set_active_file_type(file_type)
         self.log(i18n.t("msg_loading_file").format(path=file_path))
         loaded = self.current_processor.load_file(file_path)
 
         if not loaded:
-            if file_type == "mcm":
+            if file_type == FILE_TYPE_MCM:
                 self.log(i18n.t("msg_failed_load_mcm"))
             else:
                 self.log(i18n.t("msg_failed_load_xml"))
@@ -4073,7 +4098,7 @@ class MainWindow(QMainWindow):
     def save_xml_file(self):
         self.log(i18n.t("msg_saving_file"))
         try:
-            if self.current_file_type == "mcm":
+            if self.current_file_type == FILE_TYPE_MCM:
                 output_path = self._save_mcm_with_configured_suffix()
                 self.log(i18n.t("msg_mcm_saved_path").format(path=output_path))
             else:
@@ -4086,7 +4111,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, i18n.t("title_error"), i18n.t("msg_failed_save").format(error=e))
 
     def save_as_xml_file(self):
-        if self.current_file_type == "mcm":
+        if self.current_file_type == FILE_TYPE_MCM:
             save_filter = i18n.t("filter_mcm_files", "MCM text files (*.txt)")
             title = i18n.t("title_save_mcm", i18n.t("title_save_xml"))
             fname, _ = QFileDialog.getSaveFileName(self, title, '', save_filter)
@@ -4100,7 +4125,7 @@ class MainWindow(QMainWindow):
         if fname:
             self.log(i18n.t("msg_saving_as").format(path=fname))
             try:
-                if self.current_file_type == "mcm":
+                if self.current_file_type == FILE_TYPE_MCM:
                     self.mcm_processor.save_file(fname)
                 else:
                     if not self.current_processor.save_file(fname):
