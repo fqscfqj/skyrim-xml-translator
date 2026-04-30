@@ -460,7 +460,76 @@ class RAGSearcher:
                 return candidate
             if lookup_key != normalized_query:
                 return candidate
+        return self._resolve_token_containment_match(normalized_query, source_text)
+
+    def _resolve_token_containment_match(self, normalized_query: str, source_text: Optional[str]) -> Optional[str]:
+        tokens = [t for t in normalized_query.split() if t]
+        if len(tokens) != 1:
+            return None
+
+        token = tokens[0]
+        if (
+            len(token) < 3
+            or token in self.glossary_manager._COMMON_WORDS
+            or token in self._NEGATION_CONTRACTION_STEMS
+            or token in self._LOW_SIGNAL_SINGLE_TOKENS
+            or not self.glossary_manager.is_signal_token(token)
+        ):
+            return None
+
+        lookup_token_candidates = getattr(self.glossary_manager, "lookup_token_candidates", None)
+        if not callable(lookup_token_candidates):
+            return None
+        raw_candidates = lookup_token_candidates(token)
+        if not isinstance(raw_candidates, list):
+            return None
+
+        candidates: list[str] = []
+        seen: set[str] = set()
+        for candidate in raw_candidates:
+            if not candidate or candidate in seen:
+                continue
+            seen.add(candidate)
+            if candidate not in self.glossary_manager.glossary:
+                continue
+            if self._is_sentence_like_term(candidate):
+                continue
+
+            candidate_norm = self.glossary_manager.normalize_term_key(candidate)
+            candidate_tokens = [t for t in candidate_norm.split() if t]
+            if len(candidate_tokens) <= 1:
+                continue
+            if token not in candidate_tokens:
+                continue
+            candidates.append(candidate)
+
+        if not candidates:
+            return None
+
+        if source_text:
+            source_hits = [
+                candidate for candidate in candidates
+                if self._raw_term_appears_in_source(candidate, source_text)
+            ]
+            if len(source_hits) == 1:
+                return source_hits[0]
+
+        non_possessive_candidates = [
+            candidate for candidate in candidates
+            if not self._is_possessive_candidate_for_token(candidate, token)
+        ]
+        if len(non_possessive_candidates) == 1:
+            return non_possessive_candidates[0]
         return None
+
+    @staticmethod
+    def _is_possessive_candidate_for_token(candidate: str, token: str) -> bool:
+        raw = (candidate or "").strip().lower()
+        token = (token or "").strip().lower()
+        if not raw or not token:
+            return False
+        pattern = r"^{}\s*['\u2019]\s*s\b".format(re.escape(token))
+        return re.search(pattern, raw) is not None
 
     # --- Public API ---
 

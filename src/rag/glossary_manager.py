@@ -71,6 +71,7 @@ class GlossaryManager:
         self.glossary_path = glossary_path
         self.glossary: dict[str, str] = {}
         self._glossary_lookup: dict[str, str] = {}
+        self._term_token_index: Dict[str, list[str]] = {}
         self._token_df: Dict[str, int] = {}
         self._token_df_dirty = True
 
@@ -91,6 +92,13 @@ class GlossaryManager:
         """Return the canonical glossary term for a normalized key, or None."""
         return self._glossary_lookup.get(normalized)
 
+    def lookup_token_candidates(self, token: str) -> list[str]:
+        """Return canonical glossary terms containing the normalized token."""
+        normalized = self.normalize_term_key(token)
+        if not normalized or " " in normalized:
+            return []
+        return list(self._term_token_index.get(normalized, []))
+
     def get_translation(self, term: str) -> Optional[str]:
         """Return the translation for a term, or None."""
         return self.glossary.get(term)
@@ -100,44 +108,54 @@ class GlossaryManager:
     def rebuild_lookup(self) -> None:
         """Build a normalized lookup map for instant exact hits."""
         lookup = {}
+        term_token_index: Dict[str, list[str]] = {}
         for term in self.glossary.keys():
             normalized = self.normalize_term_key(term)
             if normalized and normalized not in lookup:
                 lookup[normalized] = term
+            for token in set(self._term_index_tokens(term)):
+                term_token_index.setdefault(token, []).append(term)
         self._glossary_lookup = lookup
+        self._term_token_index = term_token_index
         self._token_df_dirty = True
+
+    def _term_index_tokens(self, term: str) -> list[str]:
+        """Return entity-like tokens eligible for lexical glossary indexes."""
+        if not term or not isinstance(term, str):
+            return []
+
+        raw = term.strip()
+        if not raw:
+            return []
+
+        sentence_punct = (".", "!", "?", ",", ";")
+        if any(p in raw for p in sentence_punct):
+            return []
+        if "<" in raw or ">" in raw:
+            return []
+        if "{" in raw or "}" in raw:
+            return []
+        if ":" in raw:
+            return []
+
+        norm = self.normalize_term_key(raw)
+        if not norm:
+            return []
+
+        split_tokens = norm.split()
+        allowed_name_connectors = {"of", "the", "and"}
+        if any((t in self._COMMON_WORDS) and (t not in allowed_name_connectors) for t in split_tokens):
+            return []
+        if len(split_tokens) > 8 or len(norm) > 60:
+            return []
+        return [t for t in split_tokens if t and len(t) >= 2 and t not in self._COMMON_WORDS]
 
     def _rebuild_token_df(self) -> None:
         """Build a token document-frequency map from glossary terms."""
         token_df: Dict[str, int] = {}
         terms_source = list(self.glossary.keys())
-        sentence_punct = (".", "!", "?", ",", ";")
         for term in terms_source:
-            if not term or not isinstance(term, str):
-                continue
-            raw = term.strip()
-            if not raw:
-                continue
-            if any(p in raw for p in sentence_punct):
-                continue
-            if "<" in raw or ">" in raw:
-                continue
-            if "{" in raw or "}" in raw:
-                continue
-            if ":" in raw:
-                continue
-
-            norm = self.normalize_term_key(raw)
-            if not norm:
-                continue
-            split_tokens = norm.split()
-            allowed_name_connectors = {"of", "the", "and"}
-            if any((t in self._COMMON_WORDS) and (t not in allowed_name_connectors) for t in split_tokens):
-                continue
-            if len(split_tokens) > 8 or len(norm) > 60:
-                continue
-            tokens = [t for t in split_tokens if t and len(t) >= 2 and t not in self._COMMON_WORDS]
-            for t in set(tokens):
+            for t in set(self._term_index_tokens(term)):
                 token_df[t] = token_df.get(t, 0) + 1
         self._token_df = token_df
         self._token_df_dirty = False

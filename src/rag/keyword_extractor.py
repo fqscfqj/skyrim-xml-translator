@@ -809,6 +809,54 @@ class KeywordExtractor:
                 pass
         return present
 
+    def _is_retrieval_worthy_source_keyword(self, keyword: str) -> bool:
+        raw = (keyword or "").strip()
+        if not raw:
+            return False
+
+        normalized = self.glossary_manager.normalize_term_key(raw)
+        if not normalized:
+            return False
+
+        if self.glossary_manager.lookup_normalized(normalized) is not None:
+            return True
+
+        tokens = [t for t in normalized.split() if t]
+        if not tokens:
+            return False
+
+        if len(tokens) == 1:
+            token = tokens[0]
+            if (
+                token in self.glossary_manager._COMMON_WORDS
+                or token in self._LOW_SIGNAL_SINGLE_TOKENS
+                or (token.endswith("ly") and len(token) >= 5)
+            ):
+                return False
+            return self.glossary_manager.is_signal_token(token) or raw[0].isupper()
+
+        allowed_name_connectors = {"of", "the", "and"}
+        if any(
+            token in self.glossary_manager._COMMON_WORDS and token not in allowed_name_connectors
+            for token in tokens
+        ):
+            return False
+
+        content_tokens = [t for t in tokens if t not in allowed_name_connectors]
+        if len(content_tokens) < 2:
+            return False
+
+        signal_count = sum(
+            1 for token in content_tokens
+            if self.glossary_manager.is_signal_token(token)
+        )
+        if signal_count >= 2:
+            return True
+
+        words = self._WORD_TOKEN_RE.findall(raw)
+        content_words = [w for w in words if w.lower() not in allowed_name_connectors]
+        return len(content_words) >= 2 and all(w[:1].isupper() for w in content_words)
+
     def _apply_keyword_safety_limit(self, keywords: list[str], log_callback) -> list[str]:
         limit = self._get_keyword_safety_limit()
         if len(keywords) <= limit:
@@ -839,7 +887,10 @@ class KeywordExtractor:
         for kw in keywords:
             if not isinstance(kw, str):
                 continue
-            if self._normalize_for_source_match(kw) == source_norm:
+            if (
+                self._normalize_for_source_match(kw) == source_norm
+                and not self._is_retrieval_worthy_source_keyword(kw)
+            ):
                 dropped.append(kw.strip())
             else:
                 kept.append(kw)

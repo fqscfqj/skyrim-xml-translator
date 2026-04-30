@@ -1,4 +1,5 @@
 import unittest
+from typing import Any, cast
 
 from src.rag.keyword_extractor import KeywordExtractor
 
@@ -33,7 +34,7 @@ class _DummyConfig:
 
 class _DummyGlossaryManager:
     _COMMON_WORDS = {
-        "a", "an", "and", "did", "from", "me", "my", "need", "of", "the", "you",
+        "a", "an", "and", "did", "from", "give", "it", "me", "my", "need", "of", "the", "to", "you",
     }
 
     def __init__(self, glossary=None, signal_terms=None):
@@ -70,14 +71,14 @@ class KeywordExtractorPromptStructureTests(unittest.TestCase):
             glossary_manager=_DummyGlossaryManager(),
         )
 
-    def _make_extracting_extractor(self, response):
+    def _make_extracting_extractor(self, response, glossary=None, signal_terms=None):
         return KeywordExtractor(
             llm_client=_StaticLLMClient(response),
             prompt_manager=_DummyPromptManager('原文："{text}"'),
             config_manager=_DummyConfig(),
             glossary_manager=_DummyGlossaryManager(
-                glossary={"Thane": "武卫"},
-                signal_terms={"thane"},
+                glossary={"Thane": "武卫"} if glossary is None else glossary,
+                signal_terms={"thane"} if signal_terms is None else signal_terms,
             ),
         )
 
@@ -124,9 +125,12 @@ class KeywordExtractorPromptStructureTests(unittest.TestCase):
     def test_empty_llm_output_falls_back_to_lowercase_title_term(self):
         extractor = self._make_extracting_extractor("[]")
 
-        keywords, debug = extractor.extract(
-            "Wow, my thane. Did you need a break from me?",
-            return_debug=True,
+        keywords, debug = cast(
+            tuple[list[str], dict[str, Any]],
+            extractor.extract(
+                "Wow, my thane. Did you need a break from me?",
+                return_debug=True,
+            ),
         )
 
         self.assertEqual(["thane"], keywords)
@@ -138,6 +142,44 @@ class KeywordExtractorPromptStructureTests(unittest.TestCase):
         keywords = extractor.extract("Wow, my thane. Did you need a break from me?")
 
         self.assertEqual(["thane"], keywords)
+
+    def test_source_identical_signal_keyword_is_kept(self):
+        extractor = self._make_extracting_extractor(
+            '["Ingun"]',
+            glossary={"Ingun Black-Briar": "因甘·黑棘"},
+            signal_terms={"ingun", "black", "briar"},
+        )
+
+        keywords, debug = cast(
+            tuple[list[str], dict[str, Any]],
+            extractor.extract("Ingun", return_debug=True),
+        )
+
+        self.assertEqual(["Ingun"], keywords)
+        source_filter_step = next(
+            step for step in debug["finalization_steps"]
+            if step["phase"] == "llm" and step["name"] == "filter_keyword_is_source_text"
+        )
+        self.assertEqual(["Ingun"], source_filter_step["after"])
+
+    def test_source_identical_sentence_keyword_is_still_dropped(self):
+        extractor = self._make_extracting_extractor(
+            '["Give it to me"]',
+            glossary={},
+            signal_terms=set(),
+        )
+
+        keywords, debug = cast(
+            tuple[list[str], dict[str, Any]],
+            extractor.extract("Give it to me", return_debug=True),
+        )
+
+        self.assertEqual([], keywords)
+        source_filter_step = next(
+            step for step in debug["finalization_steps"]
+            if step["phase"] == "llm" and step["name"] == "filter_keyword_is_source_text"
+        )
+        self.assertEqual(["Give it to me"], source_filter_step["dropped"])
 
 
 if __name__ == "__main__":

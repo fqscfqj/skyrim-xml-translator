@@ -31,6 +31,14 @@ class _DummyGlossaryManager:
         self._glossary_lookup = {
             self.normalize_term_key(term): term for term in glossary
         }
+        self._term_token_index = {}
+        for term in glossary:
+            tokens = [
+                token for token in self.normalize_term_key(term).split()
+                if token and len(token) >= 2 and token not in self._COMMON_WORDS
+            ]
+            for token in set(tokens):
+                self._term_token_index.setdefault(token, []).append(term)
         self._token_df = {}
 
     @classmethod
@@ -41,6 +49,12 @@ class _DummyGlossaryManager:
 
     def lookup_normalized(self, normalized: str):
         return self._glossary_lookup.get(normalized)
+
+    def lookup_token_candidates(self, token: str):
+        normalized = self.normalize_term_key(token)
+        if not normalized or " " in normalized:
+            return []
+        return list(self._term_token_index.get(normalized, []))
 
     @staticmethod
     def is_signal_token(token: str) -> bool:
@@ -184,6 +198,71 @@ class RAGSearchPluralDirectMatchTests(unittest.TestCase):
         self.assertEqual(results["Housecarl"], "侍卫")
         self.assertEqual(debug[0]["direct_match"], "Thane")
         self.assertEqual(debug[1]["direct_match"], "Housecarl")
+
+
+class RAGSearchTokenContainmentDirectMatchTests(unittest.TestCase):
+    def test_single_token_query_resolves_unique_multi_token_glossary_term(self):
+        glossary = _DummyGlossaryManager({
+            "Ingun Black-Briar": "因甘·黑棘",
+            "Ingun's Supply Chest Key": "因甘补给箱钥匙",
+            "Ingun's Alchemy Chest": "因甘炼金箱",
+        })
+        searcher = RAGSearcher(
+            cast(Any, _DummyVectorStore([], [])),
+            cast(Any, glossary),
+            _DummyConfig({
+                ("rag", "keyword_weight_enabled"): False,
+                ("rag", "min_vector_score"): 0.0,
+                ("rag", "short_term_max_results"): 5,
+                ("rag", "long_term_max_results"): 5,
+            }),
+            _DummyLLMClient(),
+        )
+
+        results, debug = cast(
+            tuple[dict[str, str], list[dict[str, Any]]],
+            searcher.search(
+                ["Ingun"],
+                source_text="Ingun",
+                threshold=0.1,
+                top_k=5,
+                return_debug=True,
+            ),
+        )
+
+        self.assertEqual(results["Ingun Black-Briar"], "因甘·黑棘")
+        self.assertEqual(debug[0]["direct_match"], "Ingun Black-Briar")
+
+    def test_single_token_query_does_not_choose_ambiguous_multi_token_glossary_term(self):
+        glossary = _DummyGlossaryManager({
+            "Ingun Black-Briar": "因甘·黑棘",
+            "Ingun Stone-Fist": "英贡·石拳",
+        })
+        searcher = RAGSearcher(
+            cast(Any, _DummyVectorStore([], [])),
+            cast(Any, glossary),
+            _DummyConfig({
+                ("rag", "keyword_weight_enabled"): False,
+                ("rag", "min_vector_score"): 0.0,
+                ("rag", "short_term_max_results"): 5,
+                ("rag", "long_term_max_results"): 5,
+            }),
+            _DummyLLMClient(),
+        )
+
+        results, debug = cast(
+            tuple[dict[str, str], list[dict[str, Any]]],
+            searcher.search(
+                ["Ingun"],
+                source_text="Ingun",
+                threshold=0.1,
+                top_k=5,
+                return_debug=True,
+            ),
+        )
+
+        self.assertEqual(results, {})
+        self.assertIsNone(debug[0]["direct_match"])
 
 
 class RAGSearchCandidateRejectionDebugTests(unittest.TestCase):
