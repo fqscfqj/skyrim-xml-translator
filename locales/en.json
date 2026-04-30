@@ -210,6 +210,8 @@
     "msg_nothing_to_translate": "Nothing to translate.",
     "msg_starting_translation_task": "Starting translation task...",
     "msg_operation_completed": "Operation completed.",
+    "msg_glossary_task_completed_with_warning": "Glossary task completed with warnings. See the log for details.",
+    "msg_glossary_task_failed": "Glossary task failed. See the log for details.",
     "msg_rebuild_started": "Rebuilding/Updating vector index...",
     "title_import_csv": "Import CSV",
     "filter_csv_files": "CSV files (*.csv)",

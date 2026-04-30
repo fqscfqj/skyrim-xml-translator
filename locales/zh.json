@@ -209,6 +209,8 @@
     "msg_nothing_to_translate": "没有需要翻译的内容。",
     "msg_starting_translation_task": "开始翻译任务...",
     "msg_operation_completed": "操作完成。",
+    "msg_glossary_task_completed_with_warning": "术语任务已完成，但有警告，请查看日志。",
+    "msg_glossary_task_failed": "术语任务失败，请查看日志。",
     "msg_rebuild_started": "正在重建/更新向量索引...",
     "title_import_csv": "导入 CSV",
     "filter_csv_files": "CSV 文件 (*.csv)",

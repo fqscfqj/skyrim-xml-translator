@@ -4,8 +4,9 @@ import threading
 import shutil
 import datetime
 import re
+import ctypes
 import xml.etree.ElementTree as stdlib_etree
-from typing import Optional, cast
+from typing import Mapping, Optional, cast
 import csv
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -15,6 +16,11 @@ try:
     import winsound
 except ImportError:
     winsound = None
+
+try:
+    _WINMM = ctypes.windll.winmm
+except Exception:
+    _WINMM = None
 
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QLabel, QLineEdit, QPushButton, QTextEdit, QPlainTextEdit,
@@ -51,6 +57,40 @@ from src.file_formats import (
 )
 from src.logging_helper import emit as log_emit
 from src.i18n import i18n
+
+
+TASK_COMPLETION_STATE_SUCCESS = "success"
+TASK_COMPLETION_STATE_WARNING = "warning"
+TASK_COMPLETION_STATE_FAILURE = "failure"
+
+
+def normalize_task_completion_state(value: object) -> str:
+    state = str(value or TASK_COMPLETION_STATE_SUCCESS).strip().lower()
+    if state not in {
+        TASK_COMPLETION_STATE_SUCCESS,
+        TASK_COMPLETION_STATE_WARNING,
+        TASK_COMPLETION_STATE_FAILURE,
+    }:
+        return TASK_COMPLETION_STATE_SUCCESS
+    return state
+
+
+def determine_translation_completion_state(
+    status_counts: Mapping[str, int],
+    *,
+    was_stopped: bool = False,
+) -> str:
+    failed = max(0, int(status_counts.get("failed", 0) or 0))
+    warning = max(0, int(status_counts.get("warning", 0) or 0))
+    untranslated = max(0, int(status_counts.get("untranslated", 0) or 0))
+
+    if failed > 0:
+        return TASK_COMPLETION_STATE_FAILURE
+    if warning > 0:
+        return TASK_COMPLETION_STATE_WARNING
+    if was_stopped or untranslated > 0:
+        return TASK_COMPLETION_STATE_WARNING
+    return TASK_COMPLETION_STATE_SUCCESS
 
 
 class StatusSegmentedProgressBar(QProgressBar):
@@ -174,15 +214,18 @@ class GlossaryWorker(QThread):
         self.mode = mode # 'rebuild' or 'import'
         self.data: Optional[str] = data # file path for import
         self.num_threads = num_threads
+        self.completion_state = TASK_COMPLETION_STATE_SUCCESS
 
     def run(self):
         try:
+            self.completion_state = TASK_COMPLETION_STATE_SUCCESS
             if self.mode == 'rebuild':
                 log_emit(self.log.emit, self.rag_engine.config, 'INFO', i18n.t("msg_rebuilding_index").format(threads=self.num_threads), module='gui_main', func='GlossaryWorker.run')
                 try:
                     self.rag_engine.build_index(num_threads=self.num_threads, progress_callback=self.progress.emit, log_callback=self.log.emit)
                     log_emit(self.log.emit, self.rag_engine.config, 'INFO', i18n.t("msg_index_rebuilt"), module='gui_main', func='GlossaryWorker.run')
                 except Exception as e:
+                    self.completion_state = TASK_COMPLETION_STATE_FAILURE
                     log_emit(self.log.emit, self.rag_engine.config, 'ERROR', i18n.t("msg_error_rebuilding").format(error=e), exc=e, module='gui_main', func='GlossaryWorker.run')
         
             elif self.mode == 'import':
@@ -190,6 +233,7 @@ class GlossaryWorker(QThread):
                 try:
                     # self.data may be None if the caller didn't provide a path; guard against it
                     if not self.data:
+                        self.completion_state = TASK_COMPLETION_STATE_WARNING
                         log_emit(self.log.emit, self.rag_engine.config, 'WARNING', i18n.t("msg_no_import_file"), module='gui_main', func='GlossaryWorker.run')
                         self.finished.emit()
                         return
@@ -206,12 +250,15 @@ class GlossaryWorker(QThread):
                         self.rag_engine.add_terms_batch(terms, num_threads=self.num_threads, progress_callback=self.progress.emit, log_callback=self.log.emit)
                         log_emit(self.log.emit, self.rag_engine.config, 'INFO', i18n.t("msg_import_completed"), module='gui_main', func='GlossaryWorker.run')
                     else:
+                        self.completion_state = TASK_COMPLETION_STATE_WARNING
                         log_emit(self.log.emit, self.rag_engine.config, 'WARNING', i18n.t("msg_no_valid_terms"), module='gui_main', func='GlossaryWorker.run')
                 except Exception as e:
+                    self.completion_state = TASK_COMPLETION_STATE_FAILURE
                     log_emit(self.log.emit, self.rag_engine.config, 'ERROR', i18n.t("msg_error_importing").format(error=e), exc=e, module='gui_main', func='GlossaryWorker.run')
         
             self.finished.emit()
         except Exception as e:
+            self.completion_state = TASK_COMPLETION_STATE_FAILURE
             log_emit(self.log.emit, self.rag_engine.config, 'ERROR', i18n.t("msg_glossary_worker_error").format(error=e), exc=e, module='gui_main', func='GlossaryWorker.run')
             try:
                 self.finished.emit()
@@ -1615,6 +1662,12 @@ class MainWindow(QMainWindow):
     ROW_STATUS_SUCCESS = "success"
     ROW_STATUS_WARNING = "warning"
     ROW_STATUS_FAILED = "failed"
+    TASK_SOUND_ALIAS = "skyrim_task_completion_sound"
+    TASK_SOUND_FILENAMES = {
+        TASK_COMPLETION_STATE_SUCCESS: "task_success.mp3",
+        TASK_COMPLETION_STATE_WARNING: "task_warning.mp3",
+        TASK_COMPLETION_STATE_FAILURE: "task_failure.mp3",
+    }
     LOG_MAX_BLOCKS = 1000
     LOG_FLUSH_INTERVAL_MS = 50
     LOG_FLUSH_BATCH_SIZE = 200
@@ -1799,13 +1852,99 @@ class MainWindow(QMainWindow):
             default=False,
         )
 
-    def _play_task_completion_sound(self) -> None:
+    @staticmethod
+    def _task_sound_system_fallback(state: str) -> Optional[int]:
+        if winsound is None:
+            return None
+        fallback_map = {
+            TASK_COMPLETION_STATE_SUCCESS: winsound.MB_ICONASTERISK,
+            TASK_COMPLETION_STATE_WARNING: winsound.MB_ICONEXCLAMATION,
+            TASK_COMPLETION_STATE_FAILURE: winsound.MB_ICONHAND,
+        }
+        return fallback_map.get(normalize_task_completion_state(state))
+
+    @staticmethod
+    def _app_root_dir() -> str:
+        return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def _task_sound_assets_dir(self) -> str:
+        return os.path.join(self._app_root_dir(), "assets", "sounds")
+
+    def _task_completion_sound_path(self, state: object) -> Optional[str]:
+        normalized_state = normalize_task_completion_state(state)
+        filename = self.TASK_SOUND_FILENAMES.get(normalized_state)
+        if not filename:
+            return None
+        sound_path = os.path.join(self._task_sound_assets_dir(), filename)
+        if os.path.exists(sound_path):
+            return sound_path
+        return None
+
+    @staticmethod
+    def _mci_send(command: str) -> int:
+        if _WINMM is None:
+            return -1
+        return int(_WINMM.mciSendStringW(command, None, 0, None))
+
+    def _stop_task_completion_audio(self) -> None:
+        if _WINMM is None:
+            return
+        try:
+            self._mci_send(f"close {self.TASK_SOUND_ALIAS}")
+        except Exception:
+            pass
+
+    def _play_audio_file(self, audio_path: str) -> bool:
+        if not audio_path or not os.path.exists(audio_path):
+            return False
+
+        try:
+            if winsound is not None and str(audio_path).lower().endswith(".wav"):
+                winsound.PlaySound(
+                    audio_path,
+                    winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT,
+                )
+                return True
+        except Exception:
+            pass
+
+        if _WINMM is None:
+            return False
+
+        self._stop_task_completion_audio()
+        open_commands = [
+            f'open "{audio_path}" alias {self.TASK_SOUND_ALIAS}',
+            f'open "{audio_path}" type mpegvideo alias {self.TASK_SOUND_ALIAS}',
+        ]
+
+        open_error = -1
+        for command in open_commands:
+            open_error = self._mci_send(command)
+            if open_error == 0:
+                break
+
+        if open_error != 0:
+            return False
+
+        play_error = self._mci_send(f"play {self.TASK_SOUND_ALIAS} from 0")
+        if play_error != 0:
+            self._stop_task_completion_audio()
+            return False
+        return True
+
+    def _play_task_completion_sound(self, state: object) -> None:
         if not self._is_task_completion_sound_enabled():
             return
 
+        normalized_state = normalize_task_completion_state(state)
+        sound_path = self._task_completion_sound_path(normalized_state)
+        if sound_path and self._play_audio_file(sound_path):
+            return
+
         try:
-            if winsound is not None:
-                winsound.MessageBeep(winsound.MB_ICONASTERISK)
+            fallback_sound = self._task_sound_system_fallback(normalized_state)
+            if winsound is not None and fallback_sound is not None:
+                winsound.MessageBeep(fallback_sound)
                 return
         except Exception:
             pass
@@ -1816,6 +1955,12 @@ class MainWindow(QMainWindow):
             app = QApplication.instance()
             if isinstance(app, QApplication):
                 app.beep()
+
+    def _determine_translation_task_completion_state(self) -> str:
+        return determine_translation_completion_state(
+            self.status_summary_counts,
+            was_stopped=bool(self.stop_receiving_results),
+        )
 
     def _apply_color_mode(self, color_mode: object) -> None:
         app = QApplication.instance()
@@ -4333,6 +4478,7 @@ class MainWindow(QMainWindow):
     def on_translation_finished(self):
         translation_task_was_active = self._translation_task_active
         self._translation_task_active = False
+        completion_state = self._determine_translation_task_completion_state()
         self.start_btn.setEnabled(True)
         self.trans_sel_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
@@ -4363,7 +4509,7 @@ class MainWindow(QMainWindow):
             self.worker = None
 
         if translation_task_was_active:
-            self._play_task_completion_sound()
+            self._play_task_completion_sound(completion_state)
 
     def add_term(self):
         source = self.term_source.text().strip()
@@ -4488,12 +4634,34 @@ class MainWindow(QMainWindow):
     def on_glossary_task_finished(self):
         glossary_task_was_active = self._glossary_task_active
         self._glossary_task_active = False
+        completion_state = normalize_task_completion_state(
+            getattr(self.glossary_worker, "completion_state", TASK_COMPLETION_STATE_SUCCESS)
+        ) if self.glossary_worker is not None else TASK_COMPLETION_STATE_SUCCESS
         self.glossary_progress.setVisible(False)
         self.pause_btn.setEnabled(False)
         self.resume_btn.setEnabled(False)
         self.refresh_term_list()
         if glossary_task_was_active:
-            self._play_task_completion_sound()
+            self._play_task_completion_sound(completion_state)
+
+        if self.glossary_worker is not None:
+            self.glossary_worker.deleteLater()
+            self.glossary_worker = None
+
+        if completion_state == TASK_COMPLETION_STATE_FAILURE:
+            QMessageBox.critical(
+                self,
+                i18n.t("title_error"),
+                i18n.t("msg_glossary_task_failed"),
+            )
+            return
+        if completion_state == TASK_COMPLETION_STATE_WARNING:
+            QMessageBox.warning(
+                self,
+                i18n.t("title_warning"),
+                i18n.t("msg_glossary_task_completed_with_warning"),
+            )
+            return
         QMessageBox.information(self, i18n.t("title_success"), i18n.t("msg_operation_completed"))
 
     def _is_valid_http_url(self, value: str) -> bool:
