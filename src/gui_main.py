@@ -1792,6 +1792,12 @@ class MainWindow(QMainWindow):
             QEvent.Type.ApplicationPaletteChange,
         ):
             self._apply_dynamic_styles()
+            # Defer an extra bubble-style refresh to the next event-loop tick.
+            # setStyleSheet() on the window posts StyleChange events to child widgets
+            # asynchronously; those events may re-polish the bubble QLabels *after*
+            # _apply_dynamic_styles() returns, temporarily stripping border-radius.
+            # The deferred call ensures the correct stylesheet is the last one applied.
+            QTimer.singleShot(0, self._update_status_filter_bubble_styles)
 
     def _is_dark_palette(self) -> bool:
         return QGuiApplication.palette().color(QPalette.ColorRole.Window).lightness() < 128
@@ -2381,7 +2387,6 @@ class MainWindow(QMainWindow):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
-        self._apply_dynamic_styles()
 
         # Splitter for Tabs and Log
         splitter = QSplitter(Qt.Orientation.Vertical)
@@ -2393,6 +2398,9 @@ class MainWindow(QMainWindow):
         tabs.addTab(self.create_glossary_tab(), i18n.t("tab_glossary"))
         tabs.addTab(self.create_config_tab(), i18n.t("tab_settings"))
         splitter.addWidget(tabs)
+        # Apply dynamic styles after all tabs (and their widgets) are created, so that
+        # status-filter bubble labels exist and receive their initial stylesheet.
+        self._apply_dynamic_styles()
 
         # Log
         log_group = QGroupBox(i18n.t("group_log"))
