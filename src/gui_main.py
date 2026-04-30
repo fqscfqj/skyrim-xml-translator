@@ -10,6 +10,12 @@ import csv
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
+
+try:
+    import winsound
+except ImportError:
+    winsound = None
+
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QLabel, QLineEdit, QPushButton, QTextEdit, QPlainTextEdit,
                              QTabWidget, QFileDialog, QCheckBox, QProgressBar, 
@@ -1656,6 +1662,8 @@ class MainWindow(QMainWindow):
         self.worker = None  # Translation worker reference
         self.glossary_worker = None  # Glossary worker reference
         self.stop_receiving_results = False  # Flag to immediately stop receiving translation results
+        self._translation_task_active = False
+        self._glossary_task_active = False
 
         # Cache for RAG debug info to avoid re-running translation for visualization
         # Key: original_text, Value: debug_info dict
@@ -1774,6 +1782,40 @@ class MainWindow(QMainWindow):
         if mode not in {self.COLOR_MODE_AUTO, self.COLOR_MODE_LIGHT, self.COLOR_MODE_DARK}:
             return self.COLOR_MODE_AUTO
         return mode
+
+    @staticmethod
+    def _normalize_bool_config(value: object, default: bool = False) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return default
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    def _is_task_completion_sound_enabled(self) -> bool:
+        return self._normalize_bool_config(
+            self.config_manager.get("general", "task_completion_sound_enabled", False),
+            default=False,
+        )
+
+    def _play_task_completion_sound(self) -> None:
+        if not self._is_task_completion_sound_enabled():
+            return
+
+        try:
+            if winsound is not None:
+                winsound.MessageBeep(winsound.MB_ICONASTERISK)
+                return
+        except Exception:
+            pass
+
+        try:
+            QApplication.beep()
+        except Exception:
+            app = QApplication.instance()
+            if isinstance(app, QApplication):
+                app.beep()
 
     def _apply_color_mode(self, color_mode: object) -> None:
         app = QApplication.instance()
@@ -3687,6 +3729,16 @@ class MainWindow(QMainWindow):
         )
         self.mcm_auto_export_checkbox.setToolTip(i18n.t("tooltip_mcm_auto_export"))
         system_layout.addRow(self.mcm_auto_export_checkbox)
+
+        self.task_completion_sound_checkbox = QCheckBox(i18n.t("label_task_completion_sound"))
+        self.task_completion_sound_checkbox.setChecked(
+            self._normalize_bool_config(
+                self.config_manager.get("general", "task_completion_sound_enabled", False),
+                default=False,
+            )
+        )
+        self.task_completion_sound_checkbox.setToolTip(i18n.t("tooltip_task_completion_sound"))
+        system_layout.addRow(self.task_completion_sound_checkbox)
         form_layout.addWidget(system_group)
 
         save_btn = QPushButton(i18n.t("btn_save_config"))
@@ -3881,6 +3933,7 @@ class MainWindow(QMainWindow):
         self.worker.row_failed.connect(self.update_table_row_failed)
         self.worker.rag_debug_ready.connect(self.cache_rag_debug_info)
         self.worker.finished.connect(self.on_translation_finished)
+        self._translation_task_active = True
         self.worker.start()
 
     def _detect_file_type(self, file_path: str) -> str:
@@ -4278,6 +4331,8 @@ class MainWindow(QMainWindow):
             self.trans_resume_btn.setEnabled(False)
 
     def on_translation_finished(self):
+        translation_task_was_active = self._translation_task_active
+        self._translation_task_active = False
         self.start_btn.setEnabled(True)
         self.trans_sel_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
@@ -4306,6 +4361,9 @@ class MainWindow(QMainWindow):
             self.worker.wait(3000)  # wait up to 3 s; run() should already be done
             self.worker.deleteLater()
             self.worker = None
+
+        if translation_task_was_active:
+            self._play_task_completion_sound()
 
     def add_term(self):
         source = self.term_source.text().strip()
@@ -4404,6 +4462,7 @@ class MainWindow(QMainWindow):
         self.glossary_worker.log.connect(self.log)
         self.glossary_worker.progress.connect(self.glossary_progress.setValue)
         self.glossary_worker.finished.connect(self.on_glossary_task_finished)
+        self._glossary_task_active = True
         self.glossary_worker.start()
 
     def import_csv(self):
@@ -4423,13 +4482,18 @@ class MainWindow(QMainWindow):
         self.glossary_worker.log.connect(self.log)
         self.glossary_worker.progress.connect(self.glossary_progress.setValue)
         self.glossary_worker.finished.connect(self.on_glossary_task_finished)
+        self._glossary_task_active = True
         self.glossary_worker.start()
 
     def on_glossary_task_finished(self):
+        glossary_task_was_active = self._glossary_task_active
+        self._glossary_task_active = False
         self.glossary_progress.setVisible(False)
         self.pause_btn.setEnabled(False)
         self.resume_btn.setEnabled(False)
         self.refresh_term_list()
+        if glossary_task_was_active:
+            self._play_task_completion_sound()
         QMessageBox.information(self, i18n.t("title_success"), i18n.t("msg_operation_completed"))
 
     def _is_valid_http_url(self, value: str) -> bool:
@@ -4506,6 +4570,9 @@ class MainWindow(QMainWindow):
         mcm_auto_export = bool(
             self.mcm_auto_export_checkbox.isChecked()
         ) if hasattr(self, "mcm_auto_export_checkbox") else True
+        task_completion_sound_enabled = bool(
+            self.task_completion_sound_checkbox.isChecked()
+        ) if hasattr(self, "task_completion_sound_checkbox") else False
 
         # Batch update to avoid repeated save() calls.
         self.config_manager.set_many({
@@ -4563,6 +4630,7 @@ class MainWindow(QMainWindow):
                 "target_language": target_lang,
                 "mcm_output_language_suffix": mcm_suffix,
                 "mcm_auto_export": mcm_auto_export,
+                "task_completion_sound_enabled": task_completion_sound_enabled,
                 "short_text_batch_enabled": bool(self.short_text_batch_enabled.isChecked()),
                 "short_text_batch_max_chars": self.short_text_batch_max_chars.value(),
                 "short_text_batch_size": self.short_text_batch_size.value(),
@@ -4657,6 +4725,7 @@ class MainWindow(QMainWindow):
         self.worker.row_failed.connect(self.update_table_row_failed)
         self.worker.rag_debug_ready.connect(self.cache_rag_debug_info)
         self.worker.finished.connect(self.on_translation_finished)
+        self._translation_task_active = True
         self.worker.start()
 
     def clear_all_translations(self):

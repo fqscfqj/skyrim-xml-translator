@@ -66,6 +66,7 @@ class GeneralConfig:
     target_language: str = "zh"
     mcm_output_language_suffix: str = "source"
     mcm_auto_export: bool = True
+    task_completion_sound_enabled: bool = False
     log_file: str = "logs/app.log"
     long_text_chunking_enabled: bool = True
     long_text_chunk_threshold_chars: int = 4000

@@ -150,6 +150,8 @@
     "tooltip_mcm_output_suffix": "保存 MCM 文本文件时使用的语言后缀，例如强制 _CHINESE 或保持源后缀。",
     "label_mcm_auto_export": "MCM 翻译完成后自动输出到源目录",
     "tooltip_mcm_auto_export": "启用后，MCM 翻译任务完成时会自动保存到源文件所在目录。",
+    "label_task_completion_sound": "任务结束时播放提示音",
+    "tooltip_task_completion_sound": "启用后，在翻译任务或术语任务结束时播放系统提示音。",
     "mcm_suffix_source": "保持源后缀",
     "mcm_suffix_english": "强制 _ENGLISH",
     "mcm_suffix_chinese": "强制 _CHINESE",

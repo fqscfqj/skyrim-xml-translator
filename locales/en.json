@@ -151,6 +151,8 @@
     "tooltip_mcm_output_suffix": "Controls the language suffix used when saving MCM text files, for example _CHINESE or keeping the source suffix.",
     "label_mcm_auto_export": "Auto-export MCM to source folder after translation",
     "tooltip_mcm_auto_export": "When enabled, translated MCM text files are saved automatically after translation finishes.",
+    "label_task_completion_sound": "Play a sound when tasks finish",
+    "tooltip_task_completion_sound": "When enabled, play the system notification sound after translation or glossary tasks finish.",
     "mcm_suffix_source": "Keep source suffix",
     "mcm_suffix_english": "Force _ENGLISH",
     "mcm_suffix_chinese": "Force _CHINESE",
