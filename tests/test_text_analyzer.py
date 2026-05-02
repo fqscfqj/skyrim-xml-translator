@@ -90,6 +90,37 @@ class TextAnalyzerPercentProtectionTests(unittest.TestCase):
         self.assertEqual(["<mag>", "%", "<dur>"], self.non_space_tokens(format_tokens))
         self.assertNotIn("% m", format_tokens)
 
+    def test_runtime_tag_word_separator_spaces_are_not_frozen(self):
+        source = (
+            "Tell <Alias.ShortName=Questgiver> what "
+            "<Alias.ShortName=Target> said about the outfit"
+        )
+
+        shell = self.assert_round_trips(source)
+
+        self.assertEqual(
+            ["<Alias.ShortName=Questgiver>", "<Alias.ShortName=Target>"],
+            self.non_space_tokens(shell.tokens),
+        )
+        self.assertFalse(any(str(token).isspace() for token in shell.tokens))
+
+        restored = self.analyzer.restore_protected_format_shell(
+            f"告诉{shell.sentinels[0]}关于那套装束，{shell.sentinels[1]}说了什么",
+            shell,
+        )
+
+        self.assertEqual(
+            "告诉<Alias.ShortName=Questgiver>关于那套装束，<Alias.ShortName=Target>说了什么",
+            restored,
+        )
+
+    def test_space_between_adjacent_protected_tokens_stays_frozen(self):
+        source = "%s %d"
+
+        shell = self.assert_round_trips(source)
+
+        self.assertEqual(["%s", " ", "%d"], list(shell.tokens))
+
     def test_numeric_percent_in_prose_is_not_protected(self):
         examples = [
             "There's a 100% chance that I'm going to say yes to that one.",

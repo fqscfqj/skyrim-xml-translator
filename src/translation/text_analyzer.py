@@ -390,7 +390,70 @@ class TextAnalyzer:
             return False
         if prev_char == "%" and next_char.isalpha():
             return False
-        return self._is_format_boundary_char(prev_char) or self._is_format_boundary_char(next_char)
+
+        prev_is_boundary = self._is_format_boundary_char(prev_char)
+        next_is_boundary = self._is_format_boundary_char(next_char)
+        between_protected_tokens = (
+            self._has_protected_token_ending_at(text, start)
+            and self._has_protected_token_starting_at(text, end)
+        )
+
+        # A lone source-language space beside just one protected token is usually
+        # not structural. Freezing it forces English word separators back into
+        # CJK output such as "告诉 <Alias=Foo> 关于...", even though the model
+        # translated naturally. Keep single spaces only when they separate two
+        # protected boundaries (for example "%s %d" or "<a> <b>").
+        return (prev_is_boundary and next_is_boundary) or between_protected_tokens
+
+    def _has_protected_token_ending_at(self, text: str, index: int) -> bool:
+        if index <= 0:
+            return False
+
+        window_start = max(0, index - 256)
+        fragment = text[window_start:index]
+        for match in self._PROTECTED_TOKEN_RE.finditer(fragment):
+            if match.end() != len(fragment):
+                continue
+            token = match.group(0)
+            return self._is_protected_non_whitespace_token(
+                text,
+                token,
+                window_start + match.start(),
+                window_start + match.end(),
+            )
+        return False
+
+    def _has_protected_token_starting_at(self, text: str, index: int) -> bool:
+        if index < 0 or index >= len(text):
+            return False
+
+        match = self._PROTECTED_TOKEN_RE.match(text, index)
+        if not match:
+            return False
+        return self._is_protected_non_whitespace_token(
+            text,
+            match.group(0),
+            match.start(),
+            match.end(),
+        )
+
+    def _is_protected_non_whitespace_token(
+            self,
+            text: str,
+            token: str,
+            start: int,
+            end: int) -> bool:
+        if not token or token.isspace():
+            return False
+        if self._FORMAT_SENTINEL_RE.fullmatch(token):
+            return True
+        if token == "%":
+            return self._is_protected_percent_literal(text, start, end)
+        if token.startswith("<") and token.endswith(">"):
+            return self._is_protected_angle_token(token)
+        if token.startswith("[") and token.endswith("]"):
+            return self._is_protected_bracket_token(token)
+        return True
 
     @staticmethod
     def _is_format_boundary_char(ch: str) -> bool:

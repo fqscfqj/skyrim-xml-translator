@@ -107,6 +107,23 @@ class QualityCheckerPlaceholderResidueTests(unittest.TestCase):
             issues,
         )
 
+    def test_accepts_cjk_translation_without_spaces_around_runtime_tags(self):
+        source = (
+            "Tell <Alias.ShortName=Questgiver> what "
+            "<Alias.ShortName=Target> said about the outfit"
+        )
+        translation = (
+            "告诉<Alias.ShortName=Questgiver>"
+            "关于那套装束，<Alias.ShortName=Target>说了什么"
+        )
+
+        issues = self.checker.check(source, translation, target_lang="zh")
+
+        self.assertFalse(
+            any(issue.rule_id == "protected_token_sequence" for issue in issues),
+            issues,
+        )
+
     def test_relaxed_format_whitespace_accepts_only_whitespace_drift(self):
         source = "Intro \n\n[pagebreak]\n<p align=\"left\">World</p>"
         translation = "前言[pagebreak]\n<p align=\"left\">世界</p>"
