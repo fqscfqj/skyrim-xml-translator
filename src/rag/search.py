@@ -460,6 +460,11 @@ class RAGSearcher:
                 return candidate
             if lookup_key != normalized_query:
                 return candidate
+            # 4) Normalized forms match and query itself appears in source text.
+            #    Handles glossary keys with extra characters (punctuation, etc.)
+            #    that differ from what the source text contains.
+            if source_text and self._raw_term_appears_in_source(query, source_text):
+                return candidate
         return self._resolve_token_containment_match(normalized_query, source_text)
 
     def _resolve_token_containment_match(self, normalized_query: str, source_text: Optional[str]) -> Optional[str]:
@@ -689,12 +694,24 @@ class RAGSearcher:
                 if is_sentence_like:
                     sentence_like_candidate_terms.add(canonical_term)
                     if not self._raw_term_appears_in_source(canonical_term, source_text):
-                        sentence_like_filtered_count += 1
-                        record_candidate_decision(
-                            term, score, "rejected", "sentence_like_not_in_source",
-                            canonical_term=canonical_term, source=candidate_source,
-                        )
-                        return False
+                        # Allow through if the query (from source) matches the
+                        # canonical term after normalization — the only difference
+                        # is trailing punctuation (e.g. "Brurid" vs "Brurid?").
+                        normalized_canonical = self.glossary_manager.normalize_term_key(canonical_term)
+                        if (
+                            query_norm
+                            and normalized_canonical
+                            and query_norm == normalized_canonical
+                            and self._raw_term_appears_in_source(query, source_text)
+                        ):
+                            pass  # accept — punctuation-only difference
+                        else:
+                            sentence_like_filtered_count += 1
+                            record_candidate_decision(
+                                term, score, "rejected", "sentence_like_not_in_source",
+                                canonical_term=canonical_term, source=candidate_source,
+                            )
+                            return False
                 # For semantic candidates, require signal-token overlap with query
                 # to reduce unrelated high-similarity noise.
                 if score < 1.0 and not self._has_signal_overlap(query, canonical_term):

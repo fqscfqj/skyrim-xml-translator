@@ -331,6 +331,104 @@ class RAGSearchCandidateRejectionDebugTests(unittest.TestCase):
         self.assertEqual(debug[0]["candidate_rejection_counts"]["not_in_glossary"], 1)
 
 
+class RAGSearchGlossaryKeyPunctuationDirectMatchTests(unittest.TestCase):
+    """Glossary keys with extra punctuation (e.g. '?') should still match
+    when the source text contains the token without that punctuation."""
+
+    def test_query_without_question_mark_matches_glossary_key_with_question_mark(self):
+        glossary = _DummyGlossaryManager({
+            "Brurid?": "布瑞德？",
+            "Stalleo": "斯塔莱奥",
+        })
+        searcher = RAGSearcher(
+            cast(Any, _DummyVectorStore([], [])),
+            cast(Any, glossary),
+            _DummyConfig({
+                ("rag", "keyword_weight_enabled"): False,
+                ("rag", "min_vector_score"): 0.0,
+                ("rag", "short_term_max_results"): 5,
+                ("rag", "long_term_max_results"): 5,
+            }),
+            _DummyLLMClient(),
+        )
+
+        results, debug = cast(
+            tuple[dict[str, str], list[dict[str, Any]]],
+            searcher.search(
+                ["Brurid"],
+                source_text="Both Brurid and Stalleo are dead.",
+                threshold=0.1,
+                top_k=5,
+                return_debug=True,
+            ),
+        )
+
+        self.assertEqual(results["Brurid?"], "布瑞德？")
+        self.assertEqual(debug[0]["direct_match"], "Brurid?")
+
+    def test_glossary_key_not_matched_when_query_absent_from_source(self):
+        """A query that does not appear in source text should NOT match
+        via the new punctuation-tolerant path."""
+        glossary = _DummyGlossaryManager({
+            "Brurid?": "布瑞德？",
+        })
+        searcher = RAGSearcher(
+            cast(Any, _DummyVectorStore([], [])),
+            cast(Any, glossary),
+            _DummyConfig({
+                ("rag", "keyword_weight_enabled"): False,
+                ("rag", "min_vector_score"): 0.0,
+                ("rag", "short_term_max_results"): 5,
+                ("rag", "long_term_max_results"): 5,
+            }),
+            _DummyLLMClient(),
+        )
+
+        results, debug = cast(
+            tuple[dict[str, str], list[dict[str, Any]]],
+            searcher.search(
+                ["Brurid"],
+                source_text="Both Stalleo and Ondolemar are dead.",
+                threshold=0.1,
+                top_k=5,
+                return_debug=True,
+            ),
+        )
+
+        self.assertNotIn("Brurid?", results)
+        self.assertIsNone(debug[0]["direct_match"])
+
+    def test_glossary_key_with_dot_matches_source_without_dot(self):
+        glossary = _DummyGlossaryManager({
+            "M'aiq.": "麦'奎。",
+        })
+        searcher = RAGSearcher(
+            cast(Any, _DummyVectorStore([], [])),
+            cast(Any, glossary),
+            _DummyConfig({
+                ("rag", "keyword_weight_enabled"): False,
+                ("rag", "min_vector_score"): 0.0,
+                ("rag", "short_term_max_results"): 5,
+                ("rag", "long_term_max_results"): 5,
+            }),
+            _DummyLLMClient(),
+        )
+
+        results, debug = cast(
+            tuple[dict[str, str], list[dict[str, Any]]],
+            searcher.search(
+                ["M'aiq"],
+                source_text="M'aiq the Liar",
+                threshold=0.1,
+                top_k=5,
+                return_debug=True,
+            ),
+        )
+
+        self.assertEqual(results["M'aiq."], "麦'奎。")
+        self.assertEqual(debug[0]["direct_match"], "M'aiq.")
+
+
 class PromptBuilderGlossaryContextTests(unittest.TestCase):
     def test_plural_source_forms_count_as_in_source_terms(self):
         builder = PromptBuilder(_DummyPromptManager(), _DummyConfig())
