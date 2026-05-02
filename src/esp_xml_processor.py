@@ -9,6 +9,7 @@ from typing import Any, Optional
 
 from src.config.manager import ConfigManager
 from src.logging_helper import emit as log_emit
+from src.xml_content import get_node_inner_content, set_node_inner_content
 
 
 class ESPXMLProcessor:
@@ -51,9 +52,9 @@ class ESPXMLProcessor:
             if original_node is None:
                 continue
 
-            source_text = original_node.text if original_node.text else ""
+            source_text = get_node_inner_content(original_node, etree)
             traduit_node = esp_node.find("TRADUIT")
-            dest_text = traduit_node.text if traduit_node is not None and traduit_node.text else ""
+            dest_text = get_node_inner_content(traduit_node, etree) if traduit_node is not None else ""
             yield esp_node, self._build_id_text(esp_node), source_text, dest_text
 
     def update_dest(self, esp_node, translation: str, overwrite: bool = False) -> None:
@@ -62,8 +63,9 @@ class ESPXMLProcessor:
             traduit_node = etree.SubElement(esp_node, "TRADUIT")
 
         safe_translation = str(translation) if translation is not None else ""
-        if not traduit_node.text or overwrite:
-            traduit_node.text = safe_translation
+        existing_content = get_node_inner_content(traduit_node, etree)
+        if overwrite or not existing_content:
+            set_node_inner_content(traduit_node, safe_translation, etree)
 
     def save_file(self, output_path=None):
         if output_path is None:

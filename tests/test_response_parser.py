@@ -37,6 +37,12 @@ class ResponseParserTests(unittest.TestCase):
         self.assertEqual(result, "你好")
         self.assert_no_json_parse_warning(logs)
 
+    def test_direct_json_preserves_format_sentinel_value(self):
+        result, logs = self._parse_with_logs('{"translation":"你好__FMT_1_0001__"}')
+
+        self.assertEqual(result, "你好__FMT_1_0001__")
+        self.assert_no_json_parse_warning(logs)
+
     def test_markdown_fenced_json(self):
         result, logs = self._parse_with_logs('```json\n{"translation":"你好"}\n```')
 

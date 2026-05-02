@@ -11,6 +11,7 @@ import os
 from typing import Optional, Any
 from src.logging_helper import emit as log_emit
 from src.config.manager import ConfigManager
+from src.xml_content import get_node_inner_content, set_node_inner_content
 
 class XMLProcessor:
     def __init__(self):
@@ -80,8 +81,8 @@ class XMLProcessor:
                     id_text = string_node.attrib["id"]
             
             if source_node is not None:
-                source_text = source_node.text if source_node.text else ""
-                dest_text = dest_node.text if dest_node is not None and dest_node.text else ""
+                source_text = get_node_inner_content(source_node, etree)
+                dest_text = get_node_inner_content(dest_node, etree) if dest_node is not None else ""
                 yield string_node, id_text, source_text, dest_text
 
     def update_dest(self, string_node, translation: str, overwrite: bool = False) -> None:
@@ -90,8 +91,9 @@ class XMLProcessor:
             dest_node = etree.SubElement(string_node, "Dest")
         # Normalize translation to string and guard against None
         safe_translation = str(translation) if translation is not None else ""
-        if not dest_node.text or overwrite:
-            dest_node.text = safe_translation
+        existing_content = get_node_inner_content(dest_node, etree)
+        if overwrite or not existing_content:
+            set_node_inner_content(dest_node, safe_translation, etree)
 
     def save_file(self, output_path=None):
         if output_path is None:
