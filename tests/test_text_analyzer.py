@@ -90,7 +90,7 @@ class TextAnalyzerPercentProtectionTests(unittest.TestCase):
         self.assertEqual(["<mag>", "%", "<dur>"], self.non_space_tokens(format_tokens))
         self.assertNotIn("% m", format_tokens)
 
-    def test_runtime_tag_word_separator_spaces_are_not_frozen(self):
+    def test_runtime_tag_shell_keeps_only_tags_and_cjk_normalizer_removes_manual_spaces(self):
         source = (
             "Tell <Alias.ShortName=Questgiver> what "
             "<Alias.ShortName=Target> said about the outfit"
@@ -114,12 +114,28 @@ class TextAnalyzerPercentProtectionTests(unittest.TestCase):
             restored,
         )
 
+        normalized = self.analyzer.normalize_cjk_runtime_tag_spacing(
+            "告诉 <Alias.ShortName=Questgiver> 关于那套装束， <Alias.ShortName=Target> 说了什么"
+        )
+
+        self.assertEqual(
+            "告诉<Alias.ShortName=Questgiver>关于那套装束，<Alias.ShortName=Target>说了什么",
+            normalized,
+        )
+
     def test_space_between_adjacent_protected_tokens_stays_frozen(self):
         source = "%s %d"
 
         shell = self.assert_round_trips(source)
 
         self.assertEqual(["%s", " ", "%d"], list(shell.tokens))
+
+    def test_cjk_runtime_tag_normalizer_does_not_touch_xml_tags(self):
+        text = "前言 <p align=\"left\"> 世界 </p>"
+
+        normalized = self.analyzer.normalize_cjk_runtime_tag_spacing(text)
+
+        self.assertEqual(text, normalized)
 
     def test_numeric_percent_in_prose_is_not_protected(self):
         examples = [

@@ -1,5 +1,6 @@
 """Multi-layer translation quality validation pipeline."""
 
+from collections import Counter
 import re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -106,6 +107,7 @@ class QualityChecker:
         format_issues = self._check_format_preservation(
             source_text,
             translation_text,
+            target_lang=target_lang,
             strict_whitespace=strict_format_whitespace,
         )
         issues.extend(format_issues)
@@ -356,27 +358,50 @@ class QualityChecker:
     # --- Layer 3: Format preservation ---
 
     def _check_format_preservation(self, source: str, translation: str,
+                                   target_lang: str = "zh",
                                    strict_whitespace: bool = True) -> list[QualityIssue]:
         """Check that protected formatting tokens are preserved exactly."""
         issues = []
 
         source_format_tokens = self._text_analyzer.extract_protected_format_tokens(source)
         translation_format_tokens = self._text_analyzer.extract_protected_format_tokens(translation)
-        if source_format_tokens != translation_format_tokens:
-            source_non_space_tokens = self._drop_whitespace_tokens(source_format_tokens)
-            translation_non_space_tokens = self._drop_whitespace_tokens(translation_format_tokens)
+        source_compare_tokens, source_runtime_tokens = self._split_runtime_tokens_for_format_compare(
+            source_format_tokens,
+            target_lang=target_lang,
+        )
+        translation_compare_tokens, translation_runtime_tokens = self._split_runtime_tokens_for_format_compare(
+            translation_format_tokens,
+            target_lang=target_lang,
+        )
+
+        if source_compare_tokens != translation_compare_tokens:
+            source_non_space_tokens = self._drop_whitespace_tokens(source_compare_tokens)
+            translation_non_space_tokens = self._drop_whitespace_tokens(translation_compare_tokens)
             if strict_whitespace or source_non_space_tokens != translation_non_space_tokens:
                 issues.append(QualityIssue(
                     issue_type=QualityIssueType.FORMAT_VIOLATION,
                     severity="error",
                     details=self._describe_token_sequence_mismatch(
                         "Protected format sequence mismatch",
-                        source_format_tokens,
-                        translation_format_tokens,
+                        source_compare_tokens,
+                        translation_compare_tokens,
                     ),
                     rule_id="protected_token_sequence",
-                    fragments=self._collect_sequence_fragments(source_format_tokens, translation_format_tokens),
+                    fragments=self._collect_sequence_fragments(source_compare_tokens, translation_compare_tokens),
                 ))
+
+        if Counter(source_runtime_tokens) != Counter(translation_runtime_tokens):
+            issues.append(QualityIssue(
+                issue_type=QualityIssueType.FORMAT_VIOLATION,
+                severity="error",
+                details=self._describe_token_sequence_mismatch(
+                    "Skyrim runtime token mismatch",
+                    source_runtime_tokens,
+                    translation_runtime_tokens,
+                ),
+                rule_id="runtime_token_sequence",
+                fragments=self._collect_sequence_fragments(source_runtime_tokens, translation_runtime_tokens),
+            ))
 
         source_placeholders = self._text_analyzer.extract_placeholder_tokens(source)
         translation_placeholders = self._text_analyzer.extract_placeholder_tokens(translation)
@@ -394,6 +419,54 @@ class QualityChecker:
             ))
 
         return issues
+
+    def _split_runtime_tokens_for_format_compare(
+            self,
+            tokens: list[str],
+            target_lang: str = "zh") -> tuple[list[str], list[str]]:
+        compare_tokens: list[str] = []
+        runtime_tokens: list[str] = []
+
+        for idx, token in enumerate(tokens):
+            if self._is_ignorable_runtime_adjacent_space(tokens, idx, target_lang=target_lang):
+                continue
+            if self._is_runtime_token(token):
+                runtime_tokens.append(token)
+                continue
+            compare_tokens.append(token)
+
+        return compare_tokens, runtime_tokens
+
+    def _is_runtime_token(self, token: str) -> bool:
+        return self._text_analyzer.is_skyrim_runtime_token(str(token))
+
+    def _is_ignorable_runtime_adjacent_space(
+            self,
+            tokens: list[str],
+            index: int,
+            target_lang: str = "zh") -> bool:
+        if not self._should_check_latin_ratio(target_lang):
+            return False
+        if index < 0 or index >= len(tokens):
+            return False
+
+        token = str(tokens[index])
+        if token != " ":
+            return False
+
+        prev_non_space = self._nearest_non_space_token(tokens, index, step=-1)
+        next_non_space = self._nearest_non_space_token(tokens, index, step=1)
+        return self._is_runtime_token(prev_non_space) or self._is_runtime_token(next_non_space)
+
+    @staticmethod
+    def _nearest_non_space_token(tokens: list[str], index: int, step: int) -> str:
+        pos = index + step
+        while 0 <= pos < len(tokens):
+            token = str(tokens[pos])
+            if not token.isspace():
+                return token
+            pos += step
+        return ""
 
     def _check_paired_wrapper_preservation(
             self,

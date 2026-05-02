@@ -310,20 +310,24 @@ class Translator:
                 log_emit(log_callback, self.rag_engine.config, "DEBUG",
                          f"Translation cache hit for text (len={len(source_text)})",
                          module="translator", func="translate_text")
+                cached_translation = self._finalize_translation_text(
+                    str(cached),
+                    target_lang=str(target_lang),
+                )
                 if return_debug_info:
                     cached_issues = self._quality_checker.check(
                         source_text,
-                        str(cached),
+                        cached_translation,
                         reference_id=reference_id,
                         target_lang=str(target_lang),
                     )
                     result_status, result_details = self._result_status_from_issues(cached_issues)
-                    return cached, self._empty_debug_info(
+                    return cached_translation, self._empty_debug_info(
                         text,
                         result_status=result_status,
                         result_details=result_details,
                     )
-                return cached
+                return cached_translation
         if cached is not None and not str(cached).strip():
             log_emit(log_callback, self.rag_engine.config, "DEBUG",
                      "Ignoring empty cached translation (treat as cache miss)",
@@ -411,6 +415,10 @@ class Translator:
                         translation,
                         format_shell,
                     )
+                translation = self._finalize_translation_text(
+                    translation,
+                    target_lang=str(target_lang),
+                )
                 last_translation = translation
 
                 # Quality check
@@ -546,21 +554,25 @@ class Translator:
                     translation=str(cached),
                     target_lang=str(target_lang),
                     reference_id=reference_id):
+                cached_translation = self._finalize_translation_text(
+                    str(cached),
+                    target_lang=str(target_lang),
+                )
                 if return_debug_info:
                     cached_issues = self._quality_checker.check(
                         source_text,
-                        str(cached),
+                        cached_translation,
                         reference_id=reference_id,
                         target_lang=str(target_lang),
                     )
                     result_status, result_details = self._result_status_from_issues(cached_issues)
-                    results[idx] = (cached, self._empty_debug_info(
+                    results[idx] = (cached_translation, self._empty_debug_info(
                         source_text,
                         result_status=result_status,
                         result_details=result_details,
                     ))
                 else:
-                    results[idx] = cached
+                    results[idx] = cached_translation
                 continue
 
             try:
@@ -613,7 +625,10 @@ class Translator:
                         fallback_indices.add(idx)
                         continue
 
-                    translation = str(translation)
+                    translation = self._finalize_translation_text(
+                        str(translation),
+                        target_lang=str(target_lang),
+                    )
                     issues = self._quality_checker.check(
                         source_text,
                         translation,
@@ -701,20 +716,24 @@ class Translator:
                 log_emit(log_callback, self.rag_engine.config, "DEBUG",
                          f"Long-text translation cache hit for text (len={len(source_text)})",
                          module="translator", func="_translate_long_text")
+                cached_translation = self._finalize_translation_text(
+                    str(cached),
+                    target_lang=str(target_lang),
+                )
                 if return_debug_info:
                     cached_issues = self._quality_checker.check(
                         source_text,
-                        str(cached),
+                        cached_translation,
                         reference_id=reference_id,
                         target_lang=str(target_lang),
                     )
                     result_status, result_details = self._result_status_from_issues(cached_issues)
-                    return cached, self._empty_debug_info(
+                    return cached_translation, self._empty_debug_info(
                         source_text,
                         result_status=result_status,
                         result_details=result_details,
                     )
-                return cached
+                return cached_translation
 
         chunk_target = self._config_int(
             "general", "long_text_chunk_target_chars", 1800,
@@ -829,6 +848,10 @@ class Translator:
                             chunk_translation,
                             format_shell,
                         )
+                    chunk_translation = self._finalize_translation_text(
+                        chunk_translation,
+                        target_lang=str(target_lang),
+                    )
                     if isinstance(chunk_attempt, dict):
                         chunk_attempt["parsed_translation"] = str(chunk_translation)
                         chunk_attempt["accepted"] = True
@@ -939,6 +962,17 @@ class Translator:
             return
         debug_info["result_status"] = result_status
         debug_info["result_details"] = result_details
+
+    def _finalize_translation_text(self, translation: str, target_lang: str) -> str:
+        text = "" if translation is None else str(translation)
+        if self._is_cjk_target_language(target_lang):
+            text = self._text_analyzer.normalize_cjk_runtime_tag_spacing(text)
+        return text
+
+    @staticmethod
+    def _is_cjk_target_language(target_lang: str) -> bool:
+        lang = (target_lang or "").strip().lower()
+        return lang.startswith(("zh", "ja", "ko"))
 
     @staticmethod
     def _result_status_from_issues(issues: list[QualityIssue]) -> tuple[str, str]:

@@ -124,6 +124,28 @@ class QualityCheckerPlaceholderResidueTests(unittest.TestCase):
             issues,
         )
 
+    def test_accepts_reordered_runtime_tags_when_all_tokens_preserved(self):
+        source = "Speak to <Alias.ShortName=Target> with <Alias.ShortName=Questgiver>'s outfit on"
+        translation = "穿着<Alias.ShortName=Questgiver>的装束去和<Alias.ShortName=Target>交谈"
+
+        issues = self.checker.check(source, translation, target_lang="zh")
+
+        self.assertFalse(
+            any(issue.severity == "error" for issue in issues),
+            issues,
+        )
+
+    def test_rejects_missing_or_duplicated_runtime_tags(self):
+        source = "Speak to <Alias.ShortName=Target> with <Alias.ShortName=Questgiver>'s outfit on"
+        translation = "穿着<Alias.ShortName=Questgiver>的装束去和<Alias.ShortName=Questgiver>交谈"
+
+        issues = self.checker.check(source, translation, target_lang="zh")
+
+        self.assertTrue(
+            any(issue.rule_id == "runtime_token_sequence" for issue in issues),
+            issues,
+        )
+
     def test_relaxed_format_whitespace_accepts_only_whitespace_drift(self):
         source = "Intro \n\n[pagebreak]\n<p align=\"left\">World</p>"
         translation = "前言[pagebreak]\n<p align=\"left\">世界</p>"

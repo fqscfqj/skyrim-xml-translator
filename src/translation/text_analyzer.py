@@ -151,6 +151,50 @@ class TextAnalyzer:
             restored = restored.replace(sentinel, token)
         return restored
 
+    def normalize_cjk_runtime_tag_spacing(self, text: str) -> str:
+        """Remove English-style spaces around Skyrim runtime tags in CJK output."""
+        if text is None:
+            return ""
+
+        normalized = str(text)
+        if not normalized:
+            return normalized
+
+        cjk_context_chars = (
+            r"\u4e00-\u9fff"
+            r"\u3040-\u30ff"
+            r"\uac00-\ud7af"
+            r"，。！？；：、“”‘’（）《》〈〉「」『』【】〔〕…—"
+            r",.!?;:\)\]\}"
+            r"\(\[\{"
+        )
+        before_tag_re = re.compile(
+            rf"(?P<left>[{cjk_context_chars}])(?P<gap>[ \t]+)(?P<tag><[^>]*>)"
+        )
+        after_tag_re = re.compile(
+            rf"(?P<tag><[^>]*>)(?P<gap>[ \t]+)(?P<right>[{cjk_context_chars}])"
+        )
+
+        def strip_before(match: re.Match[str]) -> str:
+            tag = match.group("tag")
+            if not self._is_skyrim_runtime_token(tag):
+                return match.group(0)
+            return f"{match.group('left')}{tag}"
+
+        def strip_after(match: re.Match[str]) -> str:
+            tag = match.group("tag")
+            if not self._is_skyrim_runtime_token(tag):
+                return match.group(0)
+            return f"{tag}{match.group('right')}"
+
+        previous = None
+        while previous != normalized:
+            previous = normalized
+            normalized = before_tag_re.sub(strip_before, normalized)
+            normalized = after_tag_re.sub(strip_after, normalized)
+
+        return normalized
+
     def chunk_text(self, text: str, max_chunk_chars: int) -> list[str]:
         """Split long text into safe chunks without dropping content."""
         if text is None:
@@ -330,6 +374,10 @@ class TextAnalyzer:
             or self._SKYRIM_RUNTIME_NUMERIC_RE.fullmatch(inner)
             or self._SKYRIM_RUNTIME_SPECIAL_RE.fullmatch(inner)
         )
+
+    def is_skyrim_runtime_token(self, token: str) -> bool:
+        """Public helper for callers that need Skyrim runtime-token semantics."""
+        return self._is_skyrim_runtime_token(token)
 
     @staticmethod
     def _format_sentinel(prefix: str, index: int) -> str:
