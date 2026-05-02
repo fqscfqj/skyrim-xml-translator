@@ -48,6 +48,9 @@ class QualityChecker:
         "square": "brackets",
         "quote": "quotes",
     }
+    _SAME_CHAR_WRAPPER_SEGMENT_SEPARATOR_RE = re.compile(
+        r"^[\s,，、;；:：/\\|.!?。！？·…\-–—]*$"
+    )
 
     def __init__(self, latin_ratio_threshold: float = 2.0):
         self._text_analyzer = TextAnalyzer()
@@ -546,13 +549,15 @@ class QualityChecker:
 
         return None
 
-    @staticmethod
-    def _has_outer_wrapper(text: str, open_ch: str, close_ch: str) -> bool:
+    @classmethod
+    def _has_outer_wrapper(cls, text: str, open_ch: str, close_ch: str) -> bool:
         if not text or len(text) < len(open_ch) + len(close_ch):
             return False
         if not text.startswith(open_ch) or not text.endswith(close_ch):
             return False
         if open_ch == close_ch:
+            if cls._looks_like_multiple_same_char_wrapped_segments(text, open_ch):
+                return False
             return len(text) >= len(open_ch) + len(close_ch)
 
         depth = 0
@@ -568,6 +573,24 @@ class QualityChecker:
                     return False
 
         return depth == 0
+
+    @classmethod
+    def _looks_like_multiple_same_char_wrapped_segments(cls, text: str, wrapper_ch: str) -> bool:
+        if not text or not wrapper_ch or len(wrapper_ch) != 1:
+            return False
+
+        quote_positions = [idx for idx, ch in enumerate(text) if ch == wrapper_ch]
+        if len(quote_positions) < 4:
+            return False
+
+        for pos in range(1, len(quote_positions) - 1, 2):
+            close_idx = quote_positions[pos]
+            next_quote_idx = quote_positions[pos + 1]
+            between = text[close_idx + 1:next_quote_idx]
+            if cls._SAME_CHAR_WRAPPER_SEGMENT_SEPARATOR_RE.fullmatch(between):
+                return True
+
+        return False
 
     def _describe_wrapper_groups(self, groups: list[str]) -> str:
         if not groups:

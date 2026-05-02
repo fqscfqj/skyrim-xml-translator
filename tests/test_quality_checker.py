@@ -230,6 +230,26 @@ class QualityCheckerPairedWrapperTests(unittest.TestCase):
 
         self.assert_no_wrapper_error(source, translation)
 
+    def test_multi_segment_ascii_quotes_do_not_require_single_outer_wrapper(self):
+        source = (
+            '"Did it hurt? When you fell out of heaven?" '
+            '"I\'ve lost my way in your eyes." '
+            '"Can you help me find a way to your heart?"'
+        )
+        translation = (
+            "“你从天上掉下来时疼吗？” "
+            "“我在你的眼里迷失了方向。” "
+            "“你能帮我找到通往你心里的路吗？”"
+        )
+
+        self.assert_no_wrapper_error(source, translation)
+
+    def test_multi_segment_ascii_quotes_with_separator_punctuation_do_not_require_single_outer_wrapper(self):
+        source = '"A cruel truth.", "A sweeter lie."'
+        translation = '“残酷的真相。”，“更甜美的谎言。”'
+
+        self.assert_no_wrapper_error(source, translation)
+
     def test_nested_wrappers_must_all_be_preserved(self):
         source = '"(Take her virginity)"'
         translation = "“夺走她的初夜”"
