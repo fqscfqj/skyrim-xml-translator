@@ -63,6 +63,39 @@ class ESPXMLProcessorInnerContentTests(unittest.TestCase):
             rows[0][3],
         )
 
+        raw_output = Path(file_path).read_text(encoding="utf-8")
+        self.assertIn("<i>怀疑者</i>", raw_output)
+
+    def test_update_dest_keeps_literal_book_tags_as_escaped_text(self):
+        file_path = self._write_fixture(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+            "<Root><ESP>"
+            "<EDID>BookText</EDID>"
+            "<ORIGINAL>&lt;p align=\"center\"&gt;Greetings&lt;/p&gt;</ORIGINAL>"
+            "<TRADUIT></TRADUIT>"
+            "</ESP></Root>"
+        )
+
+        processor = ESPXMLProcessor()
+        self.assertTrue(processor.load_file(file_path))
+        row = next(processor.get_strings())
+        node = row[0]
+
+        processor.update_dest(node, '<p align="center">你好</p>', overwrite=True)
+        self.assertTrue(processor.save_file(file_path))
+
+        raw_output = Path(file_path).read_text(encoding="utf-8")
+        self.assertIn('&lt;p align="center"&gt;你好&lt;/p&gt;', raw_output)
+
+        reloaded = ESPXMLProcessor()
+        self.assertTrue(reloaded.load_file(file_path))
+        rows = list(reloaded.get_strings())
+        self.assertEqual('<p align="center">你好</p>', rows[0][3])
+
+        traduit_node = reloaded.root.find(".//TRADUIT")
+        self.assertIsNotNone(traduit_node)
+        self.assertEqual(0, len(list(traduit_node)))
+
 
 if __name__ == "__main__":
     unittest.main()

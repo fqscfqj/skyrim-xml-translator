@@ -11,7 +11,12 @@ import os
 from typing import Optional, Any
 from src.logging_helper import emit as log_emit
 from src.config.manager import ConfigManager
-from src.xml_content import get_node_inner_content, set_node_inner_content
+from src.xml_content import (
+    get_node_inner_content,
+    node_has_child_elements,
+    set_node_inner_content,
+    set_node_text_content,
+)
 
 class XMLProcessor:
     def __init__(self):
@@ -89,11 +94,20 @@ class XMLProcessor:
         dest_node = string_node.find("Dest")
         if dest_node is None:
             dest_node = etree.SubElement(string_node, "Dest")
+
+        source_node = string_node.find("Source")
         # Normalize translation to string and guard against None
         safe_translation = str(translation) if translation is not None else ""
         existing_content = get_node_inner_content(dest_node, etree)
         if overwrite or not existing_content:
-            set_node_inner_content(dest_node, safe_translation, etree)
+            prefer_mixed_content = (
+                node_has_child_elements(dest_node)
+                or node_has_child_elements(source_node)
+            )
+            if prefer_mixed_content:
+                set_node_inner_content(dest_node, safe_translation, etree)
+            else:
+                set_node_text_content(dest_node, safe_translation)
 
     def save_file(self, output_path=None):
         if output_path is None:

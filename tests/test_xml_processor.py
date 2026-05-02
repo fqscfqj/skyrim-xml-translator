@@ -55,6 +55,39 @@ class XMLProcessorInnerContentTests(unittest.TestCase):
         rows = list(reloaded.get_strings())
         self.assertEqual("译前 <i>怀疑者</i> 译后 <mag> ", rows[0][3])
 
+        raw_output = Path(file_path).read_text(encoding="utf-8")
+        self.assertIn("<i>怀疑者</i>", raw_output)
+        self.assertIn("&lt;mag&gt;", raw_output)
+
+    def test_update_dest_keeps_literal_book_tags_as_escaped_text(self):
+        file_path = self._write_fixture(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+            "<Root><String id=\"1\" EDID=\"BookText\">"
+            "<Source>&lt;p align=\"center\"&gt;Greetings&lt;/p&gt;</Source>"
+            "<Dest></Dest>"
+            "</String></Root>"
+        )
+
+        processor = XMLProcessor()
+        self.assertTrue(processor.load_file(file_path))
+        row = next(processor.get_strings())
+        node = row[0]
+
+        processor.update_dest(node, '<p align="center">你好</p>', overwrite=True)
+        self.assertTrue(processor.save_file(file_path))
+
+        raw_output = Path(file_path).read_text(encoding="utf-8")
+        self.assertIn('&lt;p align="center"&gt;你好&lt;/p&gt;', raw_output)
+
+        reloaded = XMLProcessor()
+        self.assertTrue(reloaded.load_file(file_path))
+        rows = list(reloaded.get_strings())
+        self.assertEqual('<p align="center">你好</p>', rows[0][3])
+
+        dest_node = reloaded.root.find(".//Dest")
+        self.assertIsNotNone(dest_node)
+        self.assertEqual(0, len(list(dest_node)))
+
     def test_update_dest_does_not_overwrite_existing_child_only_markup_without_flag(self):
         file_path = self._write_fixture(
             "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"

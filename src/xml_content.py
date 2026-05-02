@@ -28,6 +28,22 @@ def get_node_inner_content(node: Any, etree_module: Any) -> str:
     return "".join(parts)
 
 
+def node_has_child_elements(node: Any) -> bool:
+    """Return whether the node contains real XML child elements."""
+    if node is None:
+        return False
+    return bool(list(node))
+
+
+def set_node_text_content(node: Any, value: str) -> None:
+    """Replace node content as plain text, preserving literal angle-bracket text."""
+    if node is None:
+        return
+
+    _clear_node_children(node)
+    node.text = "" if value is None else str(value)
+
+
 def set_node_inner_content(node: Any, value: str, etree_module: Any) -> None:
     """Replace node inner content, preserving balanced child XML fragments as elements.
 
