@@ -130,6 +130,37 @@ class TextAnalyzerPercentProtectionTests(unittest.TestCase):
 
         self.assertEqual(["%s", " ", "%d"], list(shell.tokens))
 
+    def test_relaxed_spaces_policy_does_not_freeze_dialogue_padding_spaces(self):
+        source = " A  little more seriousness, please."
+
+        shell = self.analyzer.build_protected_format_shell(
+            source,
+            whitespace_policy=TextAnalyzer.WHITESPACE_POLICY_RELAXED_SPACES,
+        )
+
+        self.assertEqual(source, shell.protected_text)
+        self.assertEqual((), shell.tokens)
+
+    def test_relaxed_spaces_policy_still_freezes_space_between_adjacent_tokens(self):
+        source = "Hello %s %d"
+
+        shell = self.analyzer.build_protected_format_shell(
+            source,
+            whitespace_policy=TextAnalyzer.WHITESPACE_POLICY_RELAXED_SPACES,
+        )
+
+        self.assertEqual(["%s", " ", "%d"], list(shell.tokens))
+
+    def test_relaxed_spaces_policy_still_freezes_newlines(self):
+        source = "Line one\nLine two"
+
+        shell = self.analyzer.build_protected_format_shell(
+            source,
+            whitespace_policy=TextAnalyzer.WHITESPACE_POLICY_RELAXED_SPACES,
+        )
+
+        self.assertEqual(["\n"], list(shell.tokens))
+
     def test_cjk_runtime_tag_normalizer_does_not_touch_xml_tags(self):
         text = "前言 <p align=\"left\"> 世界 </p>"
 
@@ -218,6 +249,20 @@ class PromptBuilderGlossaryContextTests(unittest.TestCase):
         line = next(line for line in context.splitlines() if "Reference ->" in line)
         value = line.split("->", 1)[1].strip()
         self.assertLessEqual(len(value), 61)
+
+    def test_build_adds_dialogue_whitespace_rule_for_relaxed_spaces(self):
+        builder = PromptBuilder(_DummyPromptManager(), _DummyConfig())
+
+        _system_prompt, user_prompt = builder.build(
+            " A  little more seriousness, please.",
+            {},
+            context_hint={
+                "whitespace_policy": TextAnalyzer.WHITESPACE_POLICY_RELAXED_SPACES,
+            },
+        )
+
+        self.assertIn("普通对话空白规则", user_prompt)
+        self.assertIn("__FMT_*__", user_prompt)
 
 
 if __name__ == "__main__":

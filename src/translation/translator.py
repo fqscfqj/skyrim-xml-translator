@@ -95,6 +95,10 @@ class Translator:
         if text is None:
             return False
         source_text = str(text)
+        resolved_context_hint = self._with_resolved_whitespace_policy(
+            source_text,
+            context_hint=context_hint,
+        )
         stripped = source_text.strip()
         if not stripped:
             return False
@@ -106,9 +110,15 @@ class Translator:
             return False
         if self._text_analyzer.is_only_symbols_or_numbers(source_text):
             return False
-        if self._should_passthrough_identifier(source_text, context_hint=context_hint):
+        if self._should_passthrough_identifier(source_text, context_hint=resolved_context_hint):
             return False
-        format_shell = self._text_analyzer.build_protected_format_shell(source_text)
+        format_shell = self._text_analyzer.build_protected_format_shell(
+            source_text,
+            whitespace_policy=self._resolve_shell_whitespace_policy(
+                source_text,
+                context_hint=resolved_context_hint,
+            ),
+        )
         return not format_shell.has_tokens
 
     def get_rag_debug_info(self, text, use_rag=True, log_callback=None,
@@ -132,6 +142,11 @@ class Translator:
 
         self._reload_prompts_if_needed()
 
+        resolved_context_hint = self._with_resolved_whitespace_policy(
+            text,
+            context_hint=context_hint,
+        )
+
         rag_result = self._run_rag_phase(text, use_rag=use_rag, log_callback=log_callback)
         debug_info["keywords"] = rag_result["keywords"]
         debug_info["rag_tasks"] = rag_result["keywords"]
@@ -144,7 +159,7 @@ class Translator:
         mcm_ui_mode = bool(self._runtime_flags.get("mcm_ui_mode", False))
         system_prompt, user_prompt = self._prompt_builder.build(
             text, debug_info.get("matched_terms", {}), prompt_style,
-            mcm_ui_mode=mcm_ui_mode, context_hint=context_hint)
+            mcm_ui_mode=mcm_ui_mode, context_hint=resolved_context_hint)
 
         debug_info["system_prompt"] = system_prompt
         debug_info["user_prompt"] = user_prompt
@@ -234,11 +249,14 @@ class Translator:
     def translate_text(self, text, use_rag=True, log_callback=None,
                        max_retries=2, return_debug_info: bool = False,
                        context_hint: Optional[dict] = None):
-        reference_id = ""
-        if isinstance(context_hint, dict):
-            reference_id = str(context_hint.get("entry_id", "") or "")
-
         source_text = str(text) if text is not None else ""
+        resolved_context_hint = self._with_resolved_whitespace_policy(
+            source_text,
+            context_hint=context_hint,
+        )
+        reference_id = ""
+        if isinstance(resolved_context_hint, dict):
+            reference_id = str(resolved_context_hint.get("entry_id", "") or "")
 
         if not text or not source_text.strip():
             if return_debug_info:
@@ -254,7 +272,7 @@ class Translator:
                 return source_text, self._empty_debug_info(text)
             return source_text
 
-        if self._should_passthrough_identifier(source_text, context_hint=context_hint):
+        if self._should_passthrough_identifier(source_text, context_hint=resolved_context_hint):
             log_emit(log_callback, self.rag_engine.config, "DEBUG",
                      f"Preserving identifier-like text without translation: {text}",
                      module="translator", func="translate_text")
@@ -278,7 +296,7 @@ class Translator:
                     log_callback=log_callback,
                     max_retries=max_retries,
                     return_debug_info=return_debug_info,
-                    context_hint=context_hint,
+                    context_hint=resolved_context_hint,
                     reference_id=reference_id,
                 )
 
@@ -288,13 +306,27 @@ class Translator:
             raise ValueError(
                 f"Text too long ({len(source_text)} chars, limit {chunk_threshold}), translation skipped")
 
-        format_shell = self._text_analyzer.build_protected_format_shell(source_text)
+        shell_whitespace_policy = self._resolve_shell_whitespace_policy(
+            source_text,
+            context_hint=resolved_context_hint,
+        )
+        quality_whitespace_policy = self._resolve_quality_whitespace_policy(
+            source_text,
+            context_hint=resolved_context_hint,
+        )
+        format_shell = self._text_analyzer.build_protected_format_shell(
+            source_text,
+            whitespace_policy=shell_whitespace_policy,
+        )
         llm_text = format_shell.protected_text if format_shell.has_tokens else source_text
 
         # Check translation cache
         prompt_style = self.rag_engine.config.get("general", "prompt_style", "default")
         target_lang = self.rag_engine.config.get("general", "target_language", "zh")
-        runtime_context_key = "mcm_ui" if self._runtime_flags.get("mcm_ui_mode", False) else ""
+        runtime_context_key = self._translation_context_key(
+            source_text,
+            context_hint=resolved_context_hint,
+        )
         cached = self._translation_cache.get(
             source_text, prompt_style, target_lang, context_key=runtime_context_key)
         if cached is not None and str(cached).strip():
@@ -302,7 +334,8 @@ class Translator:
                     source=source_text,
                     translation=str(cached),
                     target_lang=str(target_lang),
-                    reference_id=reference_id):
+                    reference_id=reference_id,
+                    whitespace_policy=quality_whitespace_policy):
                 log_emit(log_callback, self.rag_engine.config, "DEBUG",
                          "Ignoring suspicious cache entry (possible missed translation)",
                          module="translator", func="translate_text")
@@ -320,6 +353,7 @@ class Translator:
                         cached_translation,
                         reference_id=reference_id,
                         target_lang=str(target_lang),
+                        whitespace_policy=quality_whitespace_policy,
                     )
                     result_status, result_details = self._result_status_from_issues(cached_issues)
                     return cached_translation, self._empty_debug_info(
@@ -348,7 +382,7 @@ class Translator:
         mcm_ui_mode = bool(self._runtime_flags.get("mcm_ui_mode", False))
         system_prompt, user_content = self._prompt_builder.build(
             llm_text, matched_terms, prompt_style,
-            mcm_ui_mode=mcm_ui_mode, context_hint=context_hint,
+            mcm_ui_mode=mcm_ui_mode, context_hint=resolved_context_hint,
             glossary_source_text=source_text)
 
         debug_info = None
@@ -428,6 +462,7 @@ class Translator:
                     matched_terms,
                     reference_id=reference_id,
                     target_lang=str(target_lang),
+                    whitespace_policy=quality_whitespace_policy,
                 )
                 has_untranslated_error = self._has_untranslated_error(issues)
                 has_format_error = self._has_format_error(issues)
@@ -527,7 +562,6 @@ class Translator:
 
         prompt_style = self.rag_engine.config.get("general", "prompt_style", "default")
         target_lang = self.rag_engine.config.get("general", "target_language", "zh")
-        runtime_context_key = "mcm_ui" if self._runtime_flags.get("mcm_ui_mode", False) else ""
         mcm_ui_mode = bool(self._runtime_flags.get("mcm_ui_mode", False))
 
         results: list[Optional[object]] = [None] * len(texts)
@@ -539,21 +573,38 @@ class Translator:
         for idx, raw_text in enumerate(texts):
             source_text = str(raw_text)
             context_hint = hints[idx]
-            if not self.can_batch_translate(source_text, context_hint=context_hint, max_chars=max_chars):
+            resolved_context_hint = self._with_resolved_whitespace_policy(
+                source_text,
+                context_hint=context_hint,
+            )
+            if not self.can_batch_translate(
+                    source_text,
+                    context_hint=resolved_context_hint,
+                    max_chars=max_chars):
                 fallback_indices.add(idx)
                 continue
 
             reference_id = ""
-            if isinstance(context_hint, dict):
-                reference_id = str(context_hint.get("entry_id", "") or "")
+            if isinstance(resolved_context_hint, dict):
+                reference_id = str(resolved_context_hint.get("entry_id", "") or "")
+
+            item_context_key = self._translation_context_key(
+                source_text,
+                context_hint=resolved_context_hint,
+            )
+            quality_whitespace_policy = self._resolve_quality_whitespace_policy(
+                source_text,
+                context_hint=resolved_context_hint,
+            )
 
             cached = self._translation_cache.get(
-                source_text, prompt_style, target_lang, context_key=runtime_context_key)
+                source_text, prompt_style, target_lang, context_key=item_context_key)
             if cached is not None and str(cached).strip() and not self._should_reject_cached_translation(
                     source=source_text,
                     translation=str(cached),
                     target_lang=str(target_lang),
-                    reference_id=reference_id):
+                    reference_id=reference_id,
+                    whitespace_policy=quality_whitespace_policy):
                 cached_translation = self._finalize_translation_text(
                     str(cached),
                     target_lang=str(target_lang),
@@ -564,6 +615,7 @@ class Translator:
                         cached_translation,
                         reference_id=reference_id,
                         target_lang=str(target_lang),
+                        whitespace_policy=quality_whitespace_policy,
                     )
                     result_status, result_details = self._result_status_from_issues(cached_issues)
                     results[idx] = (cached_translation, self._empty_debug_info(
@@ -584,8 +636,10 @@ class Translator:
             batch_entries.append({
                 "id": idx,
                 "text": source_text,
-                "context_hint": context_hint,
+                "context_hint": resolved_context_hint,
                 "reference_id": reference_id,
+                "context_key": item_context_key,
+                "whitespace_policy": quality_whitespace_policy,
                 "keywords": rag_result["keywords"],
                 "keyword_debug": rag_result["keyword_debug"],
                 "search_debug": rag_result["search_debug"],
@@ -635,6 +689,7 @@ class Translator:
                         item.get("matched_terms", {}),
                         reference_id=str(item.get("reference_id", "") or ""),
                         target_lang=str(target_lang),
+                        whitespace_policy=str(item.get("whitespace_policy", "") or ""),
                     )
                     if self._quality_checker.should_retry(issues):
                         fallback_indices.add(idx)
@@ -644,7 +699,7 @@ class Translator:
                     if self._should_cache_translation(source_text, translation, issues):
                         self._translation_cache.put(
                             source_text, prompt_style, target_lang, translation,
-                            context_key=runtime_context_key)
+                            context_key=str(item.get("context_key", "") or ""))
 
                     if return_debug_info:
                         debug_info = {
@@ -699,7 +754,25 @@ class Translator:
                              reference_id: str = ""):
         prompt_style = self.rag_engine.config.get("general", "prompt_style", "default")
         target_lang = self.rag_engine.config.get("general", "target_language", "zh")
-        runtime_context_key = "mcm_ui" if self._runtime_flags.get("mcm_ui_mode", False) else ""
+        resolved_context_hint = self._with_resolved_whitespace_policy(
+            source_text,
+            context_hint=context_hint,
+        )
+        chunk_whitespace_policy = self._resolve_shell_whitespace_policy(
+            source_text,
+            context_hint=resolved_context_hint,
+            long_text=True,
+        )
+        quality_whitespace_policy = self._resolve_quality_whitespace_policy(
+            source_text,
+            context_hint=resolved_context_hint,
+            long_text=True,
+        )
+        runtime_context_key = self._translation_context_key(
+            source_text,
+            context_hint=resolved_context_hint,
+            long_text=True,
+        )
 
         cached = self._translation_cache.get(
             source_text, prompt_style, target_lang, context_key=runtime_context_key)
@@ -708,7 +781,8 @@ class Translator:
                     source=source_text,
                     translation=str(cached),
                     target_lang=str(target_lang),
-                    reference_id=reference_id):
+                    reference_id=reference_id,
+                    whitespace_policy=quality_whitespace_policy):
                 log_emit(log_callback, self.rag_engine.config, "DEBUG",
                          "Ignoring suspicious long-text cache entry",
                          module="translator", func="_translate_long_text")
@@ -726,6 +800,7 @@ class Translator:
                         cached_translation,
                         reference_id=reference_id,
                         target_lang=str(target_lang),
+                        whitespace_policy=quality_whitespace_policy,
                     )
                     result_status, result_details = self._result_status_from_issues(cached_issues)
                     return cached_translation, self._empty_debug_info(
@@ -791,14 +866,17 @@ class Translator:
                      module="translator", func="_translate_long_text")
 
         for idx, chunk in enumerate(chunks, start=1):
-            format_shell = self._text_analyzer.build_protected_format_shell(chunk)
+            format_shell = self._text_analyzer.build_protected_format_shell(
+                chunk,
+                whitespace_policy=chunk_whitespace_policy,
+            )
             llm_text = format_shell.protected_text if format_shell.has_tokens else chunk
             system_prompt, user_content = self._prompt_builder.build(
                 llm_text,
                 matched_terms,
                 prompt_style,
                 mcm_ui_mode=mcm_ui_mode,
-                context_hint=context_hint,
+                context_hint=resolved_context_hint,
                 glossary_source_text=source_text,
             )
             if previous_translation:
@@ -884,6 +962,7 @@ class Translator:
             reference_id=reference_id,
             target_lang=str(target_lang),
             strict_format_whitespace=False,
+            whitespace_policy=quality_whitespace_policy,
         )
         result_status, result_details = self._result_status_from_issues(issues)
 
@@ -962,6 +1041,107 @@ class Translator:
             return
         debug_info["result_status"] = result_status
         debug_info["result_details"] = result_details
+
+    def _with_resolved_whitespace_policy(
+            self,
+            source_text: str,
+            context_hint: Optional[dict] = None) -> dict:
+        resolved_context = dict(context_hint) if isinstance(context_hint, dict) else {}
+        resolved_context["whitespace_policy"] = self._resolve_whitespace_policy(
+            source_text,
+            context_hint=context_hint,
+        )
+        return resolved_context
+
+    def _resolve_whitespace_policy(
+            self,
+            source_text: str,
+            context_hint: Optional[dict] = None) -> str:
+        if isinstance(context_hint, dict):
+            explicit_policy = str(context_hint.get("whitespace_policy", "") or "")
+            if explicit_policy:
+                return self._text_analyzer.normalize_whitespace_policy(explicit_policy)
+
+            domain = str(context_hint.get("domain", "") or "").strip().lower()
+            text_kind = str(context_hint.get("text_kind", "") or "").strip().lower()
+            if domain == "mcm_ui" or text_kind in {"document", "book", "ui"}:
+                return TextAnalyzer.WHITESPACE_POLICY_STRICT
+            if text_kind in {"dialogue", "short_text", "short_dialogue"}:
+                return TextAnalyzer.WHITESPACE_POLICY_RELAXED_SPACES
+
+        if self._runtime_flags.get("mcm_ui_mode", False):
+            return TextAnalyzer.WHITESPACE_POLICY_STRICT
+
+        source = "" if source_text is None else str(source_text)
+        stripped = source.strip()
+        if not stripped:
+            return TextAnalyzer.WHITESPACE_POLICY_STRICT
+        if "\n" in source or "\r" in source:
+            return TextAnalyzer.WHITESPACE_POLICY_STRICT
+        if len(stripped) > 280 or len(stripped.split()) > 40:
+            return TextAnalyzer.WHITESPACE_POLICY_STRICT
+        if self._looks_like_short_ui_text(stripped):
+            return TextAnalyzer.WHITESPACE_POLICY_STRICT
+        return TextAnalyzer.WHITESPACE_POLICY_RELAXED_SPACES
+
+    def _resolve_shell_whitespace_policy(
+            self,
+            source_text: str,
+            context_hint: Optional[dict] = None,
+            *,
+            long_text: bool = False) -> str:
+        if long_text:
+            return TextAnalyzer.WHITESPACE_POLICY_STRICT
+        return self._resolve_whitespace_policy(source_text, context_hint=context_hint)
+
+    def _resolve_quality_whitespace_policy(
+            self,
+            source_text: str,
+            context_hint: Optional[dict] = None,
+            *,
+            long_text: bool = False) -> str:
+        if long_text:
+            return TextAnalyzer.WHITESPACE_POLICY_RELAXED_ALL
+        return self._resolve_whitespace_policy(source_text, context_hint=context_hint)
+
+    def _translation_context_key(
+            self,
+            source_text: str,
+            context_hint: Optional[dict] = None,
+            *,
+            long_text: bool = False) -> str:
+        parts: list[str] = []
+        if self._runtime_flags.get("mcm_ui_mode", False):
+            parts.append("mcm_ui")
+
+        shell_policy = self._resolve_shell_whitespace_policy(
+            source_text,
+            context_hint=context_hint,
+            long_text=long_text,
+        )
+        parts.append(f"shell:{shell_policy}")
+
+        if long_text:
+            quality_policy = self._resolve_quality_whitespace_policy(
+                source_text,
+                context_hint=context_hint,
+                long_text=True,
+            )
+            parts.append(f"quality:{quality_policy}")
+
+        return "|".join(parts)
+
+    @staticmethod
+    def _looks_like_short_ui_text(text: str) -> bool:
+        stripped = str(text or "").strip()
+        if not stripped:
+            return False
+        if "\n" in stripped or "\r" in stripped:
+            return False
+        has_sentence_punctuation = any(ch in stripped for ch in ".!?。！？")
+        if len(stripped) <= 24 and not has_sentence_punctuation:
+            return True
+        return len(stripped.split()) <= 4 and not has_sentence_punctuation
 
     def _finalize_translation_text(self, translation: str, target_lang: str) -> str:
         text = "" if translation is None else str(translation)
@@ -1100,7 +1280,8 @@ class Translator:
             source: str,
             translation: str,
             target_lang: str,
-            reference_id: Optional[str] = None) -> bool:
+            reference_id: Optional[str] = None,
+            whitespace_policy: Optional[str] = None) -> bool:
         """Guard cache hits against stale low-quality outputs."""
         lang = (target_lang or "").strip().lower()
         if lang.startswith("en"):
@@ -1114,5 +1295,6 @@ class Translator:
             translation,
             reference_id=reference_id,
             target_lang=target_lang,
+            whitespace_policy=whitespace_policy,
         )
         return any(issue.severity == "error" for issue in issues)

@@ -19,6 +19,15 @@ class ProtectedFormatShell:
 
 
 class TextAnalyzer:
+    WHITESPACE_POLICY_STRICT = "strict"
+    WHITESPACE_POLICY_RELAXED_SPACES = "relaxed_spaces"
+    WHITESPACE_POLICY_RELAXED_ALL = "relaxed_all"
+    _WHITESPACE_POLICIES = frozenset({
+        WHITESPACE_POLICY_STRICT,
+        WHITESPACE_POLICY_RELAXED_SPACES,
+        WHITESPACE_POLICY_RELAXED_ALL,
+    })
+
     # Compile regex patterns once
     _FORMAT_SENTINEL_PATTERN = r"__FMT_(?:[A-Z0-9]+_)?\d{4,}__"
     _PERCENT_PLACEHOLDER_PATTERN = (
@@ -72,6 +81,28 @@ class TextAnalyzer:
         "start", "travel", "yes",
     }
 
+    @classmethod
+    def normalize_whitespace_policy(
+            cls,
+            whitespace_policy: Optional[str] = None,
+            *,
+            strict_format_whitespace: Optional[bool] = None) -> str:
+        """Normalize whitespace-policy aliases and legacy bool flags."""
+        if isinstance(whitespace_policy, str):
+            normalized = whitespace_policy.strip().lower()
+            normalized = {
+                "relaxed": cls.WHITESPACE_POLICY_RELAXED_ALL,
+                "loose": cls.WHITESPACE_POLICY_RELAXED_ALL,
+                "relaxed_space": cls.WHITESPACE_POLICY_RELAXED_SPACES,
+                "spaces_relaxed": cls.WHITESPACE_POLICY_RELAXED_SPACES,
+            }.get(normalized, normalized)
+            if normalized in cls._WHITESPACE_POLICIES:
+                return normalized
+
+        if strict_format_whitespace is False:
+            return cls.WHITESPACE_POLICY_RELAXED_ALL
+        return cls.WHITESPACE_POLICY_STRICT
+
     def strip_markup_and_placeholders(self, text: str) -> str:
         """Remove XML tags and known placeholder patterns from text."""
         if text is None:
@@ -99,12 +130,16 @@ class TextAnalyzer:
             tokens.append(token)
         return tokens
 
-    def build_protected_format_shell(self, text: str) -> ProtectedFormatShell:
+    def build_protected_format_shell(
+            self,
+            text: str,
+            whitespace_policy: str = WHITESPACE_POLICY_STRICT) -> ProtectedFormatShell:
         """Replace immutable formatting tokens with deterministic sentinels."""
         if text is None:
             return ProtectedFormatShell("", (), ())
 
         source = str(text)
+        normalized_policy = self.normalize_whitespace_policy(whitespace_policy)
         sentinel_prefix = self._build_sentinel_prefix(source)
         parts: list[str] = []
         sentinels: list[str] = []
@@ -124,7 +159,12 @@ class TextAnalyzer:
             elif token.startswith("[") and token.endswith("]"):
                 should_protect = self._is_protected_bracket_token(token)
             elif token.isspace():
-                should_protect = self._should_protect_whitespace(source, start, end)
+                should_protect = self._should_protect_whitespace(
+                    source,
+                    start,
+                    end,
+                    whitespace_policy=normalized_policy,
+                )
             else:
                 should_protect = True
 
@@ -274,12 +314,16 @@ class TextAnalyzer:
                 return False
         return True
 
-    def extract_protected_format_tokens(self, text: str) -> list[str]:
+    def extract_protected_format_tokens(
+            self,
+            text: str,
+            whitespace_policy: str = WHITESPACE_POLICY_STRICT) -> list[str]:
         """Extract the exact sequence of protected formatting tokens from text."""
         if not text:
             return []
 
         source = str(text)
+        normalized_policy = self.normalize_whitespace_policy(whitespace_policy)
         tokens: list[str] = []
         for match in self._PROTECTED_TOKEN_RE.finditer(source):
             token = match.group(0)
@@ -301,7 +345,11 @@ class TextAnalyzer:
                     tokens.append(token)
                 continue
             if token.isspace():
-                if self._should_protect_whitespace(source, start, end):
+                if self._should_protect_whitespace(
+                        source,
+                        start,
+                        end,
+                        whitespace_policy=normalized_policy):
                     tokens.append(token)
                 continue
             tokens.append(token)
@@ -417,14 +465,34 @@ class TextAnalyzer:
             pos += step
         return ""
 
-    def _should_protect_whitespace(self, text: str, start: int, end: int) -> bool:
+    @staticmethod
+    def _is_plain_space_token(token: str) -> bool:
+        return bool(token) and all(ch == " " for ch in str(token))
+
+    def _should_protect_whitespace(
+            self,
+            text: str,
+            start: int,
+            end: int,
+            whitespace_policy: str = WHITESPACE_POLICY_STRICT) -> bool:
         """Preserve structural whitespace without freezing word separators inside prose."""
         token = text[start:end]
         if not token:
             return False
 
+        policy = self.normalize_whitespace_policy(whitespace_policy)
+        if policy == self.WHITESPACE_POLICY_RELAXED_ALL:
+            return False
+
         if "\n" in token or "\r" in token or "\t" in token:
             return True
+        if policy == self.WHITESPACE_POLICY_RELAXED_SPACES:
+            if not self._is_plain_space_token(token):
+                return True
+            return (
+                self._has_protected_token_ending_at(text, start)
+                and self._has_protected_token_starting_at(text, end)
+            )
         if start == 0 or end == len(text):
             return True
         if len(token) > 1:

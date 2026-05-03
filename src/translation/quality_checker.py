@@ -60,11 +60,16 @@ class QualityChecker:
               matched_terms: Optional[dict] = None,
               reference_id: Optional[str] = None,
               target_lang: str = "zh",
-              strict_format_whitespace: bool = True) -> list[QualityIssue]:
+              strict_format_whitespace: bool = True,
+              whitespace_policy: Optional[str] = None) -> list[QualityIssue]:
         """Run quality checks and return a list of issues."""
         issues: list[QualityIssue] = []
         source_text = "" if source is None else str(source)
         translation_text = "" if translation is None else str(translation)
+        normalized_whitespace_policy = self._text_analyzer.normalize_whitespace_policy(
+            whitespace_policy,
+            strict_format_whitespace=strict_format_whitespace,
+        )
 
         if not source_text.strip():
             return issues
@@ -80,6 +85,7 @@ class QualityChecker:
                 source_text,
                 translation_text,
                 strict_whitespace=strict_format_whitespace,
+                whitespace_policy=normalized_whitespace_policy,
             ))
             return issues
 
@@ -112,6 +118,7 @@ class QualityChecker:
             translation_text,
             target_lang=target_lang,
             strict_whitespace=strict_format_whitespace,
+            whitespace_policy=normalized_whitespace_policy,
         )
         issues.extend(format_issues)
 
@@ -362,12 +369,23 @@ class QualityChecker:
 
     def _check_format_preservation(self, source: str, translation: str,
                                    target_lang: str = "zh",
-                                   strict_whitespace: bool = True) -> list[QualityIssue]:
+                                   strict_whitespace: bool = True,
+                                   whitespace_policy: Optional[str] = None) -> list[QualityIssue]:
         """Check that protected formatting tokens are preserved exactly."""
         issues = []
+        normalized_whitespace_policy = self._text_analyzer.normalize_whitespace_policy(
+            whitespace_policy,
+            strict_format_whitespace=strict_whitespace,
+        )
 
-        source_format_tokens = self._text_analyzer.extract_protected_format_tokens(source)
-        translation_format_tokens = self._text_analyzer.extract_protected_format_tokens(translation)
+        source_format_tokens = self._text_analyzer.extract_protected_format_tokens(
+            source,
+            whitespace_policy=normalized_whitespace_policy,
+        )
+        translation_format_tokens = self._text_analyzer.extract_protected_format_tokens(
+            translation,
+            whitespace_policy=normalized_whitespace_policy,
+        )
         source_compare_tokens, source_runtime_tokens = self._split_runtime_tokens_for_format_compare(
             source_format_tokens,
             target_lang=target_lang,
@@ -378,9 +396,17 @@ class QualityChecker:
         )
 
         if source_compare_tokens != translation_compare_tokens:
-            source_non_space_tokens = self._drop_whitespace_tokens(source_compare_tokens)
-            translation_non_space_tokens = self._drop_whitespace_tokens(translation_compare_tokens)
-            if strict_whitespace or source_non_space_tokens != translation_non_space_tokens:
+            if normalized_whitespace_policy == TextAnalyzer.WHITESPACE_POLICY_RELAXED_ALL:
+                source_tokens_to_compare = self._drop_whitespace_tokens(source_compare_tokens)
+                translation_tokens_to_compare = self._drop_whitespace_tokens(translation_compare_tokens)
+            elif normalized_whitespace_policy == TextAnalyzer.WHITESPACE_POLICY_RELAXED_SPACES:
+                source_tokens_to_compare = self._drop_plain_space_tokens(source_compare_tokens)
+                translation_tokens_to_compare = self._drop_plain_space_tokens(translation_compare_tokens)
+            else:
+                source_tokens_to_compare = source_compare_tokens
+                translation_tokens_to_compare = translation_compare_tokens
+
+            if source_tokens_to_compare != translation_tokens_to_compare:
                 issues.append(QualityIssue(
                     issue_type=QualityIssueType.FORMAT_VIOLATION,
                     severity="error",
@@ -603,6 +629,13 @@ class QualityChecker:
     @staticmethod
     def _drop_whitespace_tokens(tokens: list[str]) -> list[str]:
         return [token for token in tokens if not str(token).isspace()]
+
+    @staticmethod
+    def _drop_plain_space_tokens(tokens: list[str]) -> list[str]:
+        return [
+            token for token in tokens
+            if not (token and all(ch == " " for ch in str(token)))
+        ]
 
     @staticmethod
     def _collect_sequence_fragments(source_tokens: list[str], translation_tokens: list[str]) -> list[str]:

@@ -40,6 +40,38 @@ class TranslatorRuntimeTagTests(unittest.TestCase):
         )
         self.assertEqual(1, llm.calls)
 
+    def test_translate_text_relaxes_dialogue_padding_spaces(self):
+        source = " A  little more seriousness, please. But yes, her daughter, Serana, is single as far as I know."
+        llm = _DummyLLMClient(
+            '{"translation":"A 稍微正经点。不过没错，就我所知，她女儿瑟拉娜是单身。"}'
+        )
+        translator = Translator(llm, _DummyRAGEngine())
+
+        result = translator.translate_text(source, use_rag=False, max_retries=0)
+
+        self.assertEqual(
+            "A 稍微正经点。不过没错，就我所知，她女儿瑟拉娜是单身。",
+            result,
+        )
+        self.assertEqual(1, llm.calls)
+
+    def test_translate_text_keeps_strict_whitespace_for_mcm_ui_context(self):
+        source = " A  little more seriousness, please."
+        llm = _DummyLLMClient(
+            '{"translation":"A 稍微正经点。"}'
+        )
+        translator = Translator(llm, _DummyRAGEngine())
+
+        with self.assertRaises(RuntimeError):
+            translator.translate_text(
+                source,
+                use_rag=False,
+                max_retries=0,
+                context_hint={"domain": "mcm_ui", "entry_id": "OPTION_TEST"},
+            )
+
+        self.assertEqual(3, llm.calls)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,7 @@
 import unittest
 
 from src.translation.quality_checker import QualityChecker
+from src.translation.text_analyzer import TextAnalyzer
 
 
 class QualityCheckerPlaceholderResidueTests(unittest.TestCase):
@@ -176,6 +177,43 @@ class QualityCheckerPlaceholderResidueTests(unittest.TestCase):
             translation,
             target_lang="zh",
             strict_format_whitespace=False,
+        )
+
+        self.assertTrue(
+            any(issue.rule_id == "protected_token_sequence" for issue in issues),
+            issues,
+        )
+
+    def test_relaxed_spaces_policy_accepts_dialogue_padding_drift(self):
+        source = " A  little more seriousness, please."
+        translation = "A 稍微认真一点，好吗。"
+
+        strict_issues = self.checker.check(source, translation, target_lang="zh")
+        relaxed_issues = self.checker.check(
+            source,
+            translation,
+            target_lang="zh",
+            whitespace_policy=TextAnalyzer.WHITESPACE_POLICY_RELAXED_SPACES,
+        )
+
+        self.assertTrue(
+            any(issue.rule_id == "protected_token_sequence" for issue in strict_issues),
+            strict_issues,
+        )
+        self.assertFalse(
+            any(issue.rule_id == "protected_token_sequence" for issue in relaxed_issues),
+            relaxed_issues,
+        )
+
+    def test_relaxed_spaces_policy_still_rejects_newline_loss(self):
+        source = "First line\nSecond line"
+        translation = "第一行 第二行"
+
+        issues = self.checker.check(
+            source,
+            translation,
+            target_lang="zh",
+            whitespace_policy=TextAnalyzer.WHITESPACE_POLICY_RELAXED_SPACES,
         )
 
         self.assertTrue(

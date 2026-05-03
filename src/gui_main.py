@@ -57,6 +57,7 @@ from src.file_formats import (
 )
 from src.logging_helper import emit as log_emit
 from src.i18n import i18n
+from src.xml_content import node_has_child_elements
 
 
 TASK_COMPLETION_STATE_SUCCESS = "success"
@@ -4427,14 +4428,60 @@ class MainWindow(QMainWindow):
         
         self.visualize_rag_btn.setEnabled(can_visualize)
 
+    def _resolve_row_text_kind_and_whitespace_policy(self, source_text: str, node) -> tuple[str, str]:
+        if self.current_file_type == FILE_TYPE_MCM:
+            return "ui", TextAnalyzer.WHITESPACE_POLICY_STRICT
+        if self.current_file_type not in {FILE_TYPE_XML, FILE_TYPE_ESP_XML}:
+            return "generic", TextAnalyzer.WHITESPACE_POLICY_STRICT
+
+        source_node = None
+        dest_node = None
+        if node is not None:
+            if self.current_file_type == FILE_TYPE_XML:
+                source_node = node.find("Source")
+                dest_node = node.find("Dest")
+            elif self.current_file_type == FILE_TYPE_ESP_XML:
+                source_node = node.find("ORIGINAL")
+                dest_node = node.find("TRADUIT")
+
+        stripped = str(source_text or "").strip()
+        if node_has_child_elements(source_node) or node_has_child_elements(dest_node):
+            return "document", TextAnalyzer.WHITESPACE_POLICY_STRICT
+        if "\n" in str(source_text or "") or "\r" in str(source_text or ""):
+            return "document", TextAnalyzer.WHITESPACE_POLICY_STRICT
+        if len(stripped) > 280 or len(stripped.split()) > 40:
+            return "document", TextAnalyzer.WHITESPACE_POLICY_STRICT
+        if not stripped:
+            return "generic", TextAnalyzer.WHITESPACE_POLICY_STRICT
+        return "dialogue", TextAnalyzer.WHITESPACE_POLICY_RELAXED_SPACES
+
     def _build_translation_context(self, row: int) -> dict:
         entry_id = ""
         id_item = self.trans_table.item(row, 0)
         if id_item is not None:
             entry_id = id_item.text()
 
-        context = {"entry_id": entry_id}
-        if self.current_file_type == "mcm":
+        source_text = ""
+        source_item = self.trans_table.item(row, 1)
+        if source_item is not None:
+            source_text = source_item.text()
+
+        node = None
+        dest_item = self.trans_table.item(row, 2)
+        if dest_item is not None:
+            node = dest_item.data(Qt.ItemDataRole.UserRole)
+
+        text_kind, whitespace_policy = self._resolve_row_text_kind_and_whitespace_policy(
+            source_text,
+            node,
+        )
+
+        context = {
+            "entry_id": entry_id,
+            "text_kind": text_kind,
+            "whitespace_policy": whitespace_policy,
+        }
+        if self.current_file_type == FILE_TYPE_MCM:
             context["domain"] = "mcm_ui"
             key_upper = entry_id.upper()
             if "_TT_" in key_upper:

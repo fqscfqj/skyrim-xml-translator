@@ -74,6 +74,10 @@ class PromptBuilder:
             )
             sections.append(mcm_rules.strip())
 
+        dialogue_whitespace_rules = self._build_dialogue_whitespace_rules(context_hint)
+        if dialogue_whitespace_rules:
+            sections.append(dialogue_whitespace_rules.strip())
+
         # Source text section
         user_template = self.prompt_manager.get("translator.user_template", "原文：{text}")
         source_line = self.apply_prompt_vars(user_template, {**prompt_vars, "text": source_text})
@@ -135,6 +139,12 @@ class PromptBuilder:
                     context_hint=context_hint if isinstance(context_hint, dict) else None,
                 ).strip())
 
+            dialogue_whitespace_rules = self._build_dialogue_whitespace_rules(
+                context_hint if isinstance(context_hint, dict) else None,
+            )
+            if dialogue_whitespace_rules:
+                item_parts.append(dialogue_whitespace_rules.strip())
+
             item_parts.append(self.apply_prompt_vars(
                 user_template,
                 {**prompt_vars, "text": source_text},
@@ -186,6 +196,23 @@ class PromptBuilder:
 
         joined = "\n".join(f"- {r}" for r in base_rules)
         return f"\n\nMCM 界面文案规则（必须）：\n{joined}"
+
+    def _build_dialogue_whitespace_rules(self, context_hint: Optional[dict]) -> str:
+        if not isinstance(context_hint, dict):
+            return ""
+
+        whitespace_policy = self._text_analyzer.normalize_whitespace_policy(
+            str(context_hint.get("whitespace_policy", "") or "")
+        )
+        if whitespace_policy != TextAnalyzer.WHITESPACE_POLICY_RELAXED_SPACES:
+            return ""
+
+        rules = [
+            "普通对话空白规则（必须）：",
+            "- 行首/行尾以及词间多余的普通空格若无结构意义，不必刻意保留，可按中文自然表达处理。",
+            "- 但换行、制表符、标签、占位符、token、花括号、转义序列以及任何 __FMT_*__ 哨兵必须原样保留。",
+        ]
+        return "\n".join(rules)
 
     @staticmethod
     def _infer_mcm_entry_type(entry_id: str) -> str:
