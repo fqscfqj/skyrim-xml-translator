@@ -1,14 +1,13 @@
 # Exclude generated / large files
-vector_index.npy
-glossary.json
 config.json
-terms_index.json
 SkyrimXMLTranslator.spec
 *.xml
 logs/
 build/
 dist/
 cache/
+glossary/
+
 
 # Python artifact ignores
 __pycache__/
