@@ -46,6 +46,9 @@
     "btn_resume": "继续",
     "msg_rebuilding_index": "正在重建索引，使用 {threads} 个线程...",
     "msg_index_rebuilt": "索引重建成功。",
+    "msg_index_rebuilt_full": "索引已全量重建：成功 {success}/{total} 项。",
+    "msg_index_rebuilt_with_warning": "索引重建完成，但有 {failed} 项失败（成功 {success}/{total}）。请查看日志。",
+    "msg_index_cleared_empty_glossary": "术语表为空，现有向量索引已清空。",
     "msg_error_rebuilding": "重建索引出错: {error}",
     "msg_importing": "正在从 {path} 导入...",
     "msg_no_import_file": "未指定导入文件。",
@@ -224,6 +227,7 @@
     "msg_cleared_all_translations": "已清空所有译文。",
     "msg_cleared_selected_translations": "已清空 {count} 个选中译文。",
     "msg_config_saved_reloaded": "配置已保存并重新加载。",
+    "msg_embedding_config_changed_rebuild_required": "Embedding 配置已更改，现有向量索引已失效。请点击“重建/更新向量索引”。",
     "msg_restart_for_language": "请重启应用以应用新的语言设置。"
     ,"label_rag_recall_limit_note": "召回数量仅由短/长词典上限控制。"
     ,"group_rag_advanced_settings": "RAG 高级设置"

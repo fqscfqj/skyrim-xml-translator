@@ -216,17 +216,45 @@ class GlossaryWorker(QThread):
         self.data: Optional[str] = data # file path for import
         self.num_threads = num_threads
         self.completion_state = TASK_COMPLETION_STATE_SUCCESS
+        self.task_result = None
+        self.completion_message = ""
 
     def run(self):
         try:
             self.completion_state = TASK_COMPLETION_STATE_SUCCESS
+            self.task_result = None
+            self.completion_message = ""
             if self.mode == 'rebuild':
                 log_emit(self.log.emit, self.rag_engine.config, 'INFO', i18n.t("msg_rebuilding_index").format(threads=self.num_threads), module='gui_main', func='GlossaryWorker.run')
                 try:
-                    self.rag_engine.build_index(num_threads=self.num_threads, progress_callback=self.progress.emit, log_callback=self.log.emit)
-                    log_emit(self.log.emit, self.rag_engine.config, 'INFO', i18n.t("msg_index_rebuilt"), module='gui_main', func='GlossaryWorker.run')
+                    self.task_result = self.rag_engine.build_index(
+                        num_threads=self.num_threads,
+                        progress_callback=self.progress.emit,
+                        log_callback=self.log.emit,
+                        force_full=True,
+                    )
+                    result = self.task_result
+                    if result is not None and getattr(result, "reason", "") == "no_terms":
+                        self.completion_state = TASK_COMPLETION_STATE_WARNING
+                        self.completion_message = i18n.t("msg_index_cleared_empty_glossary")
+                        log_emit(self.log.emit, self.rag_engine.config, 'INFO', self.completion_message, module='gui_main', func='GlossaryWorker.run')
+                    elif result is not None and int(getattr(result, "failed_terms", 0) or 0) > 0:
+                        self.completion_state = TASK_COMPLETION_STATE_WARNING
+                        self.completion_message = i18n.t("msg_index_rebuilt_with_warning").format(
+                            success=int(getattr(result, "successful_terms", 0) or 0),
+                            total=int(getattr(result, "total_terms", 0) or 0),
+                            failed=int(getattr(result, "failed_terms", 0) or 0),
+                        )
+                        log_emit(self.log.emit, self.rag_engine.config, 'WARNING', self.completion_message, module='gui_main', func='GlossaryWorker.run')
+                    else:
+                        self.completion_message = i18n.t("msg_index_rebuilt_full").format(
+                            success=int(getattr(result, "successful_terms", 0) or 0),
+                            total=int(getattr(result, "total_terms", 0) or 0),
+                        )
+                        log_emit(self.log.emit, self.rag_engine.config, 'INFO', self.completion_message, module='gui_main', func='GlossaryWorker.run')
                 except Exception as e:
                     self.completion_state = TASK_COMPLETION_STATE_FAILURE
+                    self.completion_message = i18n.t("msg_glossary_task_failed")
                     log_emit(self.log.emit, self.rag_engine.config, 'ERROR', i18n.t("msg_error_rebuilding").format(error=e), exc=e, module='gui_main', func='GlossaryWorker.run')
         
             elif self.mode == 'import':
@@ -235,6 +263,7 @@ class GlossaryWorker(QThread):
                     # self.data may be None if the caller didn't provide a path; guard against it
                     if not self.data:
                         self.completion_state = TASK_COMPLETION_STATE_WARNING
+                        self.completion_message = i18n.t("msg_no_import_file")
                         log_emit(self.log.emit, self.rag_engine.config, 'WARNING', i18n.t("msg_no_import_file"), module='gui_main', func='GlossaryWorker.run')
                         self.finished.emit()
                         return
@@ -249,12 +278,15 @@ class GlossaryWorker(QThread):
                     if terms:
                         log_emit(self.log.emit, self.rag_engine.config, 'INFO', i18n.t("msg_found_terms").format(count=len(terms), threads=self.num_threads), module='gui_main', func='GlossaryWorker.run')
                         self.rag_engine.add_terms_batch(terms, num_threads=self.num_threads, progress_callback=self.progress.emit, log_callback=self.log.emit)
+                        self.completion_message = i18n.t("msg_import_completed")
                         log_emit(self.log.emit, self.rag_engine.config, 'INFO', i18n.t("msg_import_completed"), module='gui_main', func='GlossaryWorker.run')
                     else:
                         self.completion_state = TASK_COMPLETION_STATE_WARNING
+                        self.completion_message = i18n.t("msg_no_valid_terms")
                         log_emit(self.log.emit, self.rag_engine.config, 'WARNING', i18n.t("msg_no_valid_terms"), module='gui_main', func='GlossaryWorker.run')
                 except Exception as e:
                     self.completion_state = TASK_COMPLETION_STATE_FAILURE
+                    self.completion_message = i18n.t("msg_glossary_task_failed")
                     log_emit(self.log.emit, self.rag_engine.config, 'ERROR', i18n.t("msg_error_importing").format(error=e), exc=e, module='gui_main', func='GlossaryWorker.run')
         
             self.finished.emit()
@@ -4684,6 +4716,10 @@ class MainWindow(QMainWindow):
         completion_state = normalize_task_completion_state(
             getattr(self.glossary_worker, "completion_state", TASK_COMPLETION_STATE_SUCCESS)
         ) if self.glossary_worker is not None else TASK_COMPLETION_STATE_SUCCESS
+        completion_message = (
+            getattr(self.glossary_worker, "completion_message", "")
+            if self.glossary_worker is not None else ""
+        )
         self.glossary_progress.setVisible(False)
         self.pause_btn.setEnabled(False)
         self.resume_btn.setEnabled(False)
@@ -4699,17 +4735,21 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(
                 self,
                 i18n.t("title_error"),
-                i18n.t("msg_glossary_task_failed"),
+                completion_message or i18n.t("msg_glossary_task_failed"),
             )
             return
         if completion_state == TASK_COMPLETION_STATE_WARNING:
             QMessageBox.warning(
                 self,
                 i18n.t("title_warning"),
-                i18n.t("msg_glossary_task_completed_with_warning"),
+                completion_message or i18n.t("msg_glossary_task_completed_with_warning"),
             )
             return
-        QMessageBox.information(self, i18n.t("title_success"), i18n.t("msg_operation_completed"))
+        QMessageBox.information(
+            self,
+            i18n.t("title_success"),
+            completion_message or i18n.t("msg_operation_completed"),
+        )
 
     def _is_valid_http_url(self, value: str) -> bool:
         parsed = urlparse(value)
@@ -4772,7 +4812,24 @@ class MainWindow(QMainWindow):
         if not self._validate_config_inputs():
             return
 
+        def _embedding_snapshot(base_url: object, model: object, dimensions: object) -> dict[str, object]:
+            try:
+                normalized_dimensions = max(0, int(dimensions))
+            except Exception:
+                normalized_dimensions = 0
+            return {
+                "base_url": str(base_url or "").strip().rstrip("/"),
+                "model": str(model or "").strip(),
+                "dimensions": normalized_dimensions,
+            }
+
         previous_language = self.config_manager.get("general", "language", "auto")
+        previous_embedding_fingerprint = self.rag_engine.get_embedding_fingerprint()
+        next_embedding_fingerprint = _embedding_snapshot(
+            self.embed_base.text().strip(),
+            self.embed_model.text().strip(),
+            self.embed_dim.value(),
+        )
         selected_language = self.language_combo.currentData()
         selected_color_mode = self._normalize_color_mode(
             self.color_mode_combo.currentData() if hasattr(self, "color_mode_combo") else self.COLOR_MODE_AUTO
@@ -4881,6 +4938,9 @@ class MainWindow(QMainWindow):
         
         self.config_manager.save_config()
         self.llm_client.reload_config()
+        embedding_changed = previous_embedding_fingerprint != next_embedding_fingerprint
+        if embedding_changed:
+            self.rag_engine.reload_embedding_runtime(clear_embedding_cache=True)
         self._apply_color_mode(selected_color_mode)
         self._apply_dynamic_styles()
 
@@ -4889,6 +4949,9 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(i18n.t("window_title"))
 
         message = i18n.t("msg_config_saved_reloaded")
+        if embedding_changed:
+            self.log(i18n.t("msg_embedding_config_changed_rebuild_required"))
+            message += "\n" + i18n.t("msg_embedding_config_changed_rebuild_required")
         if selected_language != previous_language:
             message += "\n" + i18n.t("msg_restart_for_language")
         QMessageBox.information(self, i18n.t("title_success"), message)

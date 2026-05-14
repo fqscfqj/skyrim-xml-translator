@@ -943,9 +943,9 @@ class RAGSearcher:
             return query_embeddings
 
         uncached = unique_queries
+        cache_fingerprint = self._get_embedding_cache_fingerprint()
         if self.embedding_cache is not None:
-            model = self.config.get("embedding", "model", "text-embedding-ada-002")
-            cached, uncached = self.embedding_cache.get_batch(unique_queries, model)
+            cached, uncached = self.embedding_cache.get_batch(unique_queries, cache_fingerprint)
             query_embeddings.update(cached)
 
         if not uncached:
@@ -959,11 +959,30 @@ class RAGSearcher:
                 for q, v in zip(batch_qs, batch_vecs):
                     query_embeddings[q] = v
                     if self.embedding_cache is not None:
-                        model = self.config.get("embedding", "model", "text-embedding-ada-002")
-                        self.embedding_cache.put(q, model, v)
+                        self.embedding_cache.put(q, cache_fingerprint, v)
         except Exception as e:
             log_emit(log_callback, self.config, "WARNING",
                      f"[RAG] Batch embedding failed, falling back to individual: {e}",
                      exc=e, module="rag_search", func="_batch_embed_keywords")
 
         return query_embeddings
+
+    def _get_embedding_cache_fingerprint(self) -> dict[str, Any]:
+        getter = getattr(self.vector_store, "current_embedding_fingerprint", None)
+        if callable(getter):
+            try:
+                fingerprint = getter()
+                if isinstance(fingerprint, dict):
+                    return fingerprint
+            except Exception:
+                pass
+
+        try:
+            dimensions = int(self.config.get("embedding", "dimensions", 1536))
+        except Exception:
+            dimensions = 1536
+        return {
+            "base_url": str(self.config.get("embedding", "base_url", "") or "").strip().rstrip("/"),
+            "model": str(self.config.get("embedding", "model", "text-embedding-ada-002") or "").strip(),
+            "dimensions": max(0, dimensions),
+        }

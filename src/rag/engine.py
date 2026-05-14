@@ -4,7 +4,7 @@ import os
 
 from src.logging_helper import emit as log_emit
 from .glossary_manager import GlossaryManager
-from .vector_store import VectorStore
+from .vector_store import VectorStore, VectorIndexBuildResult, VectorIndexStatus
 from .keyword_extractor import KeywordExtractor
 from .search import RAGSearcher
 from src.cache.lru_cache import LRUCache
@@ -95,6 +95,12 @@ class RAGEngine:
     def embed_dim(self):
         return self._vector_store.embed_dim
 
+    def get_embedding_fingerprint(self) -> dict:
+        return self._vector_store.current_embedding_fingerprint()
+
+    def get_vector_index_status(self) -> VectorIndexStatus:
+        return self._vector_store.get_index_status()
+
     @property
     def _glossary_lookup(self):
         return self._glossary_mgr._glossary_lookup
@@ -114,6 +120,18 @@ class RAGEngine:
 
     def save_terms_index(self):
         self._vector_store.save_terms_index()
+
+    def clear_embedding_cache(self) -> None:
+        self._embedding_cache.clear()
+
+    def reload_embedding_runtime(self, clear_embedding_cache: bool = True) -> VectorIndexStatus:
+        self._vector_store.embed_dim = VectorStore._coerce_dimension(
+            self.config.get("embedding", "dimensions", 1536)
+        )
+        self._vector_store.load()
+        if clear_embedding_cache:
+            self.clear_embedding_cache()
+        return self._vector_store.get_index_status()
 
     def add_term(self, term, translation):
         """添加新术语并更新索引"""
@@ -164,14 +182,17 @@ class RAGEngine:
             self._vector_store.delete_vectors_batch(terms_list)
         return deleted
 
-    def build_index(self, num_threads=1, progress_callback=None, log_callback=None):
+    def build_index(self, num_threads=1, progress_callback=None,
+                    log_callback=None, force_full: bool = True) -> VectorIndexBuildResult:
         self._sync_stop_flags()
-        self._vector_store.build_index(
+        return self._vector_store.build_index(
             glossary_keys=list(self._glossary_mgr.glossary.keys()),
             embed_fn=self.llm_client.get_embedding,
             num_threads=num_threads,
             progress_callback=progress_callback,
             log_callback=log_callback,
+            force_full=force_full,
+            embedding_fingerprint=self.get_embedding_fingerprint(),
         )
 
     def extract_keywords(self, text, log_callback=None, return_debug: bool = False):
