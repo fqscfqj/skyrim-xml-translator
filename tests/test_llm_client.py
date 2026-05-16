@@ -99,8 +99,9 @@ class LLMClientParameterOverrideTests(unittest.TestCase):
             {"role": "user", "content": "json: translate Hello."},
         ])
 
+        # Default is now False (changed for broader provider compatibility)
         call = fake_client.chat.completions.calls[0]
-        self.assertEqual(call["response_format"], {"type": "json_object"})
+        self.assertNotIn("response_format", call)
 
     def test_translate_request_can_disable_json_response_format(self):
         config = _DummyConfig({
@@ -119,6 +120,24 @@ class LLMClientParameterOverrideTests(unittest.TestCase):
 
         call = fake_client.chat.completions.calls[0]
         self.assertNotIn("response_format", call)
+
+    def test_translate_request_can_explicitly_enable_json_response_format(self):
+        config = _DummyConfig({
+            ("llm", "model"): "deepseek-v4-flash",
+            ("llm", "max_retries"): 0,
+            ("llm", "json_response_format_enabled"): True,
+        })
+        client = LLMClient(config)
+        fake_client = _FakeClient()
+        _install_fake_client(client, fake_client)
+
+        client.chat_completion([
+            {"role": "system", "content": "Only output JSON."},
+            {"role": "user", "content": "json: translate Hello."},
+        ])
+
+        call = fake_client.chat.completions.calls[0]
+        self.assertEqual(call["response_format"], {"type": "json_object"})
 
     def test_search_request_does_not_enable_json_response_format(self):
         config = _DummyConfig({
@@ -141,6 +160,7 @@ class LLMClientParameterOverrideTests(unittest.TestCase):
         config = _DummyConfig({
             ("llm", "model"): "deepseek-v4-flash",
             ("llm", "max_retries"): 0,
+            ("llm", "json_response_format_enabled"): True,
         })
         client = LLMClient(config)
         fake_client = _FakeClient([

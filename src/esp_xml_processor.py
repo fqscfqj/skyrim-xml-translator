@@ -1,3 +1,5 @@
+import os
+
 try:
     from lxml import etree  # type: ignore
     LXML_AVAILABLE = True
@@ -27,8 +29,17 @@ class ESPXMLProcessor:
         self.file_path = file_path
         try:
             if LXML_AVAILABLE:
+                parser_kwargs = {
+                    "remove_blank_text": False,
+                    "strip_cdata": False,
+                }
                 try:
-                    parser = etree.XMLParser(remove_blank_text=False, strip_cdata=False)  # type: ignore[arg-type]
+                    if os.path.getsize(file_path) > 10 * 1024 * 1024:
+                        parser_kwargs["huge_tree"] = True
+                except OSError:
+                    pass
+                try:
+                    parser = etree.XMLParser(**parser_kwargs)  # type: ignore[arg-type]
                 except TypeError:
                     parser = etree.XMLParser(remove_blank_text=False)  # type: ignore[arg-type]
                 self.tree = etree.parse(file_path, parser)

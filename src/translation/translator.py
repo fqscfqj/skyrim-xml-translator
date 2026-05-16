@@ -52,6 +52,7 @@ class Translator:
         self._last_rag_debug_info = None
         self._last_rag_debug_info_lock = Lock()
         self._runtime_flags = {"mcm_ui_mode": False}
+        self._runtime_flags_lock = Lock()
 
         # Configurable extra retries for format errors
         self._format_extra_retries = int(rag_engine.config.get(
@@ -87,7 +88,13 @@ class Translator:
         mcm_ui_mode = False
         if isinstance(flags, dict):
             mcm_ui_mode = bool(flags.get("mcm_ui_mode", False))
-        self._runtime_flags = {"mcm_ui_mode": mcm_ui_mode}
+        with self._runtime_flags_lock:
+            self._runtime_flags = {"mcm_ui_mode": mcm_ui_mode}
+
+    def _get_runtime_flag(self, key: str, default=None):
+        """Thread-safe read of a single runtime flag."""
+        with self._runtime_flags_lock:
+            return self._runtime_flags.get(key, default)
 
     def can_batch_translate(self, text, context_hint: Optional[dict] = None,
                             max_chars: Optional[int] = None) -> bool:
@@ -156,7 +163,7 @@ class Translator:
         debug_info["glossary_context"] = rag_result["glossary_context"]
 
         prompt_style = self.rag_engine.config.get("general", "prompt_style", "default")
-        mcm_ui_mode = bool(self._runtime_flags.get("mcm_ui_mode", False))
+        mcm_ui_mode = bool(self._get_runtime_flag("mcm_ui_mode", False))
         system_prompt, user_prompt = self._prompt_builder.build(
             text, debug_info.get("matched_terms", {}), prompt_style,
             mcm_ui_mode=mcm_ui_mode, context_hint=resolved_context_hint)
@@ -379,7 +386,7 @@ class Translator:
         glossary_context = rag_result["glossary_context"]
 
         # Build prompt
-        mcm_ui_mode = bool(self._runtime_flags.get("mcm_ui_mode", False))
+        mcm_ui_mode = bool(self._get_runtime_flag("mcm_ui_mode", False))
         system_prompt, user_content = self._prompt_builder.build(
             llm_text, matched_terms, prompt_style,
             mcm_ui_mode=mcm_ui_mode, context_hint=resolved_context_hint,
@@ -412,15 +419,17 @@ class Translator:
         while True:
             attempt_info = None
             try:
+                # Unified retry limit calculation: format extra retries only apply
+                # when the PREVIOUS iteration had format errors (which is why we retry)
+                max_retry_limit = max_retries + (
+                    self._format_extra_retries if self._has_format_error(issues) else 0
+                )
                 if retry_count > 0:
-                    retry_limit = max_retries + (
-                        self._format_extra_retries if self._has_format_error(issues) else 0
-                    )
                     retry_context = self._quality_checker.get_retry_context(issues)
                     retry_prompt = self._build_retry_prompt(
                         target_lang, retry_context, last_translation=last_translation)
                     log_emit(log_callback, self.rag_engine.config, "WARNING",
-                             f"Retry {retry_count}/{retry_limit}",
+                             f"Retry {retry_count}/{max_retry_limit}",
                              module="translator", func="translate_text")
                     current_messages = messages + [{"role": "user", "content": retry_prompt}]
                 else:
@@ -490,6 +499,8 @@ class Translator:
                         return translation, debug_info
                     return translation
 
+                # Recalculate with CURRENT iteration's format error status
+                # (may add extra retries if this attempt had format issues)
                 max_retry_limit = max_retries + (
                     self._format_extra_retries if has_format_error else 0
                 )
@@ -522,10 +533,10 @@ class Translator:
                 log_emit(log_callback, self.rag_engine.config, "ERROR",
                          f"Translation failed: {e}", exc=e,
                          module="translator", func="translate_text")
-                max_retry_limit = max_retries + (
-                    self._format_extra_retries if self._has_format_error(issues) else 0
-                )
-                if retry_count >= max_retry_limit:
+                # Clear stale issues from previous iteration - LLM call failure
+                # means no quality check was performed, so no format error info
+                issues = []
+                if retry_count >= max_retries:
                     raise
                 retry_count += 1
 
@@ -562,7 +573,7 @@ class Translator:
 
         prompt_style = self.rag_engine.config.get("general", "prompt_style", "default")
         target_lang = self.rag_engine.config.get("general", "target_language", "zh")
-        mcm_ui_mode = bool(self._runtime_flags.get("mcm_ui_mode", False))
+        mcm_ui_mode = bool(self._get_runtime_flag("mcm_ui_mode", False))
 
         results: list[Optional[object]] = [None] * len(texts)
         batch_entries: list[dict] = []
@@ -830,7 +841,7 @@ class Translator:
 
         rag_result = self._run_rag_phase(source_text, use_rag=use_rag, log_callback=log_callback)
         matched_terms = rag_result["matched_terms"]
-        mcm_ui_mode = bool(self._runtime_flags.get("mcm_ui_mode", False))
+        mcm_ui_mode = bool(self._get_runtime_flag("mcm_ui_mode", False))
 
         debug_info = None
         if return_debug_info:
@@ -930,6 +941,18 @@ class Translator:
                         chunk_translation,
                         target_lang=str(target_lang),
                     )
+                    # Bug #11 fix: verify chunk is not empty
+                    if not str(chunk_translation).strip():
+                        raise ValueError(
+                            f"Chunk {idx}/{len(chunks)} produced empty translation")
+                    # Bug #3 fix: verify format tokens preserved in chunk
+                    if format_shell.has_tokens:
+                        source_tags = set(self._text_analyzer.extract_placeholder_tokens(chunk))
+                        trans_tags = set(self._text_analyzer.extract_placeholder_tokens(str(chunk_translation)))
+                        missing_tags = source_tags - trans_tags
+                        if missing_tags:
+                            raise ValueError(
+                                f"Chunk {idx}/{len(chunks)} lost format tokens: {missing_tags}")
                     if isinstance(chunk_attempt, dict):
                         chunk_attempt["parsed_translation"] = str(chunk_translation)
                         chunk_attempt["accepted"] = True
@@ -1069,7 +1092,7 @@ class Translator:
             if text_kind in {"dialogue", "short_text", "short_dialogue"}:
                 return TextAnalyzer.WHITESPACE_POLICY_RELAXED_SPACES
 
-        if self._runtime_flags.get("mcm_ui_mode", False):
+        if self._get_runtime_flag("mcm_ui_mode", False):
             return TextAnalyzer.WHITESPACE_POLICY_STRICT
 
         source = "" if source_text is None else str(source_text)
@@ -1111,7 +1134,7 @@ class Translator:
             *,
             long_text: bool = False) -> str:
         parts: list[str] = []
-        if self._runtime_flags.get("mcm_ui_mode", False):
+        if self._get_runtime_flag("mcm_ui_mode", False):
             parts.append("mcm_ui")
 
         shell_policy = self._resolve_shell_whitespace_policy(

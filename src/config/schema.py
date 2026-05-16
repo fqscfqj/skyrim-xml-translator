@@ -145,13 +145,13 @@ def validate_config(raw: dict) -> list[str]:
             f = dc_fields[key]
             expected = f.type
             # Basic type checks for primitives
-            if expected == "int" and not isinstance(value, int) and value is not None:
+            if expected is int and not isinstance(value, int) and value is not None:
                 errors.append(f"'{section_name}.{key}' should be int, got {type(value).__name__}")
-            elif expected == "float" and not isinstance(value, (int, float)) and value is not None:
+            elif expected is float and not isinstance(value, (int, float)) and value is not None:
                 errors.append(f"'{section_name}.{key}' should be float, got {type(value).__name__}")
-            elif expected == "str" and not isinstance(value, str):
+            elif expected is str and not isinstance(value, str):
                 errors.append(f"'{section_name}.{key}' should be str, got {type(value).__name__}")
-            elif expected == "bool" and not isinstance(value, bool) and value is not None:
+            elif expected is bool and not isinstance(value, bool) and value is not None:
                 errors.append(f"'{section_name}.{key}' should be bool, got {type(value).__name__}")
 
     return errors

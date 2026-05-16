@@ -125,12 +125,15 @@ class VectorStore:
     def _close_mmap(self) -> None:
         """Close memory-mapped vector array to release file handles."""
         if self.vectors is not None:
-            mmap_obj = getattr(self.vectors, "_mmap", None)
-            if mmap_obj is not None:
-                try:
-                    mmap_obj.close()
-                except Exception:
-                    pass
+            try:
+                # Try the standard close() method first (numpy >= 1.x memmap)
+                if hasattr(self.vectors, 'close') and callable(self.vectors.close):
+                    self.vectors.close()
+                # Fallback: try internal _mmap attribute
+                elif hasattr(self.vectors, '_mmap') and self.vectors._mmap is not None:
+                    self.vectors._mmap.close()
+            except Exception:
+                pass
         self.vectors = None
 
     def _load_index_metadata(self) -> dict[str, Any]:
@@ -331,6 +334,7 @@ class VectorStore:
                 self.vectors = np.load(self.vector_path, mmap_mode="r")
             except Exception as e:
                 self.vectors = None
+                self._reset_terms_without_vectors()
                 log_emit(None, self.config, "WARNING",
                          f"Failed to load vector index: {e}",
                          exc=e, module="vector_store", func="load")
@@ -448,6 +452,8 @@ class VectorStore:
     # --- Single term operations ---
 
     def add_vector(self, term: str, vector: list[float]) -> None:
+        if self.vectors is None and self.terms:
+            self._reset_terms_without_vectors()
         """Add a single term's vector to the index."""
         vec_np = np.array([vector], dtype=np.float32)
         if self.vectors is None:

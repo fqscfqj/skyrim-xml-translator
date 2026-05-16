@@ -57,6 +57,19 @@ class ConfigManager:
             with open(self.config_path, "r", encoding="utf-8-sig") as f:
                 return json.load(f)
         except Exception as e:
+            # Backup corrupted config before falling back to defaults
+            backup_path = self.config_path + ".corrupted"
+            try:
+                import shutil
+                shutil.copy2(self.config_path, backup_path)
+                log_emit(None, None, "WARNING",
+                         f"Corrupted config backed up to {backup_path}",
+                         module="config_manager", func="_load_config")
+            except Exception as rename_err:
+                log_emit(None, None, "ERROR",
+                         f"Failed to backup corrupted config: {rename_err}",
+                         exc=rename_err, module="config_manager",
+                         func="_load_config")
             log_emit(None, None, "ERROR", f"Error loading config: {e}", exc=e,
                      module="config_manager", func="_load_config")
             return {}

@@ -227,8 +227,8 @@ class LLMClient:
                 final_params[key] = value
 
         json_response_format_enabled = self._coerce_bool(
-            self.config.get(config_section, "json_response_format_enabled", True),
-            default=True,
+            self.config.get(config_section, "json_response_format_enabled", False),
+            default=False,
         )
         if (config_section == "llm"
                 and operation == "translate"
@@ -258,17 +258,19 @@ class LLMClient:
         # DeepSeek thinking format: {"thinking": {"type": "enabled"/"disabled"}}
         # Ref: https://api-docs.deepseek.com/zh-cn/guides/thinking_mode
         if "enable_thinking" in extra_body:
-            thinking_enabled = bool(extra_body.pop("enable_thinking"))
-            extra_body["thinking"] = {"type": "enabled" if thinking_enabled else "disabled"}
-            # DeepSeek thinking mode does NOT support temperature, top_p,
-            # frequency_penalty, or presence_penalty. Strip them when thinking is on.
-            if thinking_enabled:
-                for unsupported in ("temperature", "top_p",
-                                    "frequency_penalty", "presence_penalty"):
-                    final_params.pop(unsupported, None)
-            else:
-                # thinking disabled → reasoning_effort is meaningless, drop it
-                final_params.pop("reasoning_effort", None)
+            thinking_val = extra_body.pop("enable_thinking")
+            if thinking_val is not None:
+                thinking_enabled = bool(thinking_val)
+                extra_body["thinking"] = {"type": "enabled" if thinking_enabled else "disabled"}
+                # DeepSeek thinking mode does NOT support temperature, top_p,
+                # frequency_penalty, or presence_penalty. Strip them when thinking is on.
+                if thinking_enabled:
+                    for unsupported in ("temperature", "top_p",
+                                        "frequency_penalty", "presence_penalty"):
+                        final_params.pop(unsupported, None)
+                else:
+                    # thinking disabled → reasoning_effort is meaningless, drop it
+                    final_params.pop("reasoning_effort", None)
 
         request_args.update(final_params)
         if extra_body:
@@ -337,6 +339,11 @@ class LLMClient:
                     response.usage.prompt_tokens or 0,
                     response.usage.completion_tokens or 0,
                     operation,
+                )
+            if not response.choices:
+                raise ValueError(
+                    f"API returned empty choices list (possible content filter). "
+                    f"Model: {model}, Response: {response}"
                 )
             content = response.choices[0].message.content
             if content is None:

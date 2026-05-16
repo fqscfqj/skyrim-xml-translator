@@ -4067,6 +4067,13 @@ class MainWindow(QMainWindow):
             self._log_flush_timer.start()
 
     def start_translation(self):
+        # Bug #5: Prevent concurrent translation tasks
+        if self._translation_task_active:
+            log_emit(self.log, self.config_manager, 'WARNING',
+                     i18n.t("msg_translation_already_in_progress") if hasattr(i18n, 't') else "Translation already in progress",
+                     module='gui_main', func='start_translation')
+            return
+
         # Ensure file is loaded
         if self.trans_table.rowCount() == 0:
             if not self.load_xml_to_table():
@@ -4195,17 +4202,36 @@ class MainWindow(QMainWindow):
             raise RuntimeError(i18n.t("msg_file_not_found"))
 
         source_path = self.mcm_processor.file_path or ""
+        same_target = False
         if source_path:
             try:
                 same_target = os.path.abspath(output_path) == os.path.abspath(source_path)
             except Exception:
                 same_target = output_path == source_path
-            if same_target and os.path.exists(source_path):
+
+        if same_target and os.path.exists(source_path):
+            # Bug #19: Use write-to-temp-then-replace for atomic save
+            import tempfile
+            tmp_fd, tmp_path = tempfile.mkstemp(
+                suffix=".mcm", dir=os.path.dirname(output_path) or ".")
+            os.close(tmp_fd)
+            try:
+                if not self.mcm_processor.save_file(tmp_path):
+                    raise RuntimeError(i18n.t("msg_failed_save").format(error="save failed"))
+                # Create backup of original before replacing
                 backup_path = self._create_backup_for_overwrite(source_path)
                 self.log(f"Backup created: {backup_path}")
-
-        if not self.mcm_processor.save_file(output_path):
-            raise RuntimeError(i18n.t("msg_failed_save").format(error="save failed"))
+                os.replace(tmp_path, output_path)
+            except Exception:
+                # Clean up temp file on failure
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+                raise
+        else:
+            if not self.mcm_processor.save_file(output_path):
+                raise RuntimeError(i18n.t("msg_failed_save").format(error="save failed"))
         return output_path
 
     @staticmethod
@@ -4636,7 +4662,7 @@ class MainWindow(QMainWindow):
         # Let's just filter first.
         
         all_items = []
-        for term, trans in self.rag_engine.glossary.items():
+        for term, trans in list(self.rag_engine.glossary.items()):
             display_text = f"{term} -> {trans}"
             if not filter_text or filter_text in display_text.lower():
                 all_items.append(display_text)
@@ -4969,6 +4995,13 @@ class MainWindow(QMainWindow):
             self.resume_btn.setEnabled(False)
 
     def translate_selected(self):
+        # Bug #5: Prevent concurrent translation tasks
+        if self._translation_task_active:
+            log_emit(self.log, self.config_manager, 'WARNING',
+                     i18n.t("msg_translation_already_in_progress") if hasattr(i18n, 't') else "Translation already in progress",
+                     module='gui_main', func='translate_selected')
+            return
+
         selected_rows = set()
         for item in self.trans_table.selectedItems():
             selected_rows.add(item.row())
@@ -5000,7 +5033,14 @@ class MainWindow(QMainWindow):
         self.worker.log.connect(self.log)
         self.worker.progress.connect(self._handle_translation_progress)
         self.worker.result_ready.connect(self.update_table_row)
-        self.worker.row_failed.connect(self.update_table_row_failed)
+        seBug #18: Prevent clearing while translation is running
+        if self._translation_task_active:
+            log_emit(self.log, self.config_manager, 'WARNING',
+                     "Cannot clear translations while translation is in progress",
+                     module='gui_main', func='clear_all_translations')
+            return
+
+        # lf.worker.row_failed.connect(self.update_table_row_failed)
         self.worker.rag_debug_ready.connect(self.cache_rag_debug_info)
         self.worker.finished.connect(self.on_translation_finished)
         self._translation_task_active = True
@@ -5043,6 +5083,13 @@ class MainWindow(QMainWindow):
         self.log(i18n.t("msg_cleared_all_translations"))
 
     def clear_selected_translations(self):
+        # Bug #18: Prevent clearing while translation is running
+        if self._translation_task_active:
+            log_emit(self.log, self.config_manager, 'WARNING',
+                     "Cannot clear translations while translation is in progress",
+                     module='gui_main', func='clear_selected_translations')
+            return
+
         selected_rows = set()
         for item in self.trans_table.selectedItems():
             selected_rows.add(item.row())
