@@ -4066,6 +4066,39 @@ class MainWindow(QMainWindow):
         if not self._log_flush_timer.isActive():
             self._log_flush_timer.start()
 
+    def _check_index_fingerprint_before_translate(self) -> bool:
+        """Check if the vector index model matches current config before translation.
+
+        Returns True if translation can proceed, False if the user chose to
+        rebuild the index instead.
+        """
+        try:
+            status = self.rag_engine.get_vector_index_status()
+        except Exception:
+            return True
+
+        if not status.is_stale or status.reason != "fingerprint_mismatch":
+            return True
+
+        stored = status.stored_fingerprint or {}
+        current = status.current_fingerprint or {}
+        message = i18n.t("msg_vector_index_mismatch_prompt").format(
+            stored_model=stored.get("model", "?"),
+            stored_url=stored.get("base_url", "?"),
+            current_model=current.get("model", "?"),
+            current_url=current.get("base_url", "?"),
+        )
+        self.log(i18n.t("msg_vector_index_mismatch_continue"))
+
+        confirm = QMessageBox.question(
+            self, i18n.t("title_vector_index_mismatch"), message,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if confirm == QMessageBox.StandardButton.Yes:
+            self.rebuild_index()
+            return False
+        return True
+
     def start_translation(self):
         # Bug #5: Prevent concurrent translation tasks
         if self._translation_task_active:
@@ -4078,6 +4111,10 @@ class MainWindow(QMainWindow):
         if self.trans_table.rowCount() == 0:
             if not self.load_xml_to_table():
                 return
+
+        # Check vector index fingerprint before starting
+        if not self._check_index_fingerprint_before_translate():
+            return
 
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
@@ -5008,6 +5045,10 @@ class MainWindow(QMainWindow):
         
         if not selected_rows:
             QMessageBox.warning(self, i18n.t("title_warning"), i18n.t("msg_no_items_selected"))
+            return
+
+        # Check vector index fingerprint before starting
+        if not self._check_index_fingerprint_before_translate():
             return
 
         self.start_btn.setEnabled(False)

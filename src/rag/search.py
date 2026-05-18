@@ -568,6 +568,23 @@ class RAGSearcher:
                 return {}, []
             return {}
 
+        # Log fingerprint mismatch details at DEBUG level (complements engine-level WARNING)
+        if not vector_ready:
+            try:
+                status = self.vector_store.get_index_status()
+                if status.is_stale and status.reason == "fingerprint_mismatch":
+                    stored = status.stored_fingerprint or {}
+                    current = status.current_fingerprint or {}
+                    log_emit(log_callback, self.config, "DEBUG",
+                             (
+                                 f"[RAG] Degraded to glossary-only: index model="
+                                 f"'{stored.get('model', '?')}' vs config="
+                                 f"'{current.get('model', '?')}'"
+                             ),
+                             module="rag_search", func="search")
+            except Exception:
+                pass
+
         try:
             log_emit(log_callback, self.config, "DEBUG",
                      f"[RAG] Starting vector search for {len(keywords)} keywords: {keywords}",

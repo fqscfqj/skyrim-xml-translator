@@ -53,6 +53,9 @@ class RAGEngine:
         self.stop_flag: bool = False
         self.pause_flag: bool = False
 
+        # Track whether we already warned about fingerprint mismatch this session
+        self._fingerprint_mismatch_warned: bool = False
+
     # --- Properties for backward compat ---
 
     @property
@@ -204,6 +207,26 @@ class RAGEngine:
 
     def search_terms(self, query_list, threshold=0.8, log_callback=None,
                      top_k=3, return_debug=False, source_text=None):
+        # Warn once per session if embedding model differs from index
+        if not self._fingerprint_mismatch_warned:
+            status = self._vector_store.get_index_status()
+            if status.is_stale and status.reason == "fingerprint_mismatch":
+                self._fingerprint_mismatch_warned = True
+                stored = status.stored_fingerprint or {}
+                current = status.current_fingerprint or {}
+                log_emit(
+                    log_callback, self.config, "WARNING",
+                    (
+                        f"[RAG] Vector index model mismatch - "
+                        f"index built with model='{stored.get('model', '?')}' "
+                        f"url='{stored.get('base_url', '?')}', "
+                        f"but current config uses model='{current.get('model', '?')}' "
+                        f"url='{current.get('base_url', '?')}'. "
+                        f"Vector search will be skipped. Please rebuild the index."
+                    ),
+                    module="rag_engine", func="search_terms",
+                )
+
         return self._searcher.search(
             keywords=query_list,
             source_text=source_text,
