@@ -968,10 +968,11 @@ class RAGSearcher:
         if not uncached:
             return query_embeddings
 
+        remaining = list(uncached)
         try:
             batch_size_embed = 100
-            for i in range(0, len(uncached), batch_size_embed):
-                batch_qs = uncached[i:i + batch_size_embed]
+            for i in range(0, len(remaining), batch_size_embed):
+                batch_qs = remaining[i:i + batch_size_embed]
                 batch_vecs = self.llm_client.get_embedding(batch_qs, log_callback=log_callback)
                 for q, v in zip(batch_qs, batch_vecs):
                     query_embeddings[q] = v
@@ -981,6 +982,18 @@ class RAGSearcher:
             log_emit(log_callback, self.config, "WARNING",
                      f"[RAG] Batch embedding failed, falling back to individual: {e}",
                      exc=e, module="rag_search", func="_batch_embed_keywords")
+            for q in remaining:
+                if q in query_embeddings:
+                    continue
+                try:
+                    vec = self.llm_client.get_embedding(q, log_callback=log_callback)
+                    query_embeddings[q] = vec
+                    if self.embedding_cache is not None:
+                        self.embedding_cache.put(q, cache_fingerprint, vec)
+                except Exception as single_e:
+                    log_emit(log_callback, self.config, "WARNING",
+                             f"[RAG] Individual embedding failed for '{q}': {single_e}",
+                             exc=single_e, module="rag_search", func="_batch_embed_keywords")
 
         return query_embeddings
 

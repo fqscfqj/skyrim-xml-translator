@@ -88,6 +88,14 @@ class VectorStore:
             return 0
 
     @staticmethod
+    def _embed_task(term: str, embed_fn: Callable) -> tuple[str, Optional[list[float]], Optional[str]]:
+        try:
+            vec = embed_fn(term)
+            return term, vec, None
+        except Exception as e:
+            return term, None, str(e)
+
+    @staticmethod
     def _normalize_base_url(value: Any) -> str:
         return str(value or "").strip().rstrip("/")
 
@@ -494,12 +502,11 @@ class VectorStore:
                 indices_to_delete.append(idx)
 
         if indices_to_delete and self.vectors is not None:
-            indices_to_delete.sort(reverse=True)
+            delete_set = set(indices_to_delete)
             new_vectors = np.delete(self.vectors, indices_to_delete, axis=0)
             self._close_mmap()
             self.vectors = new_vectors if new_vectors.size > 0 else None
-            for idx in indices_to_delete:
-                self.terms.pop(idx)
+            self.terms = [t for i, t in enumerate(self.terms) if i not in delete_set]
             self._mark_lexical_index_dirty()
             if not self.terms or self.vectors is None:
                 self.clear_index(delete_files=True)
@@ -537,13 +544,6 @@ class VectorStore:
         new_vectors_batches = []
         new_terms_added = []
 
-        def embed_task(term):
-            try:
-                vec = embed_fn(term)
-                return term, vec, None
-            except Exception as e:
-                return term, None, str(e)
-
         with ThreadPoolExecutor(max_workers=num_threads) as executor:
             for i in range(0, total, batch_size):
                 if self.stop_flag:
@@ -559,7 +559,7 @@ class VectorStore:
                         break
 
                 batch_terms_input = new_terms[i:i + batch_size]
-                futures = {executor.submit(embed_task, term): term for term in batch_terms_input}
+                futures = {executor.submit(self._embed_task, term, embed_fn): term for term in batch_terms_input}
 
                 batch_results = []
                 batch_terms_confirmed = []
@@ -677,13 +677,6 @@ class VectorStore:
         failed_count = 0
         batch_size = 50
 
-        def embed_task(term):
-            try:
-                vec = embed_fn(term)
-                return term, vec, None
-            except Exception as e:
-                return term, None, str(e)
-
         with ThreadPoolExecutor(max_workers=num_threads) as executor:
             for i in range(0, total, batch_size):
                 if self.stop_flag:
@@ -699,7 +692,7 @@ class VectorStore:
                         break
 
                 batch_terms = terms_to_process[i:i + batch_size]
-                futures = {executor.submit(embed_task, term): term for term in batch_terms}
+                futures = {executor.submit(self._embed_task, term, embed_fn): term for term in batch_terms}
 
                 batch_vectors = []
                 batch_valid_terms = []
@@ -769,26 +762,9 @@ class VectorStore:
 
     def search_cosine(self, query_vec: np.ndarray, top_k: int = 10) -> list[tuple[str, float]]:
         """Return [(term, similarity_score), ...] sorted by score desc."""
-        if self.vectors is None or len(self.terms) == 0:
+        similarities = self.search_cosine_full(query_vec)
+        if similarities.size == 0:
             return []
-
-        query_vec = query_vec.astype(np.float32).flatten()
-        query_norm = np.linalg.norm(query_vec)
-        if query_norm > 0:
-            query_vec = query_vec / query_norm
-
-        num_vectors = self.vectors.shape[0]
-        similarities = np.zeros(num_vectors, dtype=np.float32)
-        batch_size = 10000
-
-        for start_idx in range(0, num_vectors, batch_size):
-            end_idx = min(start_idx + batch_size, num_vectors)
-            batch_vectors = np.array(self.vectors[start_idx:end_idx], dtype=np.float32)
-            batch_norms = np.linalg.norm(batch_vectors, axis=1, keepdims=True)
-            batch_norms[batch_norms == 0] = 1
-            batch_vectors = batch_vectors / batch_norms
-            similarities[start_idx:end_idx] = batch_vectors @ query_vec
-            del batch_vectors
 
         if top_k >= len(similarities):
             ranked_idx = np.argsort(similarities)[::-1]
@@ -799,8 +775,6 @@ class VectorStore:
         for idx in ranked_idx:
             if idx < len(self.terms):
                 results.append((self.terms[idx], float(similarities[idx])))
-
-        del similarities
         return results
 
     def search_containment(self, query_lower: str, top_k: int = 5,
