@@ -57,6 +57,7 @@ class VectorStore:
         self.terms: list[str] = []
         self._normalized_terms: list[str] = []
         self._token_to_indices: dict[str, list[int]] = {}
+        self._trigram_to_indices: dict[str, set[int]] = {}
         self._lexical_index_dirty = False
         self._index_metadata: dict[str, Any] = {}
         self._index_status = VectorIndexStatus(
@@ -374,10 +375,21 @@ class VectorStore:
         self._normalized_terms.append(normalized)
         for token in set(t for t in normalized.split() if t):
             self._token_to_indices.setdefault(token, []).append(index)
+        for trigram in self._extract_trigrams(normalized):
+            self._trigram_to_indices.setdefault(trigram, set()).add(index)
+
+    @staticmethod
+    def _extract_trigrams(text: str) -> set[str]:
+        """Extract character trigrams from a normalized string."""
+        trigrams: set[str] = set()
+        for i in range(len(text) - 2):
+            trigrams.add(text[i:i + 3])
+        return trigrams
 
     def _rebuild_lexical_index(self) -> None:
         self._normalized_terms = []
         self._token_to_indices = {}
+        self._trigram_to_indices = {}
         for idx, term in enumerate(self.terms):
             self._add_term_to_lexical_index(idx, term)
         self._lexical_index_dirty = False
@@ -789,12 +801,21 @@ class VectorStore:
 
         self._ensure_lexical_index()
 
-        candidate_indices = range(len(self.terms))
+        candidate_indices = None
         query_tokens = [t for t in query_norm.split() if t]
         if len(query_tokens) > 1:
+            # Multi-token: use token inverted index (narrowest posting list).
             indexed_hits = [self._token_to_indices[t] for t in set(query_tokens) if t in self._token_to_indices]
             if indexed_hits:
                 candidate_indices = min(indexed_hits, key=len)
+        elif len(query_norm) >= 3:
+            # Single token >= 3 chars: use trigram index for substring matching.
+            trigrams = self._extract_trigrams(query_norm)
+            trigram_hits = [self._trigram_to_indices[tg] for tg in trigrams if tg in self._trigram_to_indices]
+            if trigram_hits:
+                candidate_indices = set.intersection(*trigram_hits)
+        if candidate_indices is None:
+            candidate_indices = range(len(self.terms))
 
         indices = [
             i for i in candidate_indices
@@ -815,16 +836,14 @@ class VectorStore:
             query_vec = query_vec / query_norm
 
         num_vectors = self.vectors.shape[0]
-        similarities = np.zeros(num_vectors, dtype=np.float32)
         batch_size = 10000
+        similarities = np.zeros(num_vectors, dtype=np.float32)
 
         for start_idx in range(0, num_vectors, batch_size):
             end_idx = min(start_idx + batch_size, num_vectors)
-            batch_vectors = np.array(self.vectors[start_idx:end_idx], dtype=np.float32)
-            batch_norms = np.linalg.norm(batch_vectors, axis=1, keepdims=True)
-            batch_norms[batch_norms == 0] = 1
-            batch_vectors = batch_vectors / batch_norms
-            similarities[start_idx:end_idx] = batch_vectors @ query_vec
-            del batch_vectors
+            batch = np.asarray(self.vectors[start_idx:end_idx], dtype=np.float32)
+            norms = np.linalg.norm(batch, axis=1, keepdims=True)
+            norms[norms == 0] = 1
+            similarities[start_idx:end_idx] = (batch / norms) @ query_vec
 
         return similarities

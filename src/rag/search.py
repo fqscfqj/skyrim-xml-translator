@@ -764,7 +764,6 @@ class RAGSearcher:
             try:
                 semantic_matches: list[tuple[str, float]] = []
                 keyword_weighted_matches: list[tuple[str, float]] = []
-                vector_matches: list[tuple[str, float]] = []
 
                 if skip_semantic_recall:
                     log_emit(log_callback, self.config, "DEBUG",
@@ -820,18 +819,17 @@ class RAGSearcher:
                     del similarities
                     del ranked_idx
 
-                merged_scores: Dict[str, float] = {}
-                for term, score in semantic_matches:
-                    prev = merged_scores.get(term)
-                    if prev is None or score > prev:
-                        merged_scores[term] = score
-                for term, score in keyword_weighted_matches:
-                    prev = merged_scores.get(term)
-                    if prev is None or score > prev:
-                        merged_scores[term] = score
-                vector_matches = sorted(merged_scores.items(), key=lambda x: x[1], reverse=True)
-
                 if return_debug:
+                    merged_scores: Dict[str, float] = {}
+                    for term, score in semantic_matches:
+                        prev = merged_scores.get(term)
+                        if prev is None or score > prev:
+                            merged_scores[term] = score
+                    for term, score in keyword_weighted_matches:
+                        prev = merged_scores.get(term)
+                        if prev is None or score > prev:
+                            merged_scores[term] = score
+                    vector_matches = sorted(merged_scores.items(), key=lambda x: x[1], reverse=True)
                     query_details["vector_matches"] = vector_matches
                     query_details["semantic_match_count"] = len(semantic_matches)
                     query_details["keyword_weighted_count"] = len(keyword_weighted_matches)
