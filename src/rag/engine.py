@@ -35,10 +35,14 @@ class RAGEngine:
 
         # Caches
         kw_cache_size = self.config.get("cache", "translation_cache_size", 50000)
-        embed_cache_size = self.config.get("cache", "embedding_cache_size", 100000)
+        embed_cache_size = self.config.get("cache", "embedding_cache_size", 5000)
+        try:
+            cache_ttl_seconds = max(0.0, float(self.config.get("cache", "cache_ttl_hours", 0)) * 3600)
+        except Exception:
+            cache_ttl_seconds = 0
 
-        self._keyword_cache = LRUCache(max_size=max(1000, kw_cache_size // 10))
-        self._embedding_cache = EmbeddingCache(max_size=embed_cache_size)
+        self._keyword_cache = LRUCache(max_size=max(1000, kw_cache_size // 10), ttl_seconds=cache_ttl_seconds)
+        self._embedding_cache = EmbeddingCache(max_size=embed_cache_size, ttl_seconds=cache_ttl_seconds)
 
         self._keyword_extractor = KeywordExtractor(
             llm_client, self.prompt_manager, config_manager,

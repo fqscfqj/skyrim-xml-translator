@@ -58,6 +58,13 @@ class VectorStoreContainmentTests(unittest.TestCase):
 
         self.assertEqual(hits, [(0, "Scorched Dragonbone"), (1, "Dragon")])
 
+    def test_short_single_token_uses_exact_token_index_only(self):
+        store = self.make_store(["Golden Road", "Go Home", "Gormlaith"])
+
+        hits = store.search_containment("go", top_k=5)
+
+        self.assertEqual(hits, [(1, "Go Home")])
+
 
 class VectorStoreRebuildTests(unittest.TestCase):
     def make_paths(self):

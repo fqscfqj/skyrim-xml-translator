@@ -1,4 +1,5 @@
 import os
+import re
 
 try:
     from lxml import etree  # type: ignore
@@ -20,6 +21,8 @@ from src.xml_content import (
 
 
 class ESPXMLProcessor:
+    _UNSAFE_XML_DECL_RE = re.compile(rb"<!\s*(?:DOCTYPE|ENTITY)\b", re.IGNORECASE)
+
     def __init__(self):
         self.tree: Optional[Any] = None
         self.root: Optional[Any] = None
@@ -28,10 +31,17 @@ class ESPXMLProcessor:
     def load_file(self, file_path: str) -> bool:
         self.file_path = file_path
         try:
+            if self._has_unsafe_xml_declarations(file_path):
+                log_emit(None, None, "ERROR", "Unsafe XML declaration rejected: DOCTYPE/ENTITY is not allowed",
+                         module="esp_xml_processor", func="load_file")
+                return False
             if LXML_AVAILABLE:
                 parser_kwargs = {
                     "remove_blank_text": False,
                     "strip_cdata": False,
+                    "resolve_entities": False,
+                    "no_network": True,
+                    "compact": True,
                 }
                 try:
                     if os.path.getsize(file_path) > 10 * 1024 * 1024:
@@ -41,7 +51,11 @@ class ESPXMLProcessor:
                 try:
                     parser = etree.XMLParser(**parser_kwargs)  # type: ignore[arg-type]
                 except TypeError:
-                    parser = etree.XMLParser(remove_blank_text=False)  # type: ignore[arg-type]
+                    parser = etree.XMLParser(
+                        remove_blank_text=False,
+                        resolve_entities=False,
+                        no_network=True,
+                    )  # type: ignore[arg-type]
                 self.tree = etree.parse(file_path, parser)
             else:
                 self.tree = etree.parse(file_path)
@@ -54,6 +68,14 @@ class ESPXMLProcessor:
                 cfg = None
             log_emit(None, cfg, "ERROR", f"Error loading ESP-ESM Translator XML: {e}", exc=e,
                      module="esp_xml_processor", func="load_file")
+            return False
+
+    @classmethod
+    def _has_unsafe_xml_declarations(cls, file_path: str) -> bool:
+        try:
+            with open(file_path, "rb") as f:
+                return bool(cls._UNSAFE_XML_DECL_RE.search(f.read(65536)))
+        except Exception:
             return False
 
     def get_strings(self):

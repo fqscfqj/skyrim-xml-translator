@@ -4,6 +4,7 @@ from typing import Any, cast
 
 import numpy as np
 
+from src.rag.glossary_manager import GlossaryManager
 from src.rag.search import RAGSearcher
 from src.translation.prompt_builder import PromptBuilder
 
@@ -163,6 +164,17 @@ class RAGSearchSentenceLikeFilterTests(unittest.TestCase):
 
         self.assertEqual(results[sentence_term], "原来这一切是真的。")
         self.assertEqual(debug[0]["sentence_like_filtered_count"], 0)
+
+
+class GlossaryManagerTokenIndexTests(unittest.TestCase):
+    def test_common_words_do_not_drop_entity_tokens_from_index(self):
+        manager = GlossaryManager.__new__(GlossaryManager)
+
+        tokens = manager._term_index_tokens("Old Hroldan Inn")
+
+        self.assertIn("hroldan", tokens)
+        self.assertIn("inn", tokens)
+        self.assertNotIn("old", tokens)
 
 
 class RAGSearchPluralDirectMatchTests(unittest.TestCase):

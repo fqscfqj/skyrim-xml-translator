@@ -96,6 +96,16 @@ class ESPXMLProcessorInnerContentTests(unittest.TestCase):
         self.assertIsNotNone(traduit_node)
         self.assertEqual(0, len(list(traduit_node)))
 
+    def test_rejects_doctype_entity_declarations(self):
+        file_path = self._write_fixture(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+            "<!DOCTYPE Root [<!ENTITY xxe SYSTEM \"file:///etc/passwd\">]>\n"
+            "<Root><ESP><EDID>BookText</EDID><ORIGINAL>&xxe;</ORIGINAL><TRADUIT></TRADUIT></ESP></Root>"
+        )
+
+        processor = ESPXMLProcessor()
+        self.assertFalse(processor.load_file(file_path))
+
 
 if __name__ == "__main__":
     unittest.main()

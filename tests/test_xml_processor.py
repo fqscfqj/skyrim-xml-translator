@@ -110,6 +110,16 @@ class XMLProcessorInnerContentTests(unittest.TestCase):
         rows = list(reloaded.get_strings())
         self.assertEqual("<i>已有译文</i>", rows[0][3])
 
+    def test_rejects_doctype_entity_declarations(self):
+        file_path = self._write_fixture(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+            "<!DOCTYPE Root [<!ENTITY xxe SYSTEM \"file:///etc/passwd\">]>\n"
+            "<Root><String id=\"1\"><Source>&xxe;</Source><Dest></Dest></String></Root>"
+        )
+
+        processor = XMLProcessor()
+        self.assertFalse(processor.load_file(file_path))
+
 
 if __name__ == "__main__":
     unittest.main()

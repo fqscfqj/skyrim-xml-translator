@@ -1,6 +1,7 @@
 PyQt6
 openai
-lxml
+lxml>=5.0.0
+defusedxml>=0.7.1
 numpy
 scikit-learn
 pyinstaller

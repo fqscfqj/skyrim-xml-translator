@@ -136,11 +136,13 @@ class VectorStore:
         if self.vectors is not None:
             try:
                 # Try the standard close() method first (numpy >= 1.x memmap)
-                if hasattr(self.vectors, 'close') and callable(self.vectors.close):
-                    self.vectors.close()
+                close_fn = getattr(self.vectors, 'close', None)
+                mmap_obj = getattr(self.vectors, '_mmap', None)
+                if callable(close_fn):
+                    close_fn()
                 # Fallback: try internal _mmap attribute
-                elif hasattr(self.vectors, '_mmap') and self.vectors._mmap is not None:
-                    self.vectors._mmap.close()
+                elif mmap_obj is not None:
+                    mmap_obj.close()
             except Exception:
                 pass
         self.vectors = None
@@ -814,6 +816,10 @@ class VectorStore:
             trigram_hits = [self._trigram_to_indices[tg] for tg in trigrams if tg in self._trigram_to_indices]
             if trigram_hits:
                 candidate_indices = set.intersection(*trigram_hits)
+        else:
+            # Very short single-token queries are too broad for substring scans.
+            # Restrict them to exact token-index hits; otherwise return no hits.
+            candidate_indices = self._token_to_indices.get(query_norm, [])
         if candidate_indices is None:
             candidate_indices = range(len(self.terms))
 

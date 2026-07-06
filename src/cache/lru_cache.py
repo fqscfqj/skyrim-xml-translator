@@ -19,6 +19,7 @@ class LRUCache:
         self._persist_path = persist_path
 
         if persist_path:
+            self._cleanup_tmp_file()
             self.load_from_disk()
 
     def get(self, key: str) -> Optional[Any]:
@@ -103,6 +104,16 @@ class LRUCache:
                 # Trim to max size (keep most recent)
                 while len(self._cache) > self._max_size:
                     self._cache.popitem(last=False)
+        except Exception:
+            pass
+
+    def _cleanup_tmp_file(self) -> None:
+        if not self._persist_path:
+            return
+        tmp_path = self._persist_path + ".tmp"
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
         except Exception:
             pass
 

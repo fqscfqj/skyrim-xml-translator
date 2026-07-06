@@ -1232,7 +1232,10 @@ class Translator:
 
         # Prepend previous translation so LLM can see what to fix
         if last_translation:
-            prompt = f"[上次翻译]\n{last_translation}\n\n{prompt}"
+            previous = str(last_translation)
+            if len(previous) > 2000:
+                previous = previous[:1976] + "\n...[truncated]"
+            prompt = f"[上次翻译]\n{previous}\n\n{prompt}"
 
         return prompt
 

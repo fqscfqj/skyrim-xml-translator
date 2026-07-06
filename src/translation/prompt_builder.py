@@ -3,6 +3,7 @@
 import re
 from typing import Any, Optional
 
+from src.logging_helper import emit as log_emit
 from src.translation.text_analyzer import TextAnalyzer
 
 
@@ -296,12 +297,29 @@ class PromptBuilder:
         if max_chars <= 0 or len(context) <= max_chars:
             return context
 
+        dropped_reference = 0
+        dropped_in_source = 0
         while reference_lines and len(context) > max_chars:
             reference_lines.pop()
+            dropped_reference += 1
             context = build_context()
         while in_source_lines and len(context) > max_chars:
             in_source_lines.pop()
+            dropped_in_source += 1
             context = build_context()
+        if dropped_reference or dropped_in_source:
+            log_emit(
+                None,
+                self.config,
+                "WARNING",
+                (
+                    "Glossary context truncated: "
+                    f"dropped {dropped_in_source} in-source terms and "
+                    f"{dropped_reference} reference terms to fit {max_chars} chars."
+                ),
+                module="prompt_builder",
+                func="build_glossary_context",
+            )
         if len(context) > max_chars:
             return context[:max_chars].rstrip()
         return context

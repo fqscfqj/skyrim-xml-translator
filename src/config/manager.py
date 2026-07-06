@@ -2,6 +2,7 @@
 
 import json
 import os
+import stat
 from typing import Any, Optional
 
 from src.logging_helper import emit as log_emit
@@ -149,9 +150,17 @@ class ConfigManager:
         try:
             with open(self.config_path, "w", encoding="utf-8") as f:
                 json.dump(self.config, f, indent=4, ensure_ascii=False)
+            self._protect_config_file()
         except Exception as e:
             log_emit(None, None, "ERROR", f"Error saving config: {e}", exc=e,
                      module="config_manager", func="save_config")
+
+    def _protect_config_file(self) -> None:
+        """Best-effort permission tightening for config files that may contain API keys."""
+        try:
+            os.chmod(self.config_path, stat.S_IRUSR | stat.S_IWUSR)
+        except Exception:
+            pass
 
     # --- Existing public API (unchanged) ---
 

@@ -7,8 +7,9 @@ from src.cache.lru_cache import LRUCache
 
 
 class EmbeddingCache:
-    def __init__(self, max_size: int = 100000, persist_path: Optional[str] = None):
-        self._cache = LRUCache(max_size=max_size, persist_path=persist_path)
+    def __init__(self, max_size: int = 5000, ttl_seconds: float = 0,
+                 persist_path: Optional[str] = None):
+        self._cache = LRUCache(max_size=max_size, ttl_seconds=ttl_seconds, persist_path=persist_path)
 
     def get(self, text: str, fingerprint: Any) -> Optional[list[float]]:
         key = self._make_key(text, fingerprint)

@@ -269,11 +269,36 @@ class GlossaryWorker(QThread):
                         return
 
                     terms = {}
+                    skipped_rows = 0
+                    max_rows = 100000
+                    max_field_chars = 500
                     with open(self.data, 'r', encoding='utf-8') as f:
                         reader = csv.reader(f)
-                        for row in reader:
-                            if len(row) >= 2:
-                                terms[row[0].strip()] = row[1].strip()
+                        for row_number, row in enumerate(reader, start=1):
+                            if row_number > max_rows:
+                                skipped_rows += 1
+                                break
+                            if len(row) < 2:
+                                skipped_rows += 1
+                                continue
+                            term = row[0].strip()
+                            translation = row[1].strip()
+                            if not term or not translation:
+                                skipped_rows += 1
+                                continue
+                            if len(term) > max_field_chars or len(translation) > max_field_chars:
+                                skipped_rows += 1
+                                continue
+                            terms[term] = translation
+                    if skipped_rows:
+                        log_emit(
+                            self.log.emit,
+                            self.rag_engine.config,
+                            'WARNING',
+                            f"Skipped {skipped_rows} invalid or excessive glossary CSV rows.",
+                            module='gui_main',
+                            func='GlossaryWorker.run',
+                        )
                     
                     if terms:
                         log_emit(self.log.emit, self.rag_engine.config, 'INFO', i18n.t("msg_found_terms").format(count=len(terms), threads=self.num_threads), module='gui_main', func='GlossaryWorker.run')

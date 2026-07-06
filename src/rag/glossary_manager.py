@@ -143,9 +143,6 @@ class GlossaryManager:
             return []
 
         split_tokens = norm.split()
-        allowed_name_connectors = {"of", "the", "and"}
-        if any((t in self._COMMON_WORDS) and (t not in allowed_name_connectors) for t in split_tokens):
-            return []
         if len(split_tokens) > 8 or len(norm) > 60:
             return []
         return [t for t in split_tokens if t and len(t) >= 2 and t not in self._COMMON_WORDS]
