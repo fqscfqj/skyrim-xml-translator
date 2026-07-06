@@ -8,6 +8,11 @@ from src.cache.embedding_cache import EmbeddingCache
 from src.rag.vector_store import VectorStore
 
 
+class _ExplodingNormalizedTerms(list):
+    def __getitem__(self, index):
+        raise AssertionError("search_containment should not scan normalized terms without indexed candidates")
+
+
 class _DummyConfig:
     def __init__(self, *, base_url: str = "http://embed.local/v1",
                  model: str = "embed-model-a", dimensions: int = 2):
@@ -64,6 +69,14 @@ class VectorStoreContainmentTests(unittest.TestCase):
         hits = store.search_containment("go", top_k=5)
 
         self.assertEqual(hits, [(1, "Go Home")])
+
+    def test_no_indexed_candidate_returns_empty_without_full_scan(self):
+        store = self.make_store(["Aardvark", "Balmora"])
+        store._normalized_terms = _ExplodingNormalizedTerms(store._normalized_terms)
+
+        hits = store.search_containment("zzz", top_k=5)
+
+        self.assertEqual(hits, [])
 
 
 class VectorStoreRebuildTests(unittest.TestCase):

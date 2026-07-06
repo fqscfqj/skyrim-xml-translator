@@ -821,7 +821,7 @@ class VectorStore:
             # Restrict them to exact token-index hits; otherwise return no hits.
             candidate_indices = self._token_to_indices.get(query_norm, [])
         if candidate_indices is None:
-            candidate_indices = range(len(self.terms))
+            return []
 
         indices = [
             i for i in candidate_indices

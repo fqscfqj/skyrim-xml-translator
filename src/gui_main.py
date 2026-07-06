@@ -3812,6 +3812,38 @@ class MainWindow(QMainWindow):
         self.rag_keyword_weight_anchor_boost.setToolTip(i18n.t("tooltip_rag_keyword_weight_anchor_boost"))
         expert_layout.addRow(i18n.t("label_rag_keyword_weight_anchor_boost", "Anchor boost:"), self.rag_keyword_weight_anchor_boost)
 
+        self.rag_glossary_context_max_chars = NoWheelSpinBox()
+        self.rag_glossary_context_max_chars.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_glossary_context_max_chars.setRange(0, 200000)
+        self.rag_glossary_context_max_chars.setSingleStep(100)
+        self.rag_glossary_context_max_chars.setValue(self.config_manager.get("rag", "glossary_context_max_chars", 4000))
+        self.rag_glossary_context_max_chars.setToolTip(i18n.t(
+            "tooltip_rag_glossary_context_max_chars",
+            "Maximum glossary context characters injected into prompts; 0 disables truncation."
+        ))
+        expert_layout.addRow(i18n.t("label_rag_glossary_context_max_chars", "Glossary context max chars:"), self.rag_glossary_context_max_chars)
+
+        self.rag_format_extra_retries = NoWheelSpinBox()
+        self.rag_format_extra_retries.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_format_extra_retries.setRange(0, 10)
+        self.rag_format_extra_retries.setValue(self.config_manager.get("rag", "format_extra_retries", 2))
+        self.rag_format_extra_retries.setToolTip(i18n.t(
+            "tooltip_rag_format_extra_retries",
+            "Extra retries allowed when translation format preservation fails."
+        ))
+        expert_layout.addRow(i18n.t("label_rag_format_extra_retries", "Format extra retries:"), self.rag_format_extra_retries)
+
+        self.rag_latin_ratio_threshold = NoWheelDoubleSpinBox()
+        self.rag_latin_ratio_threshold.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_latin_ratio_threshold.setRange(0.1, 20.0)
+        self.rag_latin_ratio_threshold.setSingleStep(0.1)
+        self.rag_latin_ratio_threshold.setValue(self.config_manager.get("rag", "latin_ratio_threshold", 2.0))
+        self.rag_latin_ratio_threshold.setToolTip(i18n.t(
+            "tooltip_rag_latin_ratio_threshold",
+            "Latin-to-CJK ratio threshold used by untranslated text detection."
+        ))
+        expert_layout.addRow(i18n.t("label_rag_latin_ratio_threshold", "Latin ratio threshold:"), self.rag_latin_ratio_threshold)
+
         reset_rag_advanced_btn = QPushButton(i18n.t("btn_reset_rag_advanced"))
         reset_rag_advanced_btn.clicked.connect(self.reset_rag_advanced_settings)
         expert_layout.addRow(reset_rag_advanced_btn)
@@ -4890,6 +4922,9 @@ class MainWindow(QMainWindow):
         self.rag_keyword_weight_token_boost.setValue(defaults.keyword_weight_token_boost)
         self.rag_keyword_weight_anchor_max_df.setValue(defaults.keyword_weight_anchor_max_df)
         self.rag_keyword_weight_anchor_boost.setValue(defaults.keyword_weight_anchor_boost)
+        self.rag_glossary_context_max_chars.setValue(defaults.glossary_context_max_chars)
+        self.rag_format_extra_retries.setValue(defaults.format_extra_retries)
+        self.rag_latin_ratio_threshold.setValue(defaults.latin_ratio_threshold)
         QMessageBox.information(
             self,
             i18n.t("title_info"),
@@ -4979,6 +5014,9 @@ class MainWindow(QMainWindow):
                 "keyword_weight_token_boost": self.rag_keyword_weight_token_boost.value(),
                 "keyword_weight_anchor_max_df": self.rag_keyword_weight_anchor_max_df.value(),
                 "keyword_weight_anchor_boost": self.rag_keyword_weight_anchor_boost.value(),
+                "glossary_context_max_chars": self.rag_glossary_context_max_chars.value(),
+                "format_extra_retries": self.rag_format_extra_retries.value(),
+                "latin_ratio_threshold": self.rag_latin_ratio_threshold.value(),
             },
             "general": {
                 "log_level": self.log_level_combo.currentText(),

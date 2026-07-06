@@ -81,7 +81,10 @@
         "keyword_weight_contains_boost": 0.06,
         "keyword_weight_token_boost": 0.04,
         "keyword_weight_anchor_max_df": 500,
-        "keyword_weight_anchor_boost": 0.18
+        "keyword_weight_anchor_boost": 0.18,
+        "glossary_context_max_chars": 4000,
+        "format_extra_retries": 2,
+        "latin_ratio_threshold": 2.0
     },
     "general": {
         "log_level": "INFO",

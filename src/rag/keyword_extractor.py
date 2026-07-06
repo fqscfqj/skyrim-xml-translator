@@ -200,15 +200,24 @@ class KeywordExtractor:
     def _keyword_cache_fingerprint(self) -> str:
         prompt_config = self.prompt_manager.get("rag.keywords", "")
         model_config = {}
-        for section in ("llm_search", "llm"):
+        for section in ("llm_search", "llm_search_fallback", "llm"):
             for key in ("base_url", "model"):
                 try:
                     model_config[f"{section}.{key}"] = self.config.get(section, key, "")
                 except Exception:
                     model_config[f"{section}.{key}"] = ""
+            try:
+                params = self.config.get(section, "parameters", {}) or {}
+            except Exception:
+                params = {}
+            model_config[f"{section}.parameters"] = params if isinstance(params, dict) else str(params)
         payload = {
             "prompt": prompt_config,
             "model": model_config,
+            "keyword_overrides": {
+                "temperature": 0.1,
+                "max_tokens": None,
+            },
         }
         raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
