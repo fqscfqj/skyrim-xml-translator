@@ -8,7 +8,7 @@ except Exception:
     import xml.etree.ElementTree as etree  # type: ignore
     LXML_AVAILABLE = False
 
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 from src.config.manager import ConfigManager
 from src.logging_helper import emit as log_emit
@@ -36,6 +36,7 @@ class ESPXMLProcessor:
                          module="esp_xml_processor", func="load_file")
                 return False
             if LXML_AVAILABLE:
+                xml_parser_factory = cast(Any, etree.XMLParser)
                 parser_kwargs = {
                     "remove_blank_text": False,
                     "strip_cdata": False,
@@ -49,13 +50,13 @@ class ESPXMLProcessor:
                 except OSError:
                     pass
                 try:
-                    parser = etree.XMLParser(**parser_kwargs)  # type: ignore[arg-type]
+                    parser = xml_parser_factory(**parser_kwargs)
                 except TypeError:
-                    parser = etree.XMLParser(
+                    parser = xml_parser_factory(
                         remove_blank_text=False,
                         resolve_entities=False,
                         no_network=True,
-                    )  # type: ignore[arg-type]
+                    )
                 self.tree = etree.parse(file_path, parser)
             else:
                 self.tree = etree.parse(file_path)

@@ -9,7 +9,7 @@ except Exception:
 
 import os
 import re
-from typing import Optional, Any
+from typing import Optional, Any, cast
 from src.logging_helper import emit as log_emit
 from src.config.manager import ConfigManager
 from src.xml_content import (
@@ -36,6 +36,7 @@ class XMLProcessor:
                 return False
             if LXML_AVAILABLE:
                 # Some versions of lxml may not support all XMLParser named args
+                xml_parser_factory = cast(Any, etree.XMLParser)
                 parser_kwargs = {
                     "remove_blank_text": False,
                     "strip_cdata": False,
@@ -49,13 +50,13 @@ class XMLProcessor:
                 except OSError:
                     pass
                 try:
-                    parser = etree.XMLParser(**parser_kwargs)  # type: ignore[arg-type]
+                    parser = xml_parser_factory(**parser_kwargs)
                 except TypeError:
-                    parser = etree.XMLParser(
+                    parser = xml_parser_factory(
                         remove_blank_text=False,
                         resolve_entities=False,
                         no_network=True,
-                    )  # type: ignore[arg-type]
+                    )
                 self.tree = etree.parse(file_path, parser)
             else:
                 # xml.etree.ElementTree doesn't use the same parser options

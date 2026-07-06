@@ -4936,9 +4936,9 @@ class MainWindow(QMainWindow):
             return
 
         def _embedding_snapshot(base_url: object, model: object, dimensions: object) -> dict[str, object]:
-            try:
+            if isinstance(dimensions, (int, float, str)):
                 normalized_dimensions = max(0, int(dimensions))
-            except Exception:
+            else:
                 normalized_dimensions = 0
             return {
                 "base_url": str(base_url or "").strip().rstrip("/"),
@@ -5137,13 +5137,6 @@ class MainWindow(QMainWindow):
         self.worker.log.connect(self.log)
         self.worker.progress.connect(self._handle_translation_progress)
         self.worker.result_ready.connect(self.update_table_row)
-        seBug #18: Prevent clearing while translation is running
-        if self._translation_task_active:
-            log_emit(self.log, self.config_manager, 'WARNING',
-                     "Cannot clear translations while translation is in progress",
-                     module='gui_main', func='clear_all_translations')
-            return
-
         # lf.worker.row_failed.connect(self.update_table_row_failed)
         self.worker.rag_debug_ready.connect(self.cache_rag_debug_info)
         self.worker.finished.connect(self.on_translation_finished)
@@ -5151,6 +5144,13 @@ class MainWindow(QMainWindow):
         self.worker.start()
 
     def clear_all_translations(self):
+        # Bug #18: Prevent clearing while translation is running
+        if self._translation_task_active:
+            log_emit(self.log, self.config_manager, 'WARNING',
+                     "Cannot clear translations while translation is in progress",
+                     module='gui_main', func='clear_all_translations')
+            return
+
         # Confirm with user
         if self.trans_table.rowCount() == 0:
             QMessageBox.information(self, i18n.t("title_info"), i18n.t("msg_no_translations_to_clear"))
