@@ -2160,7 +2160,7 @@ class MainWindow(QMainWindow):
             QTabBar::tab {
                 background-color: #e9eef5;
                 color: #6b7280;
-                padding: 7px 18px;
+                padding: 6px 14px;
                 border: 1px solid #d2dbe7;
                 border-bottom: none;
                 margin-right: 2px;
@@ -2176,11 +2176,11 @@ class MainWindow(QMainWindow):
             }
             QPushButton {
                 border: 1px solid #c8d3e2;
-                border-radius: 8px;
-                padding: 6px 16px;
+                border-radius: 6px;
+                padding: 4px 12px;
                 background-color: #f8fafc;
                 color: #1f2937;
-                min-height: 26px;
+                min-height: 22px;
                 font-weight: 500;
             }
             QPushButton:hover {
@@ -2199,13 +2199,13 @@ class MainWindow(QMainWindow):
             }
             QLineEdit {
                 border: 1px solid #c8d3e2;
-                border-radius: 8px;
-                padding: 5px 10px;
+                border-radius: 6px;
+                padding: 3px 8px;
                 background-color: #ffffff;
                 color: #334155;
                 selection-background-color: #2563eb;
                 selection-color: #ffffff;
-                min-height: 26px;
+                min-height: 22px;
             }
             QLineEdit:focus {
                 border-color: #2563eb;
@@ -2213,7 +2213,7 @@ class MainWindow(QMainWindow):
             }
             QPlainTextEdit {
                 border: 1px solid #d2dbe7;
-                border-radius: 8px;
+                border-radius: 6px;
                 background-color: #ffffff;
                 color: #334155;
                 selection-background-color: #dbeafe;
@@ -2300,11 +2300,11 @@ class MainWindow(QMainWindow):
             }
             QComboBox {
                 border: 1px solid #c8d3e2;
-                border-radius: 8px;
-                padding: 5px 10px;
+                border-radius: 6px;
+                padding: 3px 8px;
                 background-color: #ffffff;
                 color: #334155;
-                min-height: 26px;
+                min-height: 22px;
             }
             QComboBox:focus {
                 border-color: #2563eb;
@@ -2312,7 +2312,7 @@ class MainWindow(QMainWindow):
             }
             QComboBox::drop-down {
                 border: none;
-                width: 28px;
+                width: 24px;
             }
             QComboBox QAbstractItemView {
                 background-color: #ffffff;
@@ -2323,11 +2323,11 @@ class MainWindow(QMainWindow):
             }
             QAbstractSpinBox {
                 border: 1px solid #c8d3e2;
-                border-radius: 8px;
-                padding: 5px 10px;
+                border-radius: 6px;
+                padding: 3px 8px;
                 background-color: #ffffff;
                 color: #334155;
-                min-height: 26px;
+                min-height: 22px;
             }
             QAbstractSpinBox:focus {
                 border-color: #2563eb;
@@ -2345,13 +2345,13 @@ class MainWindow(QMainWindow):
             }
             QCheckBox {
                 color: #334155;
-                spacing: 10px;
+                spacing: 7px;
             }
             QCheckBox::indicator {
-                width: 18px;
-                height: 18px;
+                width: 15px;
+                height: 15px;
                 border: 1px solid #94a3b8;
-                border-radius: 6px;
+                border-radius: 4px;
                 background-color: #ffffff;
             }
             QCheckBox::indicator:hover {
@@ -2414,7 +2414,7 @@ class MainWindow(QMainWindow):
         QTabBar::tab {
             background-color: #181c22;
             color: #7a8799;
-            padding: 7px 18px;
+            padding: 6px 14px;
             border: 1px solid #2a3040;
             border-bottom: none;
             margin-right: 2px;
@@ -2430,11 +2430,11 @@ class MainWindow(QMainWindow):
         }
         QPushButton {
             border: 1px solid #353d4e;
-            border-radius: 8px;
-            padding: 6px 16px;
+            border-radius: 6px;
+            padding: 4px 12px;
             background-color: #252b38;
             color: #dce7f7;
-            min-height: 26px;
+            min-height: 22px;
             font-weight: 500;
         }
         QPushButton:hover {
@@ -2453,13 +2453,13 @@ class MainWindow(QMainWindow):
         }
         QLineEdit {
             border: 1px solid #353d4e;
-            border-radius: 8px;
-            padding: 5px 10px;
+            border-radius: 6px;
+            padding: 3px 8px;
             background-color: #161a20;
             color: #dce3ec;
             selection-background-color: #2f6fd4;
             selection-color: #ffffff;
-            min-height: 26px;
+            min-height: 22px;
         }
         QLineEdit:focus {
             border-color: #76a9ff;
@@ -2467,7 +2467,7 @@ class MainWindow(QMainWindow):
         }
         QPlainTextEdit {
             border: 1px solid #2a3040;
-            border-radius: 8px;
+            border-radius: 6px;
             background-color: #13171d;
             color: #c8d4e4;
             selection-background-color: #1d4a9a;
@@ -2553,11 +2553,11 @@ class MainWindow(QMainWindow):
         }
         QComboBox {
             border: 1px solid #353d4e;
-            border-radius: 8px;
-            padding: 5px 10px;
+            border-radius: 6px;
+            padding: 3px 8px;
             background-color: #161a20;
             color: #dce3ec;
-            min-height: 26px;
+            min-height: 22px;
         }
         QComboBox:focus {
             border-color: #76a9ff;
@@ -2565,7 +2565,7 @@ class MainWindow(QMainWindow):
         }
         QComboBox::drop-down {
             border: none;
-            width: 28px;
+            width: 24px;
         }
         QComboBox QAbstractItemView {
             background-color: #1e2228;
@@ -2576,11 +2576,11 @@ class MainWindow(QMainWindow):
         }
         QAbstractSpinBox {
             border: 1px solid #353d4e;
-            border-radius: 8px;
-            padding: 5px 10px;
+            border-radius: 6px;
+            padding: 3px 8px;
             background-color: #161a20;
             color: #dce3ec;
-            min-height: 26px;
+            min-height: 22px;
         }
         QAbstractSpinBox:focus {
             border-color: #76a9ff;
@@ -2598,13 +2598,13 @@ class MainWindow(QMainWindow):
         }
         QCheckBox {
             color: #c8d4e4;
-            spacing: 10px;
+            spacing: 7px;
         }
         QCheckBox::indicator {
-            width: 18px;
-            height: 18px;
+            width: 15px;
+            height: 15px;
             border: 1px solid #4a5468;
-            border-radius: 6px;
+            border-radius: 4px;
             background-color: #161a20;
         }
         QCheckBox::indicator:hover {
@@ -3206,16 +3206,16 @@ class MainWindow(QMainWindow):
             return """
             #configTab QGroupBox {
                 border: 1px solid #d8e2ef;
-                border-radius: 12px;
-                margin-top: 14px;
-                padding-top: 16px;
+                border-radius: 9px;
+                margin-top: 10px;
+                padding-top: 11px;
                 background-color: #ffffff;
                 color: #334155;
             }
             #configTab QGroupBox::title {
                 subcontrol-origin: margin;
-                left: 14px;
-                padding: 0 8px;
+                left: 12px;
+                padding: 0 6px;
                 color: #1e3a8a;
                 font-weight: 700;
             }
@@ -3232,10 +3232,10 @@ class MainWindow(QMainWindow):
             #configTab QLineEdit,
             #configTab QComboBox,
             #configTab QAbstractSpinBox {
-                min-height: 30px;
-                padding: 3px 10px;
+                min-height: 24px;
+                padding: 2px 8px;
                 border: 1px solid #c8d3e2;
-                border-radius: 8px;
+                border-radius: 6px;
                 background-color: #ffffff;
                 color: #334155;
                 selection-background-color: #2563eb;
@@ -3256,21 +3256,21 @@ class MainWindow(QMainWindow):
             }
             #configTab QComboBox::drop-down {
                 border: none;
-                width: 28px;
+                width: 24px;
                 background: transparent;
             }
             #configTab QCheckBox {
-                spacing: 10px;
+                spacing: 7px;
                 color: #334155;
             }
             #configTab QCheckBox:disabled {
                 color: #94a3b8;
             }
             #configTab QCheckBox::indicator {
-                width: 19px;
-                height: 19px;
+                width: 15px;
+                height: 15px;
                 border: 1px solid #94a3b8;
-                border-radius: 6px;
+                border-radius: 4px;
                 background-color: #ffffff;
             }
             #configTab QCheckBox::indicator:hover {
@@ -3293,7 +3293,7 @@ class MainWindow(QMainWindow):
                 background-color: #bfdbfe;
             }
             #configTab QWidget#paramOptionRow {
-                border-radius: 10px;
+                border-radius: 7px;
                 background-color: #f8fafc;
             }
             #configTab QWidget#paramOptionRow:hover {
@@ -3304,16 +3304,16 @@ class MainWindow(QMainWindow):
         return """
         #configTab QGroupBox {
             border: 1px solid #303847;
-            border-radius: 12px;
-            margin-top: 14px;
-            padding-top: 16px;
+            border-radius: 9px;
+            margin-top: 10px;
+            padding-top: 11px;
             background-color: #20242d;
             color: #e6edf3;
         }
         #configTab QGroupBox::title {
             subcontrol-origin: margin;
-            left: 14px;
-            padding: 0 8px;
+            left: 12px;
+            padding: 0 6px;
             color: #dbeafe;
             font-weight: 700;
         }
@@ -3330,10 +3330,10 @@ class MainWindow(QMainWindow):
         #configTab QLineEdit,
         #configTab QComboBox,
         #configTab QAbstractSpinBox {
-            min-height: 30px;
-            padding: 3px 10px;
+            min-height: 24px;
+            padding: 2px 8px;
             border: 1px solid #4a5366;
-            border-radius: 8px;
+            border-radius: 6px;
             background-color: #14181f;
             color: #f3f4f6;
             selection-background-color: #4c7dff;
@@ -3354,21 +3354,21 @@ class MainWindow(QMainWindow):
         }
         #configTab QComboBox::drop-down {
             border: none;
-            width: 28px;
+            width: 24px;
             background: transparent;
         }
         #configTab QCheckBox {
-            spacing: 10px;
+            spacing: 7px;
             color: #dce3ec;
         }
         #configTab QCheckBox:disabled {
             color: #9099ab;
         }
         #configTab QCheckBox::indicator {
-            width: 19px;
-            height: 19px;
+            width: 15px;
+            height: 15px;
             border: 1px solid #5a6477;
-            border-radius: 6px;
+            border-radius: 4px;
             background-color: #14181f;
         }
         #configTab QCheckBox::indicator:hover {
@@ -3391,7 +3391,7 @@ class MainWindow(QMainWindow):
             background-color: #3c5cb2;
         }
         #configTab QWidget#paramOptionRow {
-            border-radius: 10px;
+            border-radius: 7px;
             background-color: #262c37;
         }
         #configTab QWidget#paramOptionRow:hover {
@@ -3414,8 +3414,8 @@ class MainWindow(QMainWindow):
         form_widget = QWidget()
         form_widget.setObjectName("configTab")
         form_layout = QVBoxLayout(form_widget)
-        form_layout.setContentsMargins(12, 10, 12, 14)
-        form_layout.setSpacing(12)
+        form_layout.setContentsMargins(8, 6, 8, 10)
+        form_layout.setSpacing(8)
 
         param_tooltips = {
             "temperature": i18n.t(
@@ -3439,9 +3439,9 @@ class MainWindow(QMainWindow):
         # Wrap settings in a scroll area so controls remain usable on smaller windows.
         llm_group = QGroupBox(i18n.t('group_llm_settings'))
         llm_layout = QFormLayout(llm_group)
-        llm_layout.setContentsMargins(16, 14, 16, 16)
-        llm_layout.setHorizontalSpacing(14)
-        llm_layout.setVerticalSpacing(10)
+        llm_layout.setContentsMargins(12, 9, 12, 12)
+        llm_layout.setHorizontalSpacing(10)
+        llm_layout.setVerticalSpacing(6)
 
         self.llm_base = QLineEdit(self.config_manager.get("llm", "base_url"))
         self.llm_key = QLineEdit(self.config_manager.get("llm", "api_key"))
@@ -3468,8 +3468,8 @@ class MainWindow(QMainWindow):
             row_widget = QWidget()
             row_widget.setObjectName("paramOptionRow")
             row_layout = QHBoxLayout(row_widget)
-            row_layout.setContentsMargins(8, 5, 8, 5)
-            row_layout.setSpacing(10)
+            row_layout.setContentsMargins(6, 3, 6, 3)
+            row_layout.setSpacing(8)
             row_layout.addWidget(checkbox)
             row_layout.addWidget(widget)
             row_layout.addStretch()
@@ -3515,9 +3515,9 @@ class MainWindow(QMainWindow):
         # --- Search LLM Settings ---
         search_group = QGroupBox(i18n.t('group_search_llm_settings'))
         search_layout = QFormLayout(search_group)
-        search_layout.setContentsMargins(16, 14, 16, 16)
-        search_layout.setHorizontalSpacing(14)
-        search_layout.setVerticalSpacing(10)
+        search_layout.setContentsMargins(12, 9, 12, 12)
+        search_layout.setHorizontalSpacing(10)
+        search_layout.setVerticalSpacing(6)
 
         self.search_base = QLineEdit(self.config_manager.get("llm_search", "base_url"))
         self.search_key = QLineEdit(self.config_manager.get("llm_search", "api_key"))
@@ -3544,8 +3544,8 @@ class MainWindow(QMainWindow):
             row_widget = QWidget()
             row_widget.setObjectName("paramOptionRow")
             row_layout = QHBoxLayout(row_widget)
-            row_layout.setContentsMargins(8, 5, 8, 5)
-            row_layout.setSpacing(10)
+            row_layout.setContentsMargins(6, 3, 6, 3)
+            row_layout.setSpacing(8)
             row_layout.addWidget(checkbox)
             row_layout.addWidget(widget)
             row_layout.addStretch()
@@ -3591,9 +3591,9 @@ class MainWindow(QMainWindow):
         # --- Search Fallback LLM Settings ---
         search_fallback_group = QGroupBox(i18n.t('group_search_fallback_llm_settings'))
         search_fallback_layout = QFormLayout(search_fallback_group)
-        search_fallback_layout.setContentsMargins(16, 14, 16, 16)
-        search_fallback_layout.setHorizontalSpacing(14)
-        search_fallback_layout.setVerticalSpacing(10)
+        search_fallback_layout.setContentsMargins(12, 9, 12, 12)
+        search_fallback_layout.setHorizontalSpacing(10)
+        search_fallback_layout.setVerticalSpacing(6)
 
         self.search_fallback_base = QLineEdit(self.config_manager.get("llm_search_fallback", "base_url"))
         self.search_fallback_key = QLineEdit(self.config_manager.get("llm_search_fallback", "api_key"))
@@ -3619,8 +3619,8 @@ class MainWindow(QMainWindow):
             row_widget = QWidget()
             row_widget.setObjectName("paramOptionRow")
             row_layout = QHBoxLayout(row_widget)
-            row_layout.setContentsMargins(8, 5, 8, 5)
-            row_layout.setSpacing(10)
+            row_layout.setContentsMargins(6, 3, 6, 3)
+            row_layout.setSpacing(8)
             row_layout.addWidget(checkbox)
             row_layout.addWidget(widget)
             row_layout.addStretch()
@@ -3666,9 +3666,9 @@ class MainWindow(QMainWindow):
 
         embedding_group = QGroupBox(i18n.t('group_embedding_settings'))
         embedding_layout = QFormLayout(embedding_group)
-        embedding_layout.setContentsMargins(16, 14, 16, 16)
-        embedding_layout.setHorizontalSpacing(14)
-        embedding_layout.setVerticalSpacing(10)
+        embedding_layout.setContentsMargins(12, 9, 12, 12)
+        embedding_layout.setHorizontalSpacing(10)
+        embedding_layout.setVerticalSpacing(6)
 
         self.embed_base = QLineEdit(self.config_manager.get("embedding", "base_url"))
         self.embed_key = QLineEdit(self.config_manager.get("embedding", "api_key"))
@@ -3689,9 +3689,9 @@ class MainWindow(QMainWindow):
 
         threads_group = QGroupBox(i18n.t('group_threads'))
         threads_layout = QFormLayout(threads_group)
-        threads_layout.setContentsMargins(16, 14, 16, 16)
-        threads_layout.setHorizontalSpacing(14)
-        threads_layout.setVerticalSpacing(10)
+        threads_layout.setContentsMargins(12, 9, 12, 12)
+        threads_layout.setHorizontalSpacing(10)
+        threads_layout.setVerticalSpacing(6)
 
         self.trans_threads = NoWheelSpinBox()
         self.trans_threads.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
@@ -3748,9 +3748,9 @@ class MainWindow(QMainWindow):
 
         rag_group = QGroupBox(i18n.t('group_rag_settings'))
         rag_layout = QFormLayout(rag_group)
-        rag_layout.setContentsMargins(16, 14, 16, 16)
-        rag_layout.setHorizontalSpacing(14)
-        rag_layout.setVerticalSpacing(10)
+        rag_layout.setContentsMargins(12, 9, 12, 12)
+        rag_layout.setHorizontalSpacing(10)
+        rag_layout.setVerticalSpacing(6)
 
         self.rag_threshold = NoWheelDoubleSpinBox()
         self.rag_threshold.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
@@ -3954,9 +3954,9 @@ class MainWindow(QMainWindow):
 
         system_group = QGroupBox(i18n.t('group_system_settings'))
         system_layout = QFormLayout(system_group)
-        system_layout.setContentsMargins(16, 14, 16, 16)
-        system_layout.setHorizontalSpacing(14)
-        system_layout.setVerticalSpacing(10)
+        system_layout.setContentsMargins(12, 9, 12, 12)
+        system_layout.setHorizontalSpacing(10)
+        system_layout.setVerticalSpacing(6)
 
         self.language_combo = NoWheelComboBox()
         self.language_combo.addItem(i18n.t("language_option_auto"), "auto")
