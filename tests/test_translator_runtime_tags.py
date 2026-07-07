@@ -1,6 +1,9 @@
 import unittest
 import tempfile
+from typing import cast
 
+from src.llm.client import LLMClient
+from src.rag.engine import RAGEngine
 from src.translation.translator import Translator
 
 
@@ -28,13 +31,20 @@ class _DummyLLMClient:
         return self.response_text
 
 
+def _make_translator(llm: _DummyLLMClient, rag_engine: _DummyRAGEngine | None = None) -> Translator:
+    return Translator(
+        cast(LLMClient, llm),
+        cast(RAGEngine, rag_engine or _DummyRAGEngine()),
+    )
+
+
 class TranslatorRuntimeTagTests(unittest.TestCase):
     def test_translate_text_accepts_reordered_runtime_tags_for_cjk(self):
         source = "Speak to <Alias.ShortName=Target> with <Alias.ShortName=Questgiver>'s outfit on"
         llm = _DummyLLMClient(
             '{"translation":"穿着__FMT_1_0002__的装束去和__FMT_1_0001__交谈"}'
         )
-        translator = Translator(llm, _DummyRAGEngine())
+        translator = _make_translator(llm)
 
         result = translator.translate_text(source, use_rag=False, max_retries=0)
 
@@ -49,7 +59,7 @@ class TranslatorRuntimeTagTests(unittest.TestCase):
         llm = _DummyLLMClient(
             '{"translation":"A 稍微正经点。不过没错，就我所知，她女儿瑟拉娜是单身。"}'
         )
-        translator = Translator(llm, _DummyRAGEngine())
+        translator = _make_translator(llm)
 
         result = translator.translate_text(source, use_rag=False, max_retries=0)
 
@@ -64,7 +74,7 @@ class TranslatorRuntimeTagTests(unittest.TestCase):
         llm = _DummyLLMClient(
             '{"translation":"A 稍微正经点。"}'
         )
-        translator = Translator(llm, _DummyRAGEngine())
+        translator = _make_translator(llm)
 
         with self.assertRaises(RuntimeError):
             translator.translate_text(
@@ -81,7 +91,7 @@ class TranslatorRuntimeTagTests(unittest.TestCase):
         self.assertGreater(len(source), 4000)
         self.assertLess(len(source), 8000)
         llm = _DummyLLMClient('{"translation":"译文"}')
-        translator = Translator(llm, _DummyRAGEngine(_DummyConfig({
+        translator = _make_translator(llm, _DummyRAGEngine(_DummyConfig({
             ("general", "long_text_chunking_enabled"): True,
             ("general", "long_text_chunk_threshold_chars"): 4000,
             ("general", "long_text_chunk_target_chars"): 8000,
@@ -99,7 +109,7 @@ class TranslatorRuntimeTagTests(unittest.TestCase):
                 ("cache", "translation_cache_size"): 10,
             })
             llm = _DummyLLMClient('{"translation":"你好，朋友"}')
-            translator = Translator(llm, _DummyRAGEngine(config))
+            translator = _make_translator(llm, _DummyRAGEngine(config))
 
             result = translator.translate_text("Hello friend", use_rag=False, max_retries=0)
             translator.save_translation_cache()
@@ -107,7 +117,7 @@ class TranslatorRuntimeTagTests(unittest.TestCase):
             self.assertEqual("你好，朋友", result)
 
             cached_llm = _DummyLLMClient('{"translation":"不应调用"}')
-            reloaded = Translator(cached_llm, _DummyRAGEngine(config))
+            reloaded = _make_translator(cached_llm, _DummyRAGEngine(config))
 
             self.assertEqual(
                 "你好，朋友",
