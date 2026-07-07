@@ -607,10 +607,18 @@ class RAGSearcher:
         short_term_max_chars = self._get_short_term_max_chars()
         min_vector_score = self._get_rag_float("min_vector_score", 0.45, 0.0, 1.0)
 
-        query_embeddings = self._batch_embed_keywords(keywords, log_callback)
+        skip_semantic_by_query = {
+            query: self._is_low_signal_query(query)
+            for query in keywords
+        }
+        embedding_queries = [
+            query for query in keywords
+            if not skip_semantic_by_query.get(query, True)
+        ]
+        query_embeddings = self._batch_embed_keywords(embedding_queries, log_callback)
 
         for query in keywords:
-            skip_semantic_recall = self._is_low_signal_query(query)
+            skip_semantic_recall = skip_semantic_by_query.get(query, True)
             query_norm = self.glossary_manager.normalize_term_key(query)
 
             query_selected_terms: list[str] = []

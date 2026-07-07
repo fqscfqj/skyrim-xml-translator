@@ -1,16 +1,20 @@
 import unittest
+import tempfile
 
 from src.translation.translator import Translator
 
 
 class _DummyConfig:
+    def __init__(self, values=None):
+        self._values = values or {}
+
     def get(self, section, key, default=None):
-        return default
+        return self._values.get((section, key), default)
 
 
 class _DummyRAGEngine:
-    def __init__(self):
-        self.config = _DummyConfig()
+    def __init__(self, config=None):
+        self.config = config or _DummyConfig()
 
 
 class _DummyLLMClient:
@@ -71,6 +75,45 @@ class TranslatorRuntimeTagTests(unittest.TestCase):
             )
 
         self.assertEqual(3, llm.calls)
+
+    def test_long_text_target_larger_than_threshold_is_clamped(self):
+        source = ("This is a sentence that should be translated naturally. " * 90).strip()
+        self.assertGreater(len(source), 4000)
+        self.assertLess(len(source), 8000)
+        llm = _DummyLLMClient('{"translation":"译文"}')
+        translator = Translator(llm, _DummyRAGEngine(_DummyConfig({
+            ("general", "long_text_chunking_enabled"): True,
+            ("general", "long_text_chunk_threshold_chars"): 4000,
+            ("general", "long_text_chunk_target_chars"): 8000,
+        })))
+
+        result = translator.translate_text(source, use_rag=False, max_retries=0)
+
+        self.assertGreater(llm.calls, 1)
+        self.assertEqual("译文" * llm.calls, result)
+
+    def test_save_translation_cache_persists_cached_results(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = _DummyConfig({
+                ("cache", "cache_persist_dir"): temp_dir,
+                ("cache", "translation_cache_size"): 10,
+            })
+            llm = _DummyLLMClient('{"translation":"你好，朋友"}')
+            translator = Translator(llm, _DummyRAGEngine(config))
+
+            result = translator.translate_text("Hello friend", use_rag=False, max_retries=0)
+            translator.save_translation_cache()
+
+            self.assertEqual("你好，朋友", result)
+
+            cached_llm = _DummyLLMClient('{"translation":"不应调用"}')
+            reloaded = Translator(cached_llm, _DummyRAGEngine(config))
+
+            self.assertEqual(
+                "你好，朋友",
+                reloaded.translate_text("Hello friend", use_rag=False, max_retries=0),
+            )
+            self.assertEqual(0, cached_llm.calls)
 
 
 if __name__ == "__main__":

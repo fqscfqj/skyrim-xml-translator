@@ -84,6 +84,9 @@ class Translator:
         self._translation_cache.invalidate_all()
         self._translation_cache.save()
 
+    def save_translation_cache(self) -> None:
+        self._translation_cache.save()
+
     def set_runtime_flags(self, flags: Optional[dict] = None) -> None:
         mcm_ui_mode = False
         if isinstance(flags, dict):
@@ -821,10 +824,15 @@ class Translator:
                     )
                 return cached_translation
 
+        chunk_threshold = self._config_int(
+            "general", "long_text_chunk_threshold_chars", 4000,
+            min_value=1, max_value=100_000,
+        )
         chunk_target = self._config_int(
             "general", "long_text_chunk_target_chars", 1800,
             min_value=200, max_value=100_000,
         )
+        chunk_target = min(chunk_target, max(1, chunk_threshold))
         chunks = self._text_analyzer.chunk_text(source_text, chunk_target)
         if len(chunks) <= 1:
             log_emit(log_callback, self.rag_engine.config, "ERROR",

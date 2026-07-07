@@ -99,7 +99,7 @@
         "log_file": "logs/app.log",
         "long_text_chunking_enabled": true,
         "long_text_chunk_threshold_chars": 4000,
-        "long_text_chunk_target_chars": 8000,
+        "long_text_chunk_target_chars": 1800,
         "short_text_batch_enabled": false,
         "short_text_batch_max_chars": 50,
         "short_text_batch_size": 8,

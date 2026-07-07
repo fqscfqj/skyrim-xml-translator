@@ -384,6 +384,30 @@ class Worker(QThread):
             parsed = default
         return max(min_value, min(max_value, parsed))
 
+    @staticmethod
+    def _translation_context_signature(source: str, context_hint) -> tuple:
+        if not isinstance(context_hint, dict):
+            return ()
+
+        signature = []
+        for key in ("domain", "text_kind", "entry_type", "whitespace_policy"):
+            value = str(context_hint.get(key, "") or "")
+            if value:
+                signature.append((key, value))
+
+        source_text = str(source or "").strip()
+        if source_text and not any(ch.isspace() for ch in source_text):
+            entry_id = str(context_hint.get("entry_id", "") or "")
+            if entry_id:
+                signature.append(("entry_id", entry_id))
+
+        return tuple(signature)
+
+    @classmethod
+    def _translation_dedupe_key(cls, source: str, context_hint) -> tuple:
+        source_text = str(source) if source is not None else ""
+        return source_text, cls._translation_context_signature(source_text, context_hint)
+
     def _build_work_units(self, unique_items: list[tuple]) -> list:
         config = self.translator.rag_engine.config
         enabled = self._config_bool(
@@ -444,27 +468,41 @@ class Worker(QThread):
             )
         return work_units
 
+    def _save_translation_cache(self) -> None:
+        save_cache = getattr(self.translator, "save_translation_cache", None)
+        if not callable(save_cache):
+            return
+        try:
+            save_cache()
+        except Exception as e:
+            log_emit(self.log.emit, self.translator.rag_engine.config, 'WARNING',
+                     f"Failed to save translation cache: {e}",
+                     module='gui_main', func='Worker._save_translation_cache')
+
     def run(self):
         try:
             total = len(self.items_to_process)
             
-            # 优化：检测重复内容，相同内容只翻译一次
-            # 构建源文本到行索引列表的映射
-            source_to_rows = {}  # source_text -> [row_idx1, row_idx2, ...]
-            source_to_context = {}  # source_text -> first context hint
+            # 优化：检测重复内容；相同原文且翻译上下文一致时只翻译一次。
+            # 上下文会影响空白策略、MCM UI 规则和标识符保留，不能只按原文去重。
+            source_to_rows = {}  # dedupe_key -> [row_idx1, row_idx2, ...]
+            source_to_context = {}  # dedupe_key -> first context hint
+            source_to_text = {}  # dedupe_key -> source text
             for item in self.items_to_process:
                 row_idx = item[0]
                 source = item[1]
                 context_hint = item[2] if len(item) > 2 else None
-                if source not in source_to_rows:
-                    source_to_rows[source] = []
-                    source_to_context[source] = context_hint
-                source_to_rows[source].append(row_idx)
+                dedupe_key = self._translation_dedupe_key(source, context_hint)
+                if dedupe_key not in source_to_rows:
+                    source_to_rows[dedupe_key] = []
+                    source_to_context[dedupe_key] = context_hint
+                    source_to_text[dedupe_key] = source
+                source_to_rows[dedupe_key].append(row_idx)
             
             # 只需要翻译的唯一文本列表
             unique_items = [
-                (rows[0], source, source_to_context.get(source))
-                for source, rows in source_to_rows.items()
+                (rows[0], source_to_text.get(dedupe_key, ""), source_to_context.get(dedupe_key), dedupe_key)
+                for dedupe_key, rows in source_to_rows.items()
             ]
             unique_count = len(unique_items)
             work_units = self._build_work_units(unique_items)
@@ -478,9 +516,7 @@ class Worker(QThread):
             log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', i18n.t("msg_starting_translation").format(total=unique_count, threads=self.num_threads), module='gui_main', func='Worker.run')
 
             processed_count = 0
-            # 用于存储已翻译结果的缓存
-            translation_cache = {}  # source_text -> translation
-            completed_sources = set()
+            completed_keys = set()
 
             def translate_task(item):
                 if isinstance(item, list):
@@ -509,6 +545,7 @@ class Worker(QThread):
                         for batch_item, batch_result in zip(item, batch_results):
                             row_idx = batch_item[0]
                             source = batch_item[1]
+                            dedupe_key = batch_item[3] if len(batch_item) > 3 else self._translation_dedupe_key(source, batch_item[2] if len(batch_item) > 2 else None)
                             translation, debug_info = batch_result
                             result_status = "success"
                             result_details = ""
@@ -519,6 +556,7 @@ class Worker(QThread):
                                 "ok": True,
                                 "row_idx": row_idx,
                                 "source": source,
+                                "dedupe_key": dedupe_key,
                                 "translation": translation,
                                 "debug_info": debug_info,
                                 "task_logs": task_logs,
@@ -532,6 +570,7 @@ class Worker(QThread):
                             row_idx = batch_item[0]
                             source = batch_item[1]
                             context_hint = batch_item[2] if len(batch_item) > 2 else None
+                            dedupe_key = batch_item[3] if len(batch_item) > 3 else self._translation_dedupe_key(source, context_hint)
                             try:
                                 translation, debug_info = self.translator.translate_text(
                                     source,
@@ -548,6 +587,7 @@ class Worker(QThread):
                                     "ok": True,
                                     "row_idx": row_idx,
                                     "source": source,
+                                    "dedupe_key": dedupe_key,
                                     "translation": translation,
                                     "debug_info": debug_info,
                                     "task_logs": task_logs,
@@ -559,6 +599,7 @@ class Worker(QThread):
                                     "ok": False,
                                     "row_idx": row_idx,
                                     "source": source,
+                                    "dedupe_key": dedupe_key,
                                     "error": f"{batch_error}; fallback failed: {e}",
                                     "task_logs": task_logs,
                                 })
@@ -567,6 +608,7 @@ class Worker(QThread):
                 row_idx = item[0]
                 source = item[1]
                 context_hint = item[2] if len(item) > 2 else None
+                dedupe_key = item[3] if len(item) > 3 else self._translation_dedupe_key(source, context_hint)
                 task_logs: list[str] = []
                 if not self.is_running or self.stop_receiving:
                     return None
@@ -597,6 +639,7 @@ class Worker(QThread):
                         "ok": True,
                         "row_idx": row_idx,
                         "source": source,
+                        "dedupe_key": dedupe_key,
                         "translation": translation,
                         "debug_info": debug_info,
                         "task_logs": task_logs,
@@ -608,6 +651,7 @@ class Worker(QThread):
                         "ok": False,
                         "row_idx": row_idx,
                         "source": source,
+                        "dedupe_key": dedupe_key,
                         "error": str(e),
                         "task_logs": task_logs,
                     }
@@ -672,7 +716,8 @@ class Worker(QThread):
                                 result_details = str(result.get("result_details", "") or "")
                                 safe_translation = str(translation) if translation is not None else ""
                                 safe_source = str(source) if source is not None else ""
-                                all_rows = source_to_rows.get(source, [row_idx])
+                                dedupe_key = result.get("dedupe_key", self._translation_dedupe_key(safe_source, None))
+                                all_rows = source_to_rows.get(dedupe_key, [row_idx])
 
                                 if not self.stop_receiving:
                                     for target_row in all_rows:
@@ -683,8 +728,7 @@ class Worker(QThread):
                                             result_details,
                                         )
 
-                                    translation_cache[source] = safe_translation
-                                    completed_sources.add(source)
+                                    completed_keys.add(dedupe_key)
 
                                     status_line = ""
                                     status_suffix = ""
@@ -716,13 +760,14 @@ class Worker(QThread):
                                 source = result.get("source", "")
                                 error = result.get("error", "")
                                 task_logs = list(result.get("task_logs", []))
+                                dedupe_key = result.get("dedupe_key", self._translation_dedupe_key(source, None))
                                 if not self.stop_receiving:
                                     log_emit(self.log.emit, self.translator.rag_engine.config, 'ERROR', f"Error translating {str(source)[:20]}...: {error}", module='gui_main', func='Worker.run')
                                     safe_source = str(source) if source is not None else ""
-                                    all_rows = source_to_rows.get(source, [row_idx])
+                                    all_rows = source_to_rows.get(dedupe_key, [row_idx])
                                     for target_row in all_rows:
                                         self.row_failed.emit(target_row, str(error))
-                                    completed_sources.add(source)
+                                    completed_keys.add(dedupe_key)
                                     if safe_source:
                                         self.rag_debug_ready.emit(safe_source, {
                                             "original_text": safe_source,
@@ -740,7 +785,7 @@ class Worker(QThread):
                         if not self.stop_receiving and future_processed_count > 0:
                             processed_count += future_processed_count
                             # 进度基于总项目数而非唯一项目数，以反映实际完成进度
-                            completed_total = sum(len(source_to_rows.get(s, [])) for s in completed_sources)
+                            completed_total = sum(len(source_to_rows.get(key, [])) for key in completed_keys)
                             self.progress.emit(int(completed_total / total * 100))
 
                         # Submit next task
@@ -763,12 +808,15 @@ class Worker(QThread):
                 except TypeError:
                     executor.shutdown(wait=False)
 
+            self._save_translation_cache()
+
             if not self.stop_receiving:
                 log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', i18n.t("msg_translation_finished"), module='gui_main', func='Worker.run')
             self.finished.emit()
         except Exception as e:
             log_emit(self.log.emit, self.translator.rag_engine.config, 'ERROR', i18n.t("msg_worker_error").format(error=e), exc=e, module='gui_main', func='Worker.run')
             try:
+                self._save_translation_cache()
                 self.finished.emit()
             except Exception:
                 pass
