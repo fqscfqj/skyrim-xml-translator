@@ -2175,20 +2175,21 @@ class MainWindow(QMainWindow):
                 color: #475569;
             }
             QPushButton {
-                border: 1px solid #ced8e4;
-                border-radius: 4px;
-                padding: 5px 14px;
-                background-color: #f4f7fb;
-                color: #334155;
-                min-height: 22px;
+                border: 1px solid #c8d3e2;
+                border-radius: 8px;
+                padding: 6px 16px;
+                background-color: #f8fafc;
+                color: #1f2937;
+                min-height: 26px;
+                font-weight: 500;
             }
             QPushButton:hover {
                 background-color: #ffffff;
-                border-color: #b8c7d9;
-                color: #1f2937;
+                border-color: #7aa2f7;
+                color: #1d4ed8;
             }
             QPushButton:pressed {
-                background-color: #e7eef8;
+                background-color: #e0ecff;
                 border-color: #2563eb;
             }
             QPushButton:disabled {
@@ -2197,21 +2198,22 @@ class MainWindow(QMainWindow):
                 border-color: #dde5ef;
             }
             QLineEdit {
-                border: 1px solid #ced8e4;
-                border-radius: 4px;
-                padding: 4px 8px;
+                border: 1px solid #c8d3e2;
+                border-radius: 8px;
+                padding: 5px 10px;
                 background-color: #ffffff;
                 color: #334155;
                 selection-background-color: #2563eb;
                 selection-color: #ffffff;
-                min-height: 22px;
+                min-height: 26px;
             }
             QLineEdit:focus {
-                border-color: #4a80e4;
+                border-color: #2563eb;
+                background-color: #fbfdff;
             }
             QPlainTextEdit {
                 border: 1px solid #d2dbe7;
-                border-radius: 4px;
+                border-radius: 8px;
                 background-color: #ffffff;
                 color: #334155;
                 selection-background-color: #dbeafe;
@@ -2297,19 +2299,20 @@ class MainWindow(QMainWindow):
                 border-radius: 4px;
             }
             QComboBox {
-                border: 1px solid #ced8e4;
-                border-radius: 4px;
-                padding: 4px 8px;
+                border: 1px solid #c8d3e2;
+                border-radius: 8px;
+                padding: 5px 10px;
                 background-color: #ffffff;
                 color: #334155;
-                min-height: 22px;
+                min-height: 26px;
             }
             QComboBox:focus {
-                border-color: #4a80e4;
+                border-color: #2563eb;
+                background-color: #fbfdff;
             }
             QComboBox::drop-down {
                 border: none;
-                width: 24px;
+                width: 28px;
             }
             QComboBox QAbstractItemView {
                 background-color: #ffffff;
@@ -2319,15 +2322,16 @@ class MainWindow(QMainWindow):
                 selection-color: #1e3a8a;
             }
             QAbstractSpinBox {
-                border: 1px solid #ced8e4;
-                border-radius: 4px;
-                padding: 4px 8px;
+                border: 1px solid #c8d3e2;
+                border-radius: 8px;
+                padding: 5px 10px;
                 background-color: #ffffff;
                 color: #334155;
-                min-height: 22px;
+                min-height: 26px;
             }
             QAbstractSpinBox:focus {
-                border-color: #4a80e4;
+                border-color: #2563eb;
+                background-color: #fbfdff;
             }
             QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {
                 background-color: #eef2f7;
@@ -2341,22 +2345,26 @@ class MainWindow(QMainWindow):
             }
             QCheckBox {
                 color: #334155;
-                spacing: 8px;
+                spacing: 10px;
             }
             QCheckBox::indicator {
-                width: 16px;
-                height: 16px;
+                width: 18px;
+                height: 18px;
                 border: 1px solid #94a3b8;
-                border-radius: 3px;
+                border-radius: 6px;
                 background-color: #ffffff;
             }
             QCheckBox::indicator:hover {
-                border-color: #4a80e4;
+                border-color: #2563eb;
                 background-color: #eff6ff;
             }
             QCheckBox::indicator:checked {
-                border-color: #4a80e4;
+                border-color: #2563eb;
                 background-color: #2563eb;
+            }
+            QCheckBox::indicator:disabled {
+                border-color: #d7e0ec;
+                background-color: #eef2f7;
             }
             QTreeWidget {
                 border: 1px solid #d2dbe7;
@@ -2422,16 +2430,17 @@ class MainWindow(QMainWindow):
         }
         QPushButton {
             border: 1px solid #353d4e;
-            border-radius: 4px;
-            padding: 5px 14px;
+            border-radius: 8px;
+            padding: 6px 16px;
             background-color: #252b38;
-            color: #c8d4e4;
-            min-height: 22px;
+            color: #dce7f7;
+            min-height: 26px;
+            font-weight: 500;
         }
         QPushButton:hover {
             background-color: #2e3648;
-            border-color: #4a5870;
-            color: #e0e8f8;
+            border-color: #76a9ff;
+            color: #ffffff;
         }
         QPushButton:pressed {
             background-color: #1a2030;
@@ -2444,20 +2453,21 @@ class MainWindow(QMainWindow):
         }
         QLineEdit {
             border: 1px solid #353d4e;
-            border-radius: 4px;
-            padding: 4px 8px;
+            border-radius: 8px;
+            padding: 5px 10px;
             background-color: #161a20;
             color: #dce3ec;
             selection-background-color: #2f6fd4;
             selection-color: #ffffff;
-            min-height: 22px;
+            min-height: 26px;
         }
         QLineEdit:focus {
-            border-color: #4a80e4;
+            border-color: #76a9ff;
+            background-color: #111821;
         }
         QPlainTextEdit {
             border: 1px solid #2a3040;
-            border-radius: 4px;
+            border-radius: 8px;
             background-color: #13171d;
             color: #c8d4e4;
             selection-background-color: #1d4a9a;
@@ -2543,18 +2553,19 @@ class MainWindow(QMainWindow):
         }
         QComboBox {
             border: 1px solid #353d4e;
-            border-radius: 4px;
-            padding: 4px 8px;
+            border-radius: 8px;
+            padding: 5px 10px;
             background-color: #161a20;
             color: #dce3ec;
-            min-height: 22px;
+            min-height: 26px;
         }
         QComboBox:focus {
-            border-color: #4a80e4;
+            border-color: #76a9ff;
+            background-color: #111821;
         }
         QComboBox::drop-down {
             border: none;
-            width: 24px;
+            width: 28px;
         }
         QComboBox QAbstractItemView {
             background-color: #1e2228;
@@ -2565,14 +2576,15 @@ class MainWindow(QMainWindow):
         }
         QAbstractSpinBox {
             border: 1px solid #353d4e;
-            border-radius: 4px;
-            padding: 4px 8px;
+            border-radius: 8px;
+            padding: 5px 10px;
             background-color: #161a20;
             color: #dce3ec;
-            min-height: 22px;
+            min-height: 26px;
         }
         QAbstractSpinBox:focus {
-            border-color: #4a80e4;
+            border-color: #76a9ff;
+            background-color: #111821;
         }
         QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {
             background-color: #252b35;
@@ -2586,22 +2598,26 @@ class MainWindow(QMainWindow):
         }
         QCheckBox {
             color: #c8d4e4;
-            spacing: 8px;
+            spacing: 10px;
         }
         QCheckBox::indicator {
-            width: 16px;
-            height: 16px;
+            width: 18px;
+            height: 18px;
             border: 1px solid #4a5468;
-            border-radius: 3px;
+            border-radius: 6px;
             background-color: #161a20;
         }
         QCheckBox::indicator:hover {
-            border-color: #4a80e4;
+            border-color: #76a9ff;
             background-color: #1a2030;
         }
         QCheckBox::indicator:checked {
-            border-color: #4a80e4;
+            border-color: #76a9ff;
             background-color: #2f6fd4;
+        }
+        QCheckBox::indicator:disabled {
+            border-color: #303541;
+            background-color: #242932;
         }
         QTreeWidget {
             border: 1px solid #2a3040;
@@ -3189,22 +3205,26 @@ class MainWindow(QMainWindow):
         if not is_dark:
             return """
             #configTab QGroupBox {
-                border: 1px solid #d2dbe7;
-                border-radius: 8px;
-                margin-top: 10px;
-                padding-top: 10px;
+                border: 1px solid #d8e2ef;
+                border-radius: 12px;
+                margin-top: 14px;
+                padding-top: 16px;
                 background-color: #ffffff;
                 color: #334155;
             }
             #configTab QGroupBox::title {
                 subcontrol-origin: margin;
-                left: 12px;
-                padding: 0 6px;
-                color: #475569;
+                left: 14px;
+                padding: 0 8px;
+                color: #1e3a8a;
+                font-weight: 700;
             }
-            #configTab QScrollArea {
+            QScrollArea {
                 border: none;
-                background: transparent;
+                background: #f6f8fb;
+            }
+            QWidget#configTab {
+                background: #f6f8fb;
             }
             #configTab QLabel {
                 color: #334155;
@@ -3212,10 +3232,10 @@ class MainWindow(QMainWindow):
             #configTab QLineEdit,
             #configTab QComboBox,
             #configTab QAbstractSpinBox {
-                min-height: 28px;
-                padding: 2px 8px;
-                border: 1px solid #ced8e4;
-                border-radius: 5px;
+                min-height: 30px;
+                padding: 3px 10px;
+                border: 1px solid #c8d3e2;
+                border-radius: 8px;
                 background-color: #ffffff;
                 color: #334155;
                 selection-background-color: #2563eb;
@@ -3231,34 +3251,34 @@ class MainWindow(QMainWindow):
             #configTab QComboBox:disabled,
             #configTab QAbstractSpinBox:disabled {
                 border-color: #dde5ef;
-                background-color: #eef1f5;
+                background-color: #eef2f7;
                 color: #94a3b8;
             }
             #configTab QComboBox::drop-down {
                 border: none;
-                width: 24px;
+                width: 28px;
                 background: transparent;
             }
             #configTab QCheckBox {
-                spacing: 8px;
+                spacing: 10px;
                 color: #334155;
             }
             #configTab QCheckBox:disabled {
                 color: #94a3b8;
             }
             #configTab QCheckBox::indicator {
-                width: 16px;
-                height: 16px;
+                width: 19px;
+                height: 19px;
                 border: 1px solid #94a3b8;
-                border-radius: 4px;
+                border-radius: 6px;
                 background-color: #ffffff;
             }
             #configTab QCheckBox::indicator:hover {
-                border-color: #4a80e4;
+                border-color: #2563eb;
                 background-color: #eff6ff;
             }
             #configTab QCheckBox::indicator:checked {
-                border-color: #4a80e4;
+                border-color: #2563eb;
                 background-color: #2563eb;
             }
             #configTab QCheckBox::indicator:checked:hover {
@@ -3272,26 +3292,37 @@ class MainWindow(QMainWindow):
                 border-color: #a7c0f5;
                 background-color: #bfdbfe;
             }
+            #configTab QWidget#paramOptionRow {
+                border-radius: 10px;
+                background-color: #f8fafc;
+            }
+            #configTab QWidget#paramOptionRow:hover {
+                background-color: #eef6ff;
+            }
             """
 
         return """
         #configTab QGroupBox {
-            border: 1px solid #353a45;
-            border-radius: 8px;
-            margin-top: 10px;
-            padding-top: 10px;
-            background-color: #20242b;
+            border: 1px solid #303847;
+            border-radius: 12px;
+            margin-top: 14px;
+            padding-top: 16px;
+            background-color: #20242d;
             color: #e6edf3;
         }
         #configTab QGroupBox::title {
             subcontrol-origin: margin;
-            left: 12px;
-            padding: 0 6px;
-            color: #f3f4f6;
+            left: 14px;
+            padding: 0 8px;
+            color: #dbeafe;
+            font-weight: 700;
         }
-        #configTab QScrollArea {
+        QScrollArea {
             border: none;
-            background: transparent;
+            background: #151922;
+        }
+        QWidget#configTab {
+            background: #151922;
         }
         #configTab QLabel {
             color: #d8dee9;
@@ -3299,10 +3330,10 @@ class MainWindow(QMainWindow):
         #configTab QLineEdit,
         #configTab QComboBox,
         #configTab QAbstractSpinBox {
-            min-height: 28px;
-            padding: 2px 8px;
+            min-height: 30px;
+            padding: 3px 10px;
             border: 1px solid #4a5366;
-            border-radius: 5px;
+            border-radius: 8px;
             background-color: #14181f;
             color: #f3f4f6;
             selection-background-color: #4c7dff;
@@ -3323,21 +3354,21 @@ class MainWindow(QMainWindow):
         }
         #configTab QComboBox::drop-down {
             border: none;
-            width: 24px;
+            width: 28px;
             background: transparent;
         }
         #configTab QCheckBox {
-            spacing: 8px;
+            spacing: 10px;
             color: #dce3ec;
         }
         #configTab QCheckBox:disabled {
             color: #9099ab;
         }
         #configTab QCheckBox::indicator {
-            width: 16px;
-            height: 16px;
+            width: 19px;
+            height: 19px;
             border: 1px solid #5a6477;
-            border-radius: 4px;
+            border-radius: 6px;
             background-color: #14181f;
         }
         #configTab QCheckBox::indicator:hover {
@@ -3359,6 +3390,13 @@ class MainWindow(QMainWindow):
             border-color: #55688f;
             background-color: #3c5cb2;
         }
+        #configTab QWidget#paramOptionRow {
+            border-radius: 10px;
+            background-color: #262c37;
+        }
+        #configTab QWidget#paramOptionRow:hover {
+            background-color: #2c3545;
+        }
         """
 
     def create_config_tab(self):
@@ -3376,7 +3414,8 @@ class MainWindow(QMainWindow):
         form_widget = QWidget()
         form_widget.setObjectName("configTab")
         form_layout = QVBoxLayout(form_widget)
-        form_layout.setSpacing(10)
+        form_layout.setContentsMargins(12, 10, 12, 14)
+        form_layout.setSpacing(12)
 
         param_tooltips = {
             "temperature": i18n.t(
@@ -3400,8 +3439,9 @@ class MainWindow(QMainWindow):
         # Wrap settings in a scroll area so controls remain usable on smaller windows.
         llm_group = QGroupBox(i18n.t('group_llm_settings'))
         llm_layout = QFormLayout(llm_group)
-        llm_layout.setContentsMargins(12, 10, 12, 12)
-        llm_layout.setSpacing(8)
+        llm_layout.setContentsMargins(16, 14, 16, 16)
+        llm_layout.setHorizontalSpacing(14)
+        llm_layout.setVerticalSpacing(10)
 
         self.llm_base = QLineEdit(self.config_manager.get("llm", "base_url"))
         self.llm_key = QLineEdit(self.config_manager.get("llm", "api_key"))
@@ -3426,8 +3466,10 @@ class MainWindow(QMainWindow):
                 lambda checked, w=widget: w.setEnabled(bool(checked))
             )
             row_widget = QWidget()
+            row_widget.setObjectName("paramOptionRow")
             row_layout = QHBoxLayout(row_widget)
-            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setContentsMargins(8, 5, 8, 5)
+            row_layout.setSpacing(10)
             row_layout.addWidget(checkbox)
             row_layout.addWidget(widget)
             row_layout.addStretch()
@@ -3473,8 +3515,9 @@ class MainWindow(QMainWindow):
         # --- Search LLM Settings ---
         search_group = QGroupBox(i18n.t('group_search_llm_settings'))
         search_layout = QFormLayout(search_group)
-        search_layout.setContentsMargins(12, 10, 12, 12)
-        search_layout.setSpacing(8)
+        search_layout.setContentsMargins(16, 14, 16, 16)
+        search_layout.setHorizontalSpacing(14)
+        search_layout.setVerticalSpacing(10)
 
         self.search_base = QLineEdit(self.config_manager.get("llm_search", "base_url"))
         self.search_key = QLineEdit(self.config_manager.get("llm_search", "api_key"))
@@ -3499,8 +3542,10 @@ class MainWindow(QMainWindow):
                 lambda checked, w=widget: w.setEnabled(bool(checked))
             )
             row_widget = QWidget()
+            row_widget.setObjectName("paramOptionRow")
             row_layout = QHBoxLayout(row_widget)
-            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setContentsMargins(8, 5, 8, 5)
+            row_layout.setSpacing(10)
             row_layout.addWidget(checkbox)
             row_layout.addWidget(widget)
             row_layout.addStretch()
@@ -3546,8 +3591,9 @@ class MainWindow(QMainWindow):
         # --- Search Fallback LLM Settings ---
         search_fallback_group = QGroupBox(i18n.t('group_search_fallback_llm_settings'))
         search_fallback_layout = QFormLayout(search_fallback_group)
-        search_fallback_layout.setContentsMargins(12, 10, 12, 12)
-        search_fallback_layout.setSpacing(8)
+        search_fallback_layout.setContentsMargins(16, 14, 16, 16)
+        search_fallback_layout.setHorizontalSpacing(14)
+        search_fallback_layout.setVerticalSpacing(10)
 
         self.search_fallback_base = QLineEdit(self.config_manager.get("llm_search_fallback", "base_url"))
         self.search_fallback_key = QLineEdit(self.config_manager.get("llm_search_fallback", "api_key"))
@@ -3571,8 +3617,10 @@ class MainWindow(QMainWindow):
                 lambda checked, w=widget: w.setEnabled(bool(checked))
             )
             row_widget = QWidget()
+            row_widget.setObjectName("paramOptionRow")
             row_layout = QHBoxLayout(row_widget)
-            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setContentsMargins(8, 5, 8, 5)
+            row_layout.setSpacing(10)
             row_layout.addWidget(checkbox)
             row_layout.addWidget(widget)
             row_layout.addStretch()
@@ -3618,8 +3666,9 @@ class MainWindow(QMainWindow):
 
         embedding_group = QGroupBox(i18n.t('group_embedding_settings'))
         embedding_layout = QFormLayout(embedding_group)
-        embedding_layout.setContentsMargins(12, 10, 12, 12)
-        embedding_layout.setSpacing(8)
+        embedding_layout.setContentsMargins(16, 14, 16, 16)
+        embedding_layout.setHorizontalSpacing(14)
+        embedding_layout.setVerticalSpacing(10)
 
         self.embed_base = QLineEdit(self.config_manager.get("embedding", "base_url"))
         self.embed_key = QLineEdit(self.config_manager.get("embedding", "api_key"))
@@ -3640,8 +3689,9 @@ class MainWindow(QMainWindow):
 
         threads_group = QGroupBox(i18n.t('group_threads'))
         threads_layout = QFormLayout(threads_group)
-        threads_layout.setContentsMargins(12, 10, 12, 12)
-        threads_layout.setSpacing(8)
+        threads_layout.setContentsMargins(16, 14, 16, 16)
+        threads_layout.setHorizontalSpacing(14)
+        threads_layout.setVerticalSpacing(10)
 
         self.trans_threads = NoWheelSpinBox()
         self.trans_threads.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
@@ -3698,8 +3748,9 @@ class MainWindow(QMainWindow):
 
         rag_group = QGroupBox(i18n.t('group_rag_settings'))
         rag_layout = QFormLayout(rag_group)
-        rag_layout.setContentsMargins(12, 10, 12, 12)
-        rag_layout.setSpacing(8)
+        rag_layout.setContentsMargins(16, 14, 16, 16)
+        rag_layout.setHorizontalSpacing(14)
+        rag_layout.setVerticalSpacing(10)
 
         self.rag_threshold = NoWheelDoubleSpinBox()
         self.rag_threshold.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
@@ -3903,8 +3954,9 @@ class MainWindow(QMainWindow):
 
         system_group = QGroupBox(i18n.t('group_system_settings'))
         system_layout = QFormLayout(system_group)
-        system_layout.setContentsMargins(12, 10, 12, 12)
-        system_layout.setSpacing(8)
+        system_layout.setContentsMargins(16, 14, 16, 16)
+        system_layout.setHorizontalSpacing(14)
+        system_layout.setVerticalSpacing(10)
 
         self.language_combo = NoWheelComboBox()
         self.language_combo.addItem(i18n.t("language_option_auto"), "auto")
