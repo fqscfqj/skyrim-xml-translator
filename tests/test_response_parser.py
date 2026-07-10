@@ -1,6 +1,6 @@
 import unittest
 
-from src.translation.response_parser import ResponseParser
+from src.translation.response_parser import ModelRefusalError, ResponseParser
 
 
 class _DummyConfig:
@@ -136,6 +136,31 @@ class ResponseParserTests(unittest.TestCase):
         )
 
         self.assertEqual(result, {0: "你好", 1: "再见"})
+
+    def test_rejects_chinese_task_level_refusal(self):
+        with self.assertRaises(ModelRefusalError):
+            self._parse_with_logs("抱歉，我无法协助翻译这段内容。", original_text="Forbidden ritual")
+
+    def test_rejects_json_wrapped_english_refusal(self):
+        with self.assertRaises(ModelRefusalError):
+            self._parse_with_logs(
+                '{"translation":"As an AI, I am unable to translate this content."}',
+                original_text="Forbidden ritual",
+            )
+
+    def test_rejects_unicode_escaped_json_refusal(self):
+        with self.assertRaises(ModelRefusalError):
+            self._parse_with_logs(
+                '{"translation":"\\u62b1\\u6b49\\uff0c\\u6211\\u65e0\\u6cd5\\u534f\\u52a9\\u7ffb\\u8bd1\\u8fd9\\u6bb5\\u5185\\u5bb9\\u8bf7\\u6c42\\u3002"}',
+                original_text="Forbidden ritual",
+            )
+
+    def test_does_not_reject_normal_game_dialogue(self):
+        result, _logs = self._parse_with_logs("抱歉，我不能帮你。", original_text="Sorry, I cannot help you.")
+        self.assertEqual(result, "抱歉，我不能帮你。")
+
+    def test_batch_task_level_refusal_returns_none(self):
+        self.assertIsNone(self.parser.parse_batch("抱歉，我无法协助处理该翻译请求。"))
 
 
 if __name__ == "__main__":

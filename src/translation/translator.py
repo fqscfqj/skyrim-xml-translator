@@ -1,6 +1,8 @@
 """Translator facade with simplified pipeline."""
 
 import copy
+import hashlib
+import json
 import time
 from threading import Lock
 from typing import Optional
@@ -10,13 +12,16 @@ from ..rag.engine import RAGEngine
 from src.prompt.prompt_manager import PromptManager
 from src.translation.text_analyzer import TextAnalyzer
 from src.translation.prompt_builder import PromptBuilder
-from src.translation.response_parser import ResponseParser
+from src.translation.response_parser import ModelRefusalError, ResponseParser
 from src.translation.quality_checker import QualityChecker, QualityIssue, QualityIssueType
 from src.cache.translation_cache import TranslationCache
 from src.logging_helper import emit as log_emit
 
 
 class Translator:
+    _CACHE_POLICY_VERSION = "translation_policy_v2"
+    _FORMAT_SHELL_VERSION = "format_shell_v1"
+    _QUALITY_RULES_VERSION = "quality_rules_v2"
     _DEFAULT_FORMAT_EXTRA_RETRIES = 2
     _BLOCKING_UNTRANSLATED_RULES = {
         "empty",
@@ -330,12 +335,17 @@ class Translator:
         )
         llm_text = format_shell.protected_text if format_shell.has_tokens else source_text
 
+        # Prompt content participates in the cache policy fingerprint. Refresh it
+        # before calculating the cache key so edited prompts enter a new namespace.
+        self._reload_prompts_if_needed()
+
         # Check translation cache
         prompt_style = self.rag_engine.config.get("general", "prompt_style", "default")
         target_lang = self.rag_engine.config.get("general", "target_language", "zh")
         runtime_context_key = self._translation_context_key(
             source_text,
             context_hint=resolved_context_hint,
+            use_rag=use_rag,
         )
         cached = self._translation_cache.get(
             source_text, prompt_style, target_lang, context_key=runtime_context_key)
@@ -376,9 +386,6 @@ class Translator:
             log_emit(log_callback, self.rag_engine.config, "DEBUG",
                      "Ignoring empty cached translation (treat as cache miss)",
                      module="translator", func="translate_text")
-
-        # Reload prompts if changed (throttled)
-        self._reload_prompts_if_needed()
 
         # RAG phase
         rag_result = self._run_rag_phase(text, use_rag=use_rag, log_callback=log_callback)
@@ -530,6 +537,25 @@ class Translator:
 
                 retry_count += 1
 
+            except ModelRefusalError as e:
+                if isinstance(attempt_info, dict):
+                    attempt_info["error"] = str(e)
+                    attempt_info["result_status"] = "failed"
+                    attempt_info["result_details"] = str(e)
+                    attempt_info["accepted"] = False
+                issues = [QualityIssue(
+                    issue_type=QualityIssueType.REFUSAL,
+                    severity="error",
+                    details=str(e),
+                    rule_id="model_refusal",
+                )]
+                log_emit(log_callback, self.rag_engine.config, "WARNING",
+                         f"Translation model refusal detected; retry={retry_count}",
+                         module="translator", func="translate_text")
+                if retry_count >= max_retries:
+                    raise
+                retry_count += 1
+
             except Exception as e:
                 if isinstance(attempt_info, dict):
                     attempt_info["error"] = str(e)
@@ -605,6 +631,7 @@ class Translator:
             item_context_key = self._translation_context_key(
                 source_text,
                 context_hint=resolved_context_hint,
+                use_rag=use_rag,
             )
             quality_whitespace_policy = self._resolve_quality_whitespace_policy(
                 source_text,
@@ -782,10 +809,12 @@ class Translator:
             context_hint=resolved_context_hint,
             long_text=True,
         )
+        self._reload_prompts_if_needed()
         runtime_context_key = self._translation_context_key(
             source_text,
             context_hint=resolved_context_hint,
             long_text=True,
+            use_rag=use_rag,
         )
 
         cached = self._translation_cache.get(
@@ -844,8 +873,6 @@ class Translator:
         log_emit(log_callback, self.rag_engine.config, "INFO",
                  f"Long-text chunking: len={len(source_text)} target={chunk_target} chunks={len(chunks)}",
                  module="translator", func="_translate_long_text")
-
-        self._reload_prompts_if_needed()
 
         rag_result = self._run_rag_phase(source_text, use_rag=use_rag, log_callback=log_callback)
         matched_terms = rag_result["matched_terms"]
@@ -1140,10 +1167,21 @@ class Translator:
             source_text: str,
             context_hint: Optional[dict] = None,
             *,
-            long_text: bool = False) -> str:
-        parts: list[str] = []
+            long_text: bool = False,
+            use_rag: bool = True) -> str:
+        parts: list[str] = [f"policy:{self._translation_policy_fingerprint(use_rag)}"]
         if self._get_runtime_flag("mcm_ui_mode", False):
             parts.append("mcm_ui")
+
+        if isinstance(context_hint, dict):
+            for key in ("domain", "text_kind", "entry_type"):
+                value = str(context_hint.get(key, "") or "").strip()
+                if value:
+                    parts.append(f"{key}:{value}")
+            source = str(source_text or "").strip()
+            entry_id = str(context_hint.get("entry_id", "") or "").strip()
+            if entry_id and not any(ch.isspace() for ch in source):
+                parts.append(f"entry_id:{entry_id}")
 
         shell_policy = self._resolve_shell_whitespace_policy(
             source_text,
@@ -1161,6 +1199,63 @@ class Translator:
             parts.append(f"quality:{quality_policy}")
 
         return "|".join(parts)
+
+    def _translation_policy_fingerprint(self, use_rag: bool) -> str:
+        config = self.rag_engine.config
+
+        def section_values(section: str, keys: tuple[str, ...]) -> dict:
+            return {key: config.get(section, key, None) for key in keys}
+
+        llm_policy = section_values("llm", (
+            "base_url", "model", "parameters", "json_response_format_enabled",
+        ))
+        payload = {
+            "version": self._CACHE_POLICY_VERSION,
+            "format_shell": self._FORMAT_SHELL_VERSION,
+            "quality_rules": self._QUALITY_RULES_VERSION,
+            "prompt": (
+                self.prompt_manager.get_fingerprint()
+                if hasattr(self.prompt_manager, "get_fingerprint") else ""
+            ),
+            "languages": section_values("general", ("source_language", "target_language")),
+            "llm": llm_policy,
+            "use_rag": bool(use_rag),
+        }
+        if use_rag:
+            glossary_fingerprint = getattr(self.rag_engine, "get_glossary_fingerprint", None)
+            payload["glossary"] = (
+                glossary_fingerprint() if callable(glossary_fingerprint) else ""
+            )
+            payload["embedding"] = section_values(
+                "embedding", ("base_url", "model", "dimensions")
+            )
+            payload["search_llm"] = {
+                section: section_values(
+                    section,
+                    ("base_url", "model", "parameters", "json_response_format_enabled"),
+                )
+                for section in ("llm_search", "llm_search_fallback")
+            }
+            payload["rag"] = section_values("rag", (
+                "similarity_threshold", "short_term_max_results",
+                "long_term_max_results", "short_term_max_chars",
+                "keyword_max_queries", "keyword_task_decompose_enabled",
+                "keyword_task_keep_original", "min_vector_score",
+                "keyword_weight_enabled", "keyword_weight_candidate_pool_size",
+                "keyword_weight_keep_k", "keyword_weight_min_primary_hits",
+                "keyword_weight_exact_boost", "keyword_weight_contains_boost",
+                "keyword_weight_token_boost", "keyword_weight_anchor_max_df",
+                "keyword_weight_anchor_boost", "glossary_context_max_chars",
+            ))
+
+        raw = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     @staticmethod
     def _looks_like_short_ui_text(text: str) -> bool:
@@ -1228,6 +1323,8 @@ class Translator:
             prompt_vars["error_fragments"] = ", ".join(fragments)
         elif "untranslated" in issue_types:
             template_key = "translator.retry.untranslated"
+        elif "refusal" in issue_types:
+            template_key = "translator.retry.refusal"
 
         default_retry = (
             "上次结果存在质量问题，请重新翻译为{target_language}。"

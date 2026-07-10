@@ -6,6 +6,11 @@ import re
 from typing import Callable, Optional
 
 from src.logging_helper import emit as log_emit
+from src.translation.quality_checker import is_model_refusal
+
+
+class ModelRefusalError(RuntimeError):
+    """Raised when an HTTP-success response is a task-level model refusal."""
 
 
 class ResponseParser:
@@ -35,6 +40,9 @@ class ResponseParser:
                      module="response_parser", func="parse")
             return ""
 
+        if is_model_refusal(clean_response, original_text):
+            raise ModelRefusalError("Model returned a task-level refusal")
+
         if self._looks_like_broken_json_fragment(clean_response):
             log_emit(log_callback, self.config, "WARNING",
                      f"Discarding broken JSON fragment response: {clean_response[:120]}",
@@ -46,7 +54,7 @@ class ResponseParser:
             data = json.loads(clean_response)
             found, translation = self._extract_translation_value(data)
             if found:
-                return translation
+                return self._ensure_not_refusal(translation, original_text)
         except json.JSONDecodeError:
             pass
 
@@ -54,41 +62,52 @@ class ResponseParser:
         data = self._try_parse_first_json_object(clean_response, required_keys=("translation",))
         found, translation = self._extract_translation_value(data)
         if found:
-            return translation
+            return self._ensure_not_refusal(translation, original_text)
 
         # Try extracting JSON substring
         data = self._try_parse_first_json_object(response_text, required_keys=("translation",))
         found, translation = self._extract_translation_value(data)
         if found:
-            return translation
+            return self._ensure_not_refusal(translation, original_text)
 
         # Try relaxed JSON extraction (trailing commas, single quotes, bare KV)
         result = self._try_relaxed_json_extract(response_text, log_callback)
         if result is not None:
-            return result
+            return self._ensure_not_refusal(result, original_text)
 
         # Try asking LLM to reformat as JSON
         if llm_client:
             result = self._try_followup_reformat(response_text, messages, llm_client, log_callback)
             if result is not None:
-                return result
+                return self._ensure_not_refusal(result, original_text)
 
         # Plain text fallback
         result = self._try_plain_text_fallback(response_text, original_text, log_callback)
         if result is not None:
-            return result
+            return self._ensure_not_refusal(result, original_text)
 
         log_emit(log_callback, self.config, "WARNING",
                  f"JSON Parse Error. Response: {response_text}",
                  module="response_parser", func="parse")
 
-        return response_text.strip()
+        return self._ensure_not_refusal(response_text.strip(), original_text)
+
+    @staticmethod
+    def _ensure_not_refusal(translation: str, original_text: str) -> str:
+        if is_model_refusal(translation, original_text):
+            raise ModelRefusalError("Model returned a task-level refusal")
+        return translation
 
     def parse_batch(self, response: str,
                     log_callback: Optional[Callable] = None) -> Optional[dict[int, str]]:
         """Parse batch translation response into {item_id: translation}."""
         response_text = "" if response is None else str(response)
         clean_response = self._MARKDOWN_CODE_RE.sub("", response_text).strip()
+        if is_model_refusal(clean_response):
+            log_emit(log_callback, self.config, "WARNING",
+                     "Batch response was a task-level model refusal",
+                     module="response_parser", func="parse_batch")
+            return None
         data = None
         try:
             data = json.loads(clean_response)

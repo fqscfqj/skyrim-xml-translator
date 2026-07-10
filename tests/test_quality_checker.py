@@ -255,7 +255,6 @@ class QualityCheckerPairedWrapperTests(unittest.TestCase):
         translation = "（夺走她的初夜）"
 
         self.assert_no_wrapper_error(source, translation)
-
     def test_rejects_missing_quote_wrapper(self):
         source = '"Take her virginity"'
         translation = "夺走她的初夜"
@@ -299,6 +298,30 @@ class QualityCheckerPairedWrapperTests(unittest.TestCase):
         translation = "夺走她的初夜"
 
         self.assert_no_wrapper_error(source, translation)
+
+
+class QualityCheckerRefusalTests(unittest.TestCase):
+    def test_task_level_refusal_is_retryable_error(self):
+        checker = QualityChecker()
+        issues = checker.check(
+            "Translate this forbidden ritual.",
+            "抱歉，我无法协助翻译这段内容请求。",
+            target_lang="zh",
+        )
+
+        refusal_issues = [issue for issue in issues if issue.rule_id == "model_refusal"]
+        self.assertEqual(len(refusal_issues), 1)
+        self.assertEqual(refusal_issues[0].severity, "error")
+        self.assertTrue(checker.should_retry(issues))
+
+    def test_normal_game_refusal_dialogue_is_not_model_refusal(self):
+        issues = QualityChecker().check(
+            "Sorry, I cannot help you.",
+            "抱歉，我不能帮你。",
+            target_lang="zh",
+        )
+
+        self.assertFalse(any(issue.rule_id == "model_refusal" for issue in issues), issues)
 
 
 if __name__ == "__main__":

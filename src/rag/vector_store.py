@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+from threading import RLock
 from typing import Optional, Callable, Any
 
 import numpy as np
@@ -43,6 +44,8 @@ class VectorIndexBuildResult:
 
 
 class VectorStore:
+    _NORMALIZATION_VERSION = 1
+    _NORMALIZATION_ATOL = 1e-4
     _NORMALIZE_TERM_RE = re.compile(r"[^0-9a-zA-Z\u4e00-\u9fff]+")
     _WHITESPACE_RE = re.compile(r"\s+")
 
@@ -60,6 +63,8 @@ class VectorStore:
         self._trigram_to_indices: dict[str, set[int]] = {}
         self._lexical_index_dirty = False
         self._index_metadata: dict[str, Any] = {}
+        self._normalization_lock = RLock()
+        self._vectors_are_normalized: Optional[bool] = None
         self._index_status = VectorIndexStatus(
             is_ready=False,
             is_stale=False,
@@ -182,10 +187,91 @@ class VectorStore:
             "term_count": len(self.terms),
             "vector_count": int(self.vectors.shape[0]) if self.vectors is not None else 0,
             "vector_dimensions": int(self.vectors.shape[1]) if self.vectors is not None else 0,
+            "normalization": {
+                "version": self._NORMALIZATION_VERSION,
+                "unit_l2": bool(self._vectors_are_normalized),
+            },
         }
-        with open(self.meta_path, "w", encoding="utf-8") as f:
-            json.dump(metadata, f, indent=4, ensure_ascii=False)
+        self._write_metadata_atomic(metadata)
         self._index_metadata = metadata
+
+    def _write_metadata_atomic(self, metadata: dict[str, Any]) -> None:
+        tmp_path = self.meta_path + ".tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(metadata, f, indent=4, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, self.meta_path)
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+
+    def _metadata_normalization_state(self) -> Optional[bool]:
+        normalization = self._index_metadata.get("normalization")
+        if not isinstance(normalization, dict):
+            return None
+        if normalization.get("version") != self._NORMALIZATION_VERSION:
+            return None
+        unit_l2 = normalization.get("unit_l2")
+        return unit_l2 if isinstance(unit_l2, bool) else None
+
+    def _persist_detected_normalization_state(self) -> None:
+        if not self._index_metadata or self._vectors_are_normalized is None:
+            return
+        metadata = dict(self._index_metadata)
+        metadata["normalization"] = {
+            "version": self._NORMALIZATION_VERSION,
+            "unit_l2": self._vectors_are_normalized,
+        }
+        self._write_metadata_atomic(metadata)
+        self._index_metadata = metadata
+
+    def _ensure_normalization_state(self) -> bool:
+        with self._normalization_lock:
+            if self._vectors_are_normalized is not None:
+                return self._vectors_are_normalized
+            if self.vectors is None:
+                self._vectors_are_normalized = False
+                return False
+
+            normalized = True
+            batch_size = 10000
+            for start_idx in range(0, self.vectors.shape[0], batch_size):
+                batch = np.asarray(
+                    self.vectors[start_idx:start_idx + batch_size], dtype=np.float32
+                )
+                if not np.all(np.isfinite(batch)):
+                    normalized = False
+                    break
+                norms = np.linalg.norm(batch, axis=1)
+                if not np.all(np.isfinite(norms)) or not np.allclose(
+                    norms, 1.0, rtol=0.0, atol=self._NORMALIZATION_ATOL
+                ):
+                    normalized = False
+                    break
+
+            self._vectors_are_normalized = normalized
+            try:
+                self._persist_detected_normalization_state()
+            except Exception as e:
+                log_emit(None, self.config, "WARNING",
+                         f"Failed to persist vector normalization metadata: {e}",
+                         exc=e, module="vector_store", func="_ensure_normalization_state")
+            return normalized
+
+    @staticmethod
+    def _normalize_vector(vector: Any) -> np.ndarray:
+        vec = np.asarray(vector, dtype=np.float32).flatten()
+        if vec.size == 0 or not np.all(np.isfinite(vec)):
+            raise ValueError("Embedding vector must contain finite values")
+        norm = float(np.linalg.norm(vec))
+        if not np.isfinite(norm) or norm <= 0:
+            raise ValueError("Embedding vector must have a non-zero finite norm")
+        return vec / norm
 
     def _evaluate_index_status(self) -> VectorIndexStatus:
         current_fingerprint = self.current_embedding_fingerprint()
@@ -338,6 +424,7 @@ class VectorStore:
                 self.terms = []
 
         self._index_metadata = self._load_index_metadata()
+        self._vectors_are_normalized = self._metadata_normalization_state()
 
         self._close_mmap()
         if os.path.exists(self.vector_path):
@@ -443,6 +530,7 @@ class VectorStore:
 
     def clear_index(self, delete_files: bool = True) -> None:
         self._close_mmap()
+        self._vectors_are_normalized = None
         self.terms = []
         self._rebuild_lexical_index()
         self._delete_index_metadata()
@@ -477,10 +565,13 @@ class VectorStore:
         if self.vectors is None and self.terms:
             self._reset_terms_without_vectors()
         """Add a single term's vector to the index."""
-        vec_np = np.array([vector], dtype=np.float32)
+        if self.vectors is not None:
+            self._ensure_normalization_state()
+        vec_np = self._normalize_vector(vector).reshape(1, -1)
         if self.vectors is None:
             self.vectors = vec_np
             self.terms = [term]
+            self._vectors_are_normalized = True
         else:
             new_vectors = np.vstack([self.vectors, vec_np])
             self._close_mmap()
@@ -539,6 +630,8 @@ class VectorStore:
         self.stop_flag = False
         self.pause_flag = False
         self._reset_terms_without_vectors()
+        if self.vectors is not None:
+            self._ensure_normalization_state()
 
         if not new_terms:
             if log_callback:
@@ -584,8 +677,15 @@ class VectorStore:
                     term, vec, error = future.result()
                     processed_count += 1
 
+                    normalized_vec = None
                     if vec is not None:
-                        batch_results.append(np.array(vec, dtype=np.float32))
+                        try:
+                            normalized_vec = self._normalize_vector(vec)
+                        except ValueError as normalize_error:
+                            error = str(normalize_error)
+
+                    if normalized_vec is not None:
+                        batch_results.append(normalized_vec)
                         batch_terms_confirmed.append(term)
                         if log_callback and processed_count % 10 == 0:
                             log_emit(log_callback, self.config, "DEBUG",
@@ -610,6 +710,7 @@ class VectorStore:
             new_vectors_np = np.vstack(new_vectors_batches)
             if self.vectors is None:
                 self.vectors = new_vectors_np
+                self._vectors_are_normalized = True
             else:
                 combined_vectors = np.vstack([self.vectors, new_vectors_np])
                 self._close_mmap()
@@ -649,11 +750,14 @@ class VectorStore:
                          ),
                          module="vector_store", func="build_index")
             self.clear_index(delete_files=True)
+            self._vectors_are_normalized = True
             terms_to_process = list(glossary_keys)
             mode = "full"
             reason = stale_reason_before or "requested"
         else:
             self._reset_terms_without_vectors()
+            if self.vectors is not None:
+                self._ensure_normalization_state()
             existing_terms_set = set(self.terms)
             terms_to_process = [t for t in glossary_keys if t not in existing_terms_set]
             mode = "incremental"
@@ -717,8 +821,15 @@ class VectorStore:
                     term, vec, error = future.result()
                     processed_count += 1
 
+                    normalized_vec = None
                     if vec is not None:
-                        batch_vectors.append(np.array(vec, dtype=np.float32))
+                        try:
+                            normalized_vec = self._normalize_vector(vec)
+                        except ValueError as normalize_error:
+                            error = str(normalize_error)
+
+                    if normalized_vec is not None:
+                        batch_vectors.append(normalized_vec)
                         batch_valid_terms.append(term)
                         success_count += 1
                         if log_callback and processed_count % 10 == 0:
@@ -742,6 +853,7 @@ class VectorStore:
                     new_vectors_np = np.vstack(batch_vectors)
                     if self.vectors is None:
                         self.vectors = new_vectors_np
+                        self._vectors_are_normalized = True
                     else:
                         combined_vectors = np.vstack([self.vectors, new_vectors_np])
                         self._close_mmap()
@@ -837,9 +949,13 @@ class VectorStore:
             return np.array([], dtype=np.float32)
 
         query_vec = query_vec.astype(np.float32).flatten()
-        query_norm = np.linalg.norm(query_vec)
-        if query_norm > 0:
-            query_vec = query_vec / query_norm
+        if query_vec.size != self.vectors.shape[1] or not np.all(np.isfinite(query_vec)):
+            return np.array([], dtype=np.float32)
+        query_norm = float(np.linalg.norm(query_vec))
+        if not np.isfinite(query_norm) or query_norm <= 0:
+            return np.zeros(self.vectors.shape[0], dtype=np.float32)
+        query_vec = query_vec / query_norm
+        vectors_are_normalized = self._ensure_normalization_state()
 
         num_vectors = self.vectors.shape[0]
         batch_size = 10000
@@ -848,8 +964,11 @@ class VectorStore:
         for start_idx in range(0, num_vectors, batch_size):
             end_idx = min(start_idx + batch_size, num_vectors)
             batch = np.asarray(self.vectors[start_idx:end_idx], dtype=np.float32)
-            norms = np.linalg.norm(batch, axis=1, keepdims=True)
-            norms[norms == 0] = 1
-            similarities[start_idx:end_idx] = (batch / norms) @ query_vec
+            if vectors_are_normalized:
+                similarities[start_idx:end_idx] = batch @ query_vec
+            else:
+                norms = np.linalg.norm(batch, axis=1, keepdims=True)
+                norms[norms == 0] = 1
+                similarities[start_idx:end_idx] = (batch / norms) @ query_vec
 
         return similarities

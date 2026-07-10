@@ -105,6 +105,9 @@ class RAGEngine:
     def get_embedding_fingerprint(self) -> dict:
         return self._vector_store.current_embedding_fingerprint()
 
+    def get_glossary_fingerprint(self) -> str:
+        return self._glossary_mgr.get_content_fingerprint()
+
     def get_vector_index_status(self) -> VectorIndexStatus:
         return self._vector_store.get_index_status()
 
