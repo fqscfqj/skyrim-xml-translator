@@ -282,6 +282,49 @@ class TranslatorRuntimeTagTests(unittest.TestCase):
         config._values[("llm", "model")] = "model-b"
         self.assertNotEqual(original, translator._translation_policy_fingerprint(use_rag=False))
 
+    def test_cache_policy_changes_for_configured_style_profile(self):
+        config = _DummyConfig({
+            ("general", "style_profile"): "auto",
+        })
+        translator = _make_translator(
+            _DummyLLMClient('{"translation":"你好"}'),
+            _DummyRAGEngine(config),
+        )
+
+        original = translator._translation_policy_fingerprint(use_rag=False)
+        config._values[("general", "style_profile")] = "lore_book"
+
+        self.assertNotEqual(
+            original,
+            translator._translation_policy_fingerprint(use_rag=False),
+        )
+
+    def test_translation_context_key_isolates_resolved_style_profiles(self):
+        translator = _make_translator(_DummyLLMClient('{"translation":"你好"}'))
+
+        dialogue_key = translator._translation_context_key(
+            "Shared text",
+            context_hint={
+                "record_type": "DIAL",
+                "field_type": "NAM1",
+                "style_profile": "dialogue",
+                "content_mode": "default",
+            },
+            use_rag=False,
+        )
+        item_key = translator._translation_context_key(
+            "Shared text",
+            context_hint={
+                "record_type": "WEAP",
+                "field_type": "FULL",
+                "style_profile": "item_name",
+                "content_mode": "default",
+            },
+            use_rag=False,
+        )
+
+        self.assertNotEqual(dialogue_key, item_key)
+
     def test_cache_policy_isolates_rag_and_glossary_changes(self):
         rag_engine = _DummyRAGEngine(_DummyConfig())
         translator = _make_translator(

@@ -1214,6 +1214,14 @@ class Translator:
             source_text,
             context_hint=context_hint,
         )
+        prompt_style = str(
+            self.rag_engine.config.get("general", "prompt_style", "default") or "default"
+        )
+        resolved_context["content_mode"] = prompt_style
+        resolved_context["style_profile"] = self._prompt_builder.resolve_style_profile(
+            prompt_style,
+            resolved_context,
+        ).profile_id
         return resolved_context
 
     def _resolve_whitespace_policy(
@@ -1227,7 +1235,7 @@ class Translator:
 
             domain = str(context_hint.get("domain", "") or "").strip().lower()
             text_kind = str(context_hint.get("text_kind", "") or "").strip().lower()
-            if domain == "mcm_ui" or text_kind in {"document", "book", "ui"}:
+            if domain == "mcm_ui" or text_kind in {"document", "book", "quest", "ui"}:
                 return TextAnalyzer.WHITESPACE_POLICY_STRICT
             if text_kind in {"dialogue", "short_text", "short_dialogue"}:
                 return TextAnalyzer.WHITESPACE_POLICY_RELAXED_SPACES
@@ -1279,7 +1287,10 @@ class Translator:
             parts.append("mcm_ui")
 
         if isinstance(context_hint, dict):
-            for key in ("domain", "text_kind", "entry_type"):
+            for key in (
+                    "domain", "text_kind", "entry_type", "record_type",
+                    "field_type", "file_type", "mod_scope", "style_profile",
+                    "content_mode"):
                 value = str(context_hint.get(key, "") or "").strip()
                 if value:
                     parts.append(f"{key}:{value}")
@@ -1323,6 +1334,7 @@ class Translator:
                 if hasattr(self.prompt_manager, "get_fingerprint") else ""
             ),
             "languages": section_values("general", ("source_language", "target_language")),
+            "style": section_values("general", ("prompt_style", "style_profile")),
             "llm": llm_policy,
             "use_rag": bool(use_rag),
         }

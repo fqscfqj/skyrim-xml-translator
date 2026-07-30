@@ -41,6 +41,17 @@ class TaskCompletionSoundConfigTests(unittest.TestCase):
         self.assertIn("task_completion_sound_enabled", config_example["general"])
         self.assertFalse(config_example["general"]["task_completion_sound_enabled"])
 
+    def test_style_profile_defaults_to_auto_and_is_in_example(self):
+        config = dataclass_to_dict(AppConfig())
+        self.assertEqual("auto", config["general"]["style_profile"])
+
+        repo_root = os.path.dirname(os.path.dirname(__file__))
+        config_example_path = os.path.join(repo_root, "config.example.json")
+        with open(config_example_path, "r", encoding="utf-8-sig") as handle:
+            config_example = json.load(handle)
+
+        self.assertEqual("auto", config_example["general"]["style_profile"])
+
     def test_long_text_chunk_target_default_does_not_exceed_threshold(self):
         config = dataclass_to_dict(AppConfig())
 

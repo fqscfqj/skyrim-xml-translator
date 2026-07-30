@@ -4,6 +4,7 @@ import re
 from typing import Any, Optional
 
 from src.logging_helper import emit as log_emit
+from src.translation.style_profiles import ResolvedStyleProfile, StyleProfileResolver
 from src.translation.text_analyzer import TextAnalyzer
 
 
@@ -21,6 +22,7 @@ class PromptBuilder:
         self.prompt_manager = prompt_manager
         self.config = config_manager
         self._text_analyzer = TextAnalyzer()
+        self._style_profiles = StyleProfileResolver(prompt_manager, config_manager)
 
     # --- Public API ---
 
@@ -46,8 +48,12 @@ class PromptBuilder:
             "target_language": self._text_analyzer.language_display_name(target_lang_code),
         }
 
-        # System prompt: core rules only (no glossary, no MCM)
+        # System prompt: shared core rules + one resolved style profile.
         system_prompt = self._get_system_prompt(prompt_style)
+        style_profile = self.resolve_style_profile(prompt_style, context_hint)
+        style_rules = self._render_style_profile(style_profile)
+        if style_rules:
+            system_prompt = f"{system_prompt}\n\n{style_rules}"
         system_prompt = self.apply_prompt_vars(system_prompt, prompt_vars)
 
         # Build structured user content sections
@@ -124,6 +130,14 @@ class PromptBuilder:
             context_hint = item.get("context_hint")
             item_parts = [f"[{item_id}]"]
 
+            style_profile = self.resolve_style_profile(
+                prompt_style,
+                context_hint if isinstance(context_hint, dict) else None,
+            )
+            style_rules = self._render_style_profile(style_profile)
+            if style_rules:
+                item_parts.append(style_rules)
+
             glossary_context = self.build_glossary_context(source_text, matched_terms)
             if glossary_context:
                 glossary_append = self.prompt_manager.get(
@@ -153,6 +167,17 @@ class PromptBuilder:
             sections.append("\n".join(part for part in item_parts if part))
 
         return system_prompt, "\n\n".join(sections)
+
+    def resolve_style_profile(self, prompt_style: str,
+                              context_hint: Optional[dict] = None) -> ResolvedStyleProfile:
+        return self._style_profiles.resolve(prompt_style, context_hint)
+
+    @staticmethod
+    def _render_style_profile(profile: ResolvedStyleProfile) -> str:
+        if not profile.rules:
+            return ""
+        lines = "\n".join(f"- {rule}" for rule in profile.rules)
+        return f"翻译风格包（{profile.profile_id}，必须遵守）：\n{lines}"
 
     def _build_mcm_ui_rules(self, target_lang_code: str, source_text: str,
                             context_hint: Optional[dict]) -> str:
@@ -278,7 +303,7 @@ class PromptBuilder:
             sections: list[str] = []
             if in_source_lines:
                 sections.append(
-                    "命中术语（优先参考，按语义决定）\n"
+                    "命中术语（优先采用；仅在语义明显不符时忽略）\n"
                     + "\n".join(in_source_lines)
                 )
             if reference_lines:

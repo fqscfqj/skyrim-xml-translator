@@ -431,7 +431,10 @@ class Worker(QThread):
             return ()
 
         signature = []
-        for key in ("domain", "text_kind", "entry_type", "whitespace_policy"):
+        for key in (
+            "domain", "text_kind", "entry_type", "whitespace_policy",
+            "record_type", "field_type", "file_type", "mod_scope",
+            "style_profile", "content_mode"):
             value = str(context_hint.get(key, "") or "")
             if value:
                 signature.append((key, value))
@@ -489,6 +492,17 @@ class Worker(QThread):
             context_hint = item[2] if len(item) > 2 else None
             if self.translator.can_batch_translate(
                     source, context_hint=context_hint, max_chars=max_chars):
+                if current_batch:
+                    current_signature = self._translation_context_signature(
+                        current_batch[0][1],
+                        current_batch[0][2] if len(current_batch[0]) > 2 else None,
+                    )
+                    next_signature = self._translation_context_signature(
+                        source,
+                        context_hint,
+                    )
+                    if next_signature != current_signature:
+                        flush_batch()
                 current_batch.append(item)
                 if len(current_batch) >= batch_size:
                     flush_batch()
@@ -4730,6 +4744,20 @@ class MainWindow(QMainWindow):
         if self.current_file_type not in {FILE_TYPE_XML, FILE_TYPE_ESP_XML}:
             return "generic", TextAnalyzer.WHITESPACE_POLICY_STRICT
 
+        if self.current_file_type == FILE_TYPE_ESP_XML and node is not None:
+            entry_context = self.esp_xml_processor.get_entry_context(node)
+            record_type = str(entry_context.get("record_type", "") or "").upper()
+            field_type = str(entry_context.get("field_type", "") or "").upper()
+            if record_type in {"DIAL", "INFO"}:
+                return "dialogue", TextAnalyzer.WHITESPACE_POLICY_RELAXED_SPACES
+            if record_type == "BOOK":
+                return "book", TextAnalyzer.WHITESPACE_POLICY_STRICT
+            if record_type == "QUST":
+                return "quest", TextAnalyzer.WHITESPACE_POLICY_STRICT
+            if field_type == "FULL" and record_type in {
+                    "NPC_", "WEAP", "ARMO", "MISC", "SPEL", "ENCH"}:
+                return "ui", TextAnalyzer.WHITESPACE_POLICY_STRICT
+
         source_node = None
         dest_node = None
         if node is not None:
@@ -4777,8 +4805,13 @@ class MainWindow(QMainWindow):
             "text_kind": text_kind,
             "whitespace_policy": whitespace_policy,
         }
+        if self.current_file_type == FILE_TYPE_ESP_XML and node is not None:
+            context.update(self.esp_xml_processor.get_entry_context(node))
+        elif self.current_file_type == FILE_TYPE_XML:
+            context["file_type"] = "xml"
         if self.current_file_type == FILE_TYPE_MCM:
             context["domain"] = "mcm_ui"
+            context["file_type"] = "mcm"
             key_upper = entry_id.upper()
             if "_TT_" in key_upper:
                 context["entry_type"] = "tooltip"

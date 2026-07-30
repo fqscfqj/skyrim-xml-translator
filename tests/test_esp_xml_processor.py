@@ -37,6 +37,29 @@ class ESPXMLProcessorInnerContentTests(unittest.TestCase):
         )
         self.assertEqual("旧译文 <i>保留</i>。", dest_text)
 
+    def test_get_entry_context_exposes_record_and_field_metadata(self):
+        file_path = self._write_fixture(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+            "<Root><ESP>"
+            "<EDID>MyLoreBook</EDID><ID>01000ABC</ID>"
+            "<GRUP>BOOK</GRUP><CHAMP>TEXT</CHAMP>"
+            "<ORIGINAL>History.</ORIGINAL><TRADUIT/>"
+            "</ESP></Root>"
+        )
+
+        processor = ESPXMLProcessor()
+        self.assertTrue(processor.load_file(file_path))
+        node = next(processor.get_strings())[0]
+
+        context = processor.get_entry_context(node)
+
+        self.assertEqual("esp_xml", context["file_type"])
+        self.assertEqual("MyLoreBook", context["editor_id"])
+        self.assertEqual("01000ABC", context["form_id"])
+        self.assertEqual("BOOK", context["record_type"])
+        self.assertEqual("TEXT", context["field_type"])
+        self.assertEqual("sample_esp.xml", context["source_file"])
+
     def test_update_dest_round_trips_inline_markup(self):
         file_path = self._write_fixture(
             "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"

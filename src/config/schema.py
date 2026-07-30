@@ -64,6 +64,7 @@ class RAGConfig:
 class GeneralConfig:
     log_level: str = "INFO"
     prompt_style: str = "default"
+    style_profile: str = "auto"
     language: str = "auto"
     color_mode: str = "auto"
     source_language: str = "auto"

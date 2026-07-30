@@ -1,0 +1,104 @@
+{
+  "style_profiles": {
+    "official_fantasy": {
+      "rules": [
+        "以《上古卷轴》式克制奇幻中文为基准：自然、清晰、有世界观质感，但不得把普通口语一律文言化或古风化。",
+        "宗教、政治、阵营、种族、称号和身份关系必须忠实；不得用现代现实类比替换设定概念。",
+        "专名优先采用本条术语约束；没有可靠译名时保持一致的音译策略，不擅自补全头衔、背景或关系。"
+      ],
+      "content_rules": {
+        "default": [
+          "严肃与剧情内容应保持原文的克制程度、立场和情感强度，不把庄重文本口语化，也不把普通对话过度庄重化。"
+        ],
+        "nsfw": [
+          "成人内容必须保持原文明确程度和关系方向：不得审查或弱化，也不得擅自加重、色情化或补写原文没有的行为。",
+          "准确区分器官、动作、状态，以及同意、拒绝、犹豫、强迫、支配和服从等语义；具体用词服从本模组术语和风格约束。"
+        ]
+      }
+    },
+    "dialogue": {
+      "extends": "official_fantasy",
+      "rules": [
+        "这是角色对话：优先自然口语，保留说话人的身份、阶层、亲疏关系、情绪和命令强度。",
+        "不得无依据增加敬称、自称、口头禅、引号或舞台说明。"
+      ],
+      "content_rules": {
+        "nsfw": [
+          "成人对话中的羞辱、威胁、调情、支配或服从必须保持发话者和承受者方向，不得互换主客体。"
+        ]
+      }
+    },
+    "document": {
+      "extends": "official_fantasy",
+      "rules": [
+        "这是连续文档文本：保持叙事人称、时间顺序、段落衔接和前后称谓一致。",
+        "根据原文选择现代书面语或轻度古典色彩，不得机械堆砌文言词。"
+      ]
+    },
+    "lore_book": {
+      "extends": "document",
+      "rules": [
+        "这是设定书籍或史料：保持作者立场、时代感、宗教与政治措辞，不作百科式解释。",
+        "史书、传说、论文和故事的语体应由原文决定；诗歌或双关不得被改成单纯事实概述。"
+      ]
+    },
+    "journal_letter": {
+      "extends": "document",
+      "rules": [
+        "这是日记、书信或私人笔记：保持第一人称个性、私密程度和情绪变化，不改写成客观史书。"
+      ]
+    },
+    "quest_log": {
+      "extends": "official_fantasy",
+      "rules": [
+        "这是任务名称、目标或日志：表达简洁明确，保持行动主体、目标、状态和线索，不擅自添加攻略或剧透。",
+        "任务标题使用紧凑名词或动词短语；任务日志使用清晰的游戏日志语体。"
+      ]
+    },
+    "item_name": {
+      "extends": "official_fantasy",
+      "rules": [
+        "这是人物、地点、物品、装备、法术或效果名称：保持短而稳定，遵循同类游戏命名结构，不扩写成说明句。"
+      ]
+    },
+    "ui": {
+      "extends": "official_fantasy",
+      "rules": [
+        "这是界面短文本：保持紧凑、可扫描和同类用词一致，不补主语、背景或句末说明。"
+      ]
+    }
+  },
+  "style_profile_mappings": {
+    "record_field": {
+      "BOOK:TEXT": "lore_book",
+      "BOOK:DESC": "lore_book",
+      "QUST:FULL": "quest_log",
+      "QUST:DESC": "quest_log",
+      "NPC_:FULL": "item_name",
+      "WEAP:FULL": "item_name",
+      "ARMO:FULL": "item_name",
+      "MISC:FULL": "item_name",
+      "SPEL:FULL": "item_name",
+      "ENCH:FULL": "item_name"
+    },
+    "record_type": {
+      "BOOK": "lore_book",
+      "DIAL": "dialogue",
+      "INFO": "dialogue",
+      "QUST": "quest_log",
+      "NPC_": "item_name",
+      "WEAP": "item_name",
+      "ARMO": "item_name",
+      "MISC": "item_name",
+      "SPEL": "item_name",
+      "ENCH": "item_name"
+    },
+    "text_kind": {
+      "dialogue": "dialogue",
+      "document": "document",
+      "book": "lore_book",
+      "quest": "quest_log",
+      "ui": "ui"
+    }
+  }
+}

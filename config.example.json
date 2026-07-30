@@ -95,6 +95,7 @@
     "general": {
         "log_level": "INFO",
         "prompt_style": "default",
+        "style_profile": "auto",
         "language": "auto",
         "color_mode": "auto",
         "source_language": "auto",

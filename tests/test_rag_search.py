@@ -476,7 +476,7 @@ class PromptBuilderGlossaryContextTests(unittest.TestCase):
             {"Thane": "武卫", "Housecarl": "侍卫"},
         )
 
-        self.assertIn("命中术语（优先参考，按语义决定）", context)
+        self.assertIn("命中术语（优先采用；仅在语义明显不符时忽略）", context)
         self.assertIn("- Thane -> 武卫", context)
         self.assertIn("- Housecarl -> 侍卫", context)
         self.assertNotIn("参考术语（仅背景参考，禁止直接代入）", context)

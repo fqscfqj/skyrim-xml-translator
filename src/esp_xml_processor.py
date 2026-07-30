@@ -1,3 +1,4 @@
+import os
 from typing import Any, Optional
 
 from src.config.manager import ConfigManager
@@ -125,6 +126,19 @@ class ESPXMLProcessor:
             parts.append(record_id)
 
         return " | ".join(part for part in parts if part)
+
+    def get_entry_context(self, esp_node) -> dict[str, str]:
+        """Return structured metadata that can guide translation style and caching."""
+        context = {
+            "file_type": "esp_xml",
+            "editor_id": self._node_text(esp_node, "EDID"),
+            "form_id": self._node_text(esp_node, "ID"),
+            "record_type": self._node_text(esp_node, "GRUP").upper(),
+            "field_type": self._node_text(esp_node, "CHAMP").upper(),
+        }
+        if self.file_path:
+            context["source_file"] = os.path.basename(self.file_path)
+        return {key: value for key, value in context.items() if value}
 
     def _should_skip_entry(self, esp_node) -> bool:
         group = self._node_text(esp_node, "GRUP").upper()
