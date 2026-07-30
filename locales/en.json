@@ -54,6 +54,7 @@
     "msg_no_import_file": "No import file specified.",
     "msg_found_terms": "Found {count} terms. Processing with {threads} threads...",
     "msg_import_completed": "Import completed.",
+    "msg_import_completed_with_warning": "Import completed with warnings: {imported} terms imported, {invalid} invalid rows skipped, and {limited} rows excluded by configured limits.",
     "msg_no_valid_terms": "No valid terms found in CSV.",
     "msg_error_importing": "Error importing CSV: {error}",
     "msg_glossary_worker_error": "GlossaryWorker error: {error}",

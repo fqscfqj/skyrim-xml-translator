@@ -130,6 +130,32 @@ class ESPXMLProcessorInnerContentTests(unittest.TestCase):
         processor = ESPXMLProcessor()
         self.assertFalse(processor.load_file(file_path))
 
+    def test_rejects_utf16_doctype_entity_declarations(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        file_path = Path(temp_dir.name) / "unsafe-utf16.xml"
+        file_path.write_text(
+            "<?xml version=\"1.0\" encoding=\"utf-16\"?>\n"
+            "<!DOCTYPE Root [<!ENTITY x \"X\">]>\n"
+            "<Root><ESP><EDID>Book</EDID><ORIGINAL>&x;</ORIGINAL><TRADUIT/></ESP></Root>",
+            encoding="utf-16",
+        )
+
+        processor = ESPXMLProcessor()
+        self.assertFalse(processor.load_file(str(file_path)))
+
+    def test_allows_declaration_text_inside_comment_and_cdata(self):
+        file_path = self._write_fixture(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+            "<Root><!-- <!DOCTYPE harmless> -->"
+            "<ESP><EDID>Book</EDID><ORIGINAL><![CDATA[hello <!ENTITY harmless>]]></ORIGINAL>"
+            "<TRADUIT/></ESP></Root>"
+        )
+
+        processor = ESPXMLProcessor()
+        self.assertTrue(processor.load_file(file_path))
+        self.assertEqual("hello <!ENTITY harmless>", next(processor.get_strings())[2])
+
 
 if __name__ == "__main__":
     unittest.main()

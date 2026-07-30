@@ -1,17 +1,7 @@
-try:
-    # Prefer lxml if available for better XML features (pretty_print, advanced parser options)
-    from lxml import etree  # type: ignore
-    LXML_AVAILABLE = True
-except Exception:
-    # Fall back to stdlib ElementTree if lxml is not installed
-    import xml.etree.ElementTree as etree  # type: ignore
-    LXML_AVAILABLE = False
-
-import os
-import re
-from typing import Optional, Any, cast
+from typing import Optional, Any
 from src.logging_helper import emit as log_emit
 from src.config.manager import ConfigManager
+from src.safe_xml import etree, parse_xml_file
 from src.xml_content import (
     get_node_inner_content,
     node_has_child_elements,
@@ -20,8 +10,6 @@ from src.xml_content import (
 )
 
 class XMLProcessor:
-    _UNSAFE_XML_DECL_RE = re.compile(rb"<!\s*(?:DOCTYPE|ENTITY)\b", re.IGNORECASE)
-
     def __init__(self):
         self.tree: Optional[Any] = None
         self.root: Optional[Any] = None
@@ -30,37 +18,7 @@ class XMLProcessor:
     def load_file(self, file_path: str) -> bool:
         self.file_path = file_path
         try:
-            if self._has_unsafe_xml_declarations(file_path):
-                log_emit(None, None, 'ERROR', "Unsafe XML declaration rejected: DOCTYPE/ENTITY is not allowed",
-                         module='xml_processor', func='load_file')
-                return False
-            if LXML_AVAILABLE:
-                # Some versions of lxml may not support all XMLParser named args
-                xml_parser_factory = cast(Any, etree.XMLParser)
-                parser_kwargs = {
-                    "remove_blank_text": False,
-                    "strip_cdata": False,
-                    "resolve_entities": False,
-                    "no_network": True,
-                    "compact": True,
-                }
-                try:
-                    if os.path.getsize(file_path) > 10 * 1024 * 1024:
-                        parser_kwargs["huge_tree"] = True
-                except OSError:
-                    pass
-                try:
-                    parser = xml_parser_factory(**parser_kwargs)
-                except TypeError:
-                    parser = xml_parser_factory(
-                        remove_blank_text=False,
-                        resolve_entities=False,
-                        no_network=True,
-                    )
-                self.tree = etree.parse(file_path, parser)
-            else:
-                # xml.etree.ElementTree doesn't use the same parser options
-                self.tree = etree.parse(file_path)
+            self.tree = parse_xml_file(file_path)
             self.root = self.tree.getroot()
             return True
         except Exception as e:
@@ -70,14 +28,6 @@ class XMLProcessor:
             except Exception:
                 cfg = None
             log_emit(None, cfg, 'ERROR', f"Error loading XML: {e}", exc=e, module='xml_processor', func='load_file')
-            return False
-
-    @classmethod
-    def _has_unsafe_xml_declarations(cls, file_path: str) -> bool:
-        try:
-            with open(file_path, "rb") as f:
-                return bool(cls._UNSAFE_XML_DECL_RE.search(f.read(65536)))
-        except Exception:
             return False
 
     def get_strings(self):
@@ -142,11 +92,7 @@ class XMLProcessor:
             cfg = None
         
         try:
-            if LXML_AVAILABLE:
-                self.tree.write(output_path, encoding="utf-8", xml_declaration=True, pretty_print=False)
-            else:
-                # stdlib ElementTree doesn't support pretty_print argument
-                self.tree.write(output_path, encoding="utf-8", xml_declaration=True)
+            self.tree.write(output_path, encoding="utf-8", xml_declaration=True, pretty_print=False)
             return True
         except TypeError:
             # Fallback for lxml versions that don't support pretty_print

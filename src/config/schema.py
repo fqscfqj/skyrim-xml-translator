@@ -56,6 +56,8 @@ class RAGConfig:
     format_extra_retries: int = 2
     latin_ratio_threshold: float = 2.0
     vector_index_checkpoint_terms: int = 1000
+    glossary_import_max_rows: int = 0
+    glossary_import_max_field_chars: int = 0
 
 
 @dataclass

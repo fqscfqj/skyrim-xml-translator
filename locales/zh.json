@@ -54,6 +54,7 @@
     "msg_no_import_file": "未指定导入文件。",
     "msg_found_terms": "找到 {count} 个术语。正在使用 {threads} 个线程处理...",
     "msg_import_completed": "导入完成。",
+    "msg_import_completed_with_warning": "导入完成，但存在警告：已导入 {imported} 个术语，跳过 {invalid} 个无效行，另有 {limited} 行因配置限制未导入。",
     "msg_no_valid_terms": "CSV 中未找到有效术语。",
     "msg_error_importing": "导入 CSV 出错: {error}",
     "msg_glossary_worker_error": "术语工作线程错误: {error}",

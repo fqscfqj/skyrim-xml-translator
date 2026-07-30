@@ -1,8 +1,10 @@
 import unittest
 from typing import Any, cast
+from unittest.mock import patch
 
 from src.llm.client import LLMClient
 from src.llm.cost_tracker import CostTracker
+from src.llm.retry import ErrorType
 
 
 class _DummyConfig:
@@ -211,6 +213,32 @@ class LLMClientParameterOverrideTests(unittest.TestCase):
         self.assertNotIn("response_format", calls[1])
         self.assertEqual(tracker.get_counter("translate_api_attempts"), 2)
         self.assertEqual(tracker.get_counter("response_format_fallbacks"), 1)
+
+    def test_retry_request_timeout_is_bounded_by_remaining_total_budget(self):
+        config = _DummyConfig({
+            ("llm", "model"): "deepseek-v4-flash",
+            ("llm", "max_retries"): 1,
+            ("llm", "request_timeout"): 180,
+            ("llm", "request_timeout_step"): 15,
+            ("llm", "request_timeout_max"): 180,
+            ("llm", "retry_total_timeout"): 300,
+        })
+        client = LLMClient(config)
+        fake_client = _FakeClient([RuntimeError("temporary failure"), _Response()])
+        _install_fake_client(client, fake_client)
+
+        with (
+            patch("src.llm.client.monotonic", side_effect=[100.0, 100.0, 279.0]),
+            patch("src.llm.retry.classify_error", return_value=ErrorType.CONNECTION_ERROR),
+            patch("src.llm.retry.compute_delay", return_value=0.0),
+            patch("src.llm.retry.time.sleep"),
+        ):
+            result = client.chat_completion([{"role": "user", "content": "Translate."}])
+
+        self.assertEqual(result, '{"translation":"ok"}')
+        calls = fake_client.chat.completions.calls
+        self.assertEqual(calls[0]["timeout"], 180)
+        self.assertEqual(calls[1]["timeout"], 121)
 
 
 if __name__ == "__main__":

@@ -88,7 +88,9 @@
         "glossary_context_max_chars": 4000,
         "format_extra_retries": 2,
         "latin_ratio_threshold": 2.0,
-        "vector_index_checkpoint_terms": 1000
+        "vector_index_checkpoint_terms": 1000,
+        "glossary_import_max_rows": 0,
+        "glossary_import_max_field_chars": 0
     },
     "general": {
         "log_level": "INFO",

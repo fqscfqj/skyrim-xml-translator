@@ -1,17 +1,8 @@
-import os
-import re
-
-try:
-    from lxml import etree  # type: ignore
-    LXML_AVAILABLE = True
-except Exception:
-    import xml.etree.ElementTree as etree  # type: ignore
-    LXML_AVAILABLE = False
-
-from typing import Any, Optional, cast
+from typing import Any, Optional
 
 from src.config.manager import ConfigManager
 from src.logging_helper import emit as log_emit
+from src.safe_xml import etree, parse_xml_file
 from src.xml_content import (
     get_node_inner_content,
     node_has_child_elements,
@@ -21,8 +12,6 @@ from src.xml_content import (
 
 
 class ESPXMLProcessor:
-    _UNSAFE_XML_DECL_RE = re.compile(rb"<!\s*(?:DOCTYPE|ENTITY)\b", re.IGNORECASE)
-
     def __init__(self):
         self.tree: Optional[Any] = None
         self.root: Optional[Any] = None
@@ -31,35 +20,7 @@ class ESPXMLProcessor:
     def load_file(self, file_path: str) -> bool:
         self.file_path = file_path
         try:
-            if self._has_unsafe_xml_declarations(file_path):
-                log_emit(None, None, "ERROR", "Unsafe XML declaration rejected: DOCTYPE/ENTITY is not allowed",
-                         module="esp_xml_processor", func="load_file")
-                return False
-            if LXML_AVAILABLE:
-                xml_parser_factory = cast(Any, etree.XMLParser)
-                parser_kwargs = {
-                    "remove_blank_text": False,
-                    "strip_cdata": False,
-                    "resolve_entities": False,
-                    "no_network": True,
-                    "compact": True,
-                }
-                try:
-                    if os.path.getsize(file_path) > 10 * 1024 * 1024:
-                        parser_kwargs["huge_tree"] = True
-                except OSError:
-                    pass
-                try:
-                    parser = xml_parser_factory(**parser_kwargs)
-                except TypeError:
-                    parser = xml_parser_factory(
-                        remove_blank_text=False,
-                        resolve_entities=False,
-                        no_network=True,
-                    )
-                self.tree = etree.parse(file_path, parser)
-            else:
-                self.tree = etree.parse(file_path)
+            self.tree = parse_xml_file(file_path)
             self.root = self.tree.getroot()
             return True
         except Exception as e:
@@ -69,14 +30,6 @@ class ESPXMLProcessor:
                 cfg = None
             log_emit(None, cfg, "ERROR", f"Error loading ESP-ESM Translator XML: {e}", exc=e,
                      module="esp_xml_processor", func="load_file")
-            return False
-
-    @classmethod
-    def _has_unsafe_xml_declarations(cls, file_path: str) -> bool:
-        try:
-            with open(file_path, "rb") as f:
-                return bool(cls._UNSAFE_XML_DECL_RE.search(f.read(65536)))
-        except Exception:
             return False
 
     def get_strings(self):
@@ -128,10 +81,7 @@ class ESPXMLProcessor:
             cfg = None
 
         try:
-            if LXML_AVAILABLE:
-                self.tree.write(output_path, encoding="utf-8", xml_declaration=True, pretty_print=False)
-            else:
-                self.tree.write(output_path, encoding="utf-8", xml_declaration=True)
+            self.tree.write(output_path, encoding="utf-8", xml_declaration=True, pretty_print=False)
             return True
         except TypeError:
             try:

@@ -5,7 +5,6 @@ import shutil
 import datetime
 import re
 import ctypes
-import xml.etree.ElementTree as stdlib_etree
 from typing import Mapping, Optional, cast
 import csv
 from collections import deque
@@ -40,6 +39,7 @@ from src.config.manager import ConfigManager
 from src.config.schema import RAGConfig
 from src.llm.client import LLMClient
 from src.rag.engine import RAGEngine
+from src.safe_xml import parse_xml_file
 from src.esp_xml_processor import ESPXMLProcessor
 from src.xml_processor import XMLProcessor
 from src.mcm_processor import MCMProcessor
@@ -92,6 +92,42 @@ def determine_translation_completion_state(
     if was_stopped or untranslated > 0:
         return TASK_COMPLETION_STATE_WARNING
     return TASK_COMPLETION_STATE_SUCCESS
+
+
+def read_glossary_csv(
+    file_path: str,
+    *,
+    max_rows: int = 0,
+    max_field_chars: int = 0,
+) -> tuple[dict[str, str], int, int]:
+    terms: dict[str, str] = {}
+    invalid_rows = 0
+    limited_rows = 0
+    max_rows = max(0, int(max_rows or 0))
+    max_field_chars = max(0, int(max_field_chars or 0))
+
+    with open(file_path, "r", encoding="utf-8") as handle:
+        reader = csv.reader(handle)
+        for row_number, row in enumerate(reader, start=1):
+            if max_rows and row_number > max_rows:
+                limited_rows += 1
+                continue
+            if len(row) < 2:
+                invalid_rows += 1
+                continue
+            term = row[0].strip()
+            translation = row[1].strip()
+            if not term or not translation:
+                invalid_rows += 1
+                continue
+            if max_field_chars and (
+                len(term) > max_field_chars or len(translation) > max_field_chars
+            ):
+                limited_rows += 1
+                continue
+            terms[term] = translation
+
+    return terms, invalid_rows, limited_rows
 
 
 class StatusSegmentedProgressBar(QProgressBar):
@@ -268,34 +304,30 @@ class GlossaryWorker(QThread):
                         self.finished.emit()
                         return
 
-                    terms = {}
-                    skipped_rows = 0
-                    max_rows = 100000
-                    max_field_chars = 500
-                    with open(self.data, 'r', encoding='utf-8') as f:
-                        reader = csv.reader(f)
-                        for row_number, row in enumerate(reader, start=1):
-                            if row_number > max_rows:
-                                skipped_rows += 1
-                                break
-                            if len(row) < 2:
-                                skipped_rows += 1
-                                continue
-                            term = row[0].strip()
-                            translation = row[1].strip()
-                            if not term or not translation:
-                                skipped_rows += 1
-                                continue
-                            if len(term) > max_field_chars or len(translation) > max_field_chars:
-                                skipped_rows += 1
-                                continue
-                            terms[term] = translation
+                    max_rows = self.rag_engine.config.get(
+                        "rag", "glossary_import_max_rows", 0)
+                    max_field_chars = self.rag_engine.config.get(
+                        "rag", "glossary_import_max_field_chars", 0)
+                    terms, invalid_rows, limited_rows = read_glossary_csv(
+                        self.data,
+                        max_rows=max_rows,
+                        max_field_chars=max_field_chars,
+                    )
+                    skipped_rows = invalid_rows + limited_rows
+                    self.task_result = {
+                        "imported_terms": len(terms),
+                        "invalid_rows": invalid_rows,
+                        "limited_rows": limited_rows,
+                    }
                     if skipped_rows:
                         log_emit(
                             self.log.emit,
                             self.rag_engine.config,
                             'WARNING',
-                            f"Skipped {skipped_rows} invalid or excessive glossary CSV rows.",
+                            (
+                                f"Glossary CSV skipped {invalid_rows} invalid rows and "
+                                f"{limited_rows} rows excluded by configured limits."
+                            ),
                             module='gui_main',
                             func='GlossaryWorker.run',
                         )
@@ -303,8 +335,17 @@ class GlossaryWorker(QThread):
                     if terms:
                         log_emit(self.log.emit, self.rag_engine.config, 'INFO', i18n.t("msg_found_terms").format(count=len(terms), threads=self.num_threads), module='gui_main', func='GlossaryWorker.run')
                         self.rag_engine.add_terms_batch(terms, num_threads=self.num_threads, progress_callback=self.progress.emit, log_callback=self.log.emit)
-                        self.completion_message = i18n.t("msg_import_completed")
-                        log_emit(self.log.emit, self.rag_engine.config, 'INFO', i18n.t("msg_import_completed"), module='gui_main', func='GlossaryWorker.run')
+                        if skipped_rows:
+                            self.completion_state = TASK_COMPLETION_STATE_WARNING
+                            self.completion_message = i18n.t("msg_import_completed_with_warning").format(
+                                imported=len(terms),
+                                invalid=invalid_rows,
+                                limited=limited_rows,
+                            )
+                            log_emit(self.log.emit, self.rag_engine.config, 'WARNING', self.completion_message, module='gui_main', func='GlossaryWorker.run')
+                        else:
+                            self.completion_message = i18n.t("msg_import_completed")
+                            log_emit(self.log.emit, self.rag_engine.config, 'INFO', self.completion_message, module='gui_main', func='GlossaryWorker.run')
                     else:
                         self.completion_state = TASK_COMPLETION_STATE_WARNING
                         self.completion_message = i18n.t("msg_no_valid_terms")
@@ -4346,7 +4387,7 @@ class MainWindow(QMainWindow):
 
     def _detect_xml_variant(self, file_path: str) -> str:
         try:
-            tree = stdlib_etree.parse(file_path)
+            tree = parse_xml_file(file_path)
             root = tree.getroot()
         except Exception:
             return "xml"

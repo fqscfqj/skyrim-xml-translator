@@ -1,10 +1,11 @@
 """OpenAI-compatible LLM API client with unified retry logic and cost tracking."""
 
 from openai import OpenAI
+from time import monotonic
 from typing import Any, Callable, Optional
 
 from src.logging_helper import emit as log_emit
-from src.llm.retry import execute_with_retry
+from src.llm.retry import RetryTimeBudgetExceeded, execute_with_retry
 from src.llm.cost_tracker import CostTracker
 
 
@@ -289,14 +290,32 @@ class LLMClient:
 
         attempt_counter = {"count": 0}
         response_format_fallback = {"used": False}
+        request_deadline = (
+            monotonic() + retry_total_timeout
+            if retry_total_timeout > 0
+            else None
+        )
+
+        def bounded_request_timeout(proposed_timeout: float) -> float:
+            if request_deadline is None:
+                return proposed_timeout
+            remaining = request_deadline - monotonic()
+            if remaining <= 0:
+                raise RetryTimeBudgetExceeded(
+                    f"{operation} LLM retry time budget exceeded "
+                    f"({retry_total_timeout:.2f}s)"
+                )
+            return min(proposed_timeout, remaining)
 
         def do_call():
             attempt_counter["count"] += 1
             if self.cost_tracker:
                 self.cost_tracker.increment_counter(f"{operation}_api_attempts")
-            call_timeout = min(
-                timeout_base + timeout_step * (attempt_counter["count"] - 1),
-                timeout_max,
+            call_timeout = bounded_request_timeout(
+                min(
+                    timeout_base + timeout_step * (attempt_counter["count"] - 1),
+                    timeout_max,
+                )
             )
             if attempt_counter["count"] > 1:
                 log_emit(callback, self.config, "DEBUG",
@@ -320,6 +339,7 @@ class LLMClient:
                     if self.cost_tracker:
                         self.cost_tracker.increment_counter(f"{operation}_api_attempts")
                         self.cost_tracker.increment_counter("response_format_fallbacks")
+                    call_args["timeout"] = bounded_request_timeout(call_timeout)
                     response = client.chat.completions.create(**call_args)
                 else:
                     raise

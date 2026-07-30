@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from src.xml_processor import XMLProcessor
 
@@ -156,6 +157,41 @@ class XMLProcessorInnerContentTests(unittest.TestCase):
 
         processor = XMLProcessor()
         self.assertFalse(processor.load_file(file_path))
+
+    def test_rejects_utf16_doctype_entity_declarations(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        file_path = Path(temp_dir.name) / "unsafe-utf16.xml"
+        file_path.write_text(
+            "<?xml version=\"1.0\" encoding=\"utf-16\"?>\n"
+            "<!DOCTYPE Root [<!ENTITY x \"X\">]>\n"
+            "<Root><String id=\"1\"><Source>&x;</Source><Dest/></String></Root>",
+            encoding="utf-16",
+        )
+
+        processor = XMLProcessor()
+        self.assertFalse(processor.load_file(str(file_path)))
+
+    def test_allows_declaration_text_inside_comment_and_cdata(self):
+        file_path = self._write_fixture(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+            "<Root><!-- <!DOCTYPE harmless> -->"
+            "<String id=\"1\"><Source><![CDATA[hello <!ENTITY harmless>]]></Source><Dest/></String>"
+            "</Root>"
+        )
+
+        processor = XMLProcessor()
+        self.assertTrue(processor.load_file(file_path))
+        self.assertEqual("hello <!ENTITY harmless>", next(processor.get_strings())[2])
+
+    def test_missing_lxml_fails_instead_of_using_lossy_fallback(self):
+        file_path = self._write_fixture(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?><Root/>"
+        )
+
+        with patch("src.safe_xml.LXML_AVAILABLE", False):
+            processor = XMLProcessor()
+            self.assertFalse(processor.load_file(file_path))
 
 
 if __name__ == "__main__":
