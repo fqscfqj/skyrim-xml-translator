@@ -123,6 +123,8 @@
     "label_vec_threads": "Vectorization Threads:",
     "tooltip_trans_threads": "Number of concurrent translation requests. Increase carefully to avoid rate limits or higher memory use.",
     "tooltip_vec_threads": "Number of concurrent embedding/vectorization requests used when importing terms or rebuilding the vector index.",
+    "label_prompt_cache_warmup_enabled": "Complete two requests before parallel cache reuse",
+    "tooltip_prompt_cache_warmup_enabled": "Recommended for prefix-caching providers such as DeepSeek V4 and Model Studio. Adds no API calls: two real translations complete sequentially so the provider can identify and persist their common prefix before remaining concurrent work starts.",
     "group_rag_settings": "RAG Settings",
     "label_short_text_batch_enabled": "Enable short-text LLM batching",
     "tooltip_short_text_batch_enabled": "Optional: combine several short translation items into one LLM request. Falls back to single-item translation on errors.",

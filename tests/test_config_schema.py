@@ -72,6 +72,17 @@ class TaskCompletionSoundConfigTests(unittest.TestCase):
             config_example["general"]["long_text_chunk_threshold_chars"],
         )
 
+    def test_prompt_cache_warmup_is_enabled_by_default_and_in_example(self):
+        config = dataclass_to_dict(AppConfig())
+        self.assertTrue(config["general"]["prompt_cache_warmup_enabled"])
+
+        repo_root = os.path.dirname(os.path.dirname(__file__))
+        config_example_path = os.path.join(repo_root, "config.example.json")
+        with open(config_example_path, "r", encoding="utf-8-sig") as handle:
+            config_example = json.load(handle)
+
+        self.assertTrue(config_example["general"]["prompt_cache_warmup_enabled"])
+
 
 if __name__ == "__main__":
     unittest.main()

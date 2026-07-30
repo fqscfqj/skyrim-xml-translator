@@ -48,7 +48,11 @@ class PromptBuilder:
             "target_language": self._text_analyzer.language_display_name(target_lang_code),
         }
 
-        # System prompt: shared core rules + one resolved style profile.
+        # Keep the long shared core at token 0 and append the resolved style
+        # profile only after it. DeepSeek caches matching token-prefix blocks,
+        # so record profiles can vary without invalidating the reusable core.
+        # Style remains system-level to preserve its original instruction
+        # priority and translation quality.
         system_prompt = self._get_system_prompt(prompt_style)
         style_profile = self.resolve_style_profile(prompt_style, context_hint)
         style_rules = self._render_style_profile(style_profile)
@@ -56,21 +60,10 @@ class PromptBuilder:
             system_prompt = f"{system_prompt}\n\n{style_rules}"
         system_prompt = self.apply_prompt_vars(system_prompt, prompt_vars)
 
-        # Build structured user content sections
+        # Build structured user content from the most stable sections to the
+        # most dynamic ones. This preserves all quality instructions while
+        # maximizing the reusable prefix before glossary/source text diverges.
         sections: list[str] = []
-
-        # Glossary section → user message
-        glossary_context = self.build_glossary_context(
-            glossary_source_text if glossary_source_text is not None else source_text,
-            matched_terms,
-        )
-        if glossary_context:
-            glossary_append = self.prompt_manager.get(
-                "translator.glossary_instruction_append",
-                "\n以上术语仅供参考，语义不符可忽略；不得据此补全原文未出现的成分。",
-            )
-            glossary_append = self.apply_prompt_vars(glossary_append, prompt_vars)
-            sections.append(f"{glossary_context}{glossary_append}")
 
         # MCM rules → user message
         if mcm_ui_mode:
@@ -84,6 +77,20 @@ class PromptBuilder:
         dialogue_whitespace_rules = self._build_dialogue_whitespace_rules(context_hint)
         if dialogue_whitespace_rules:
             sections.append(dialogue_whitespace_rules.strip())
+
+        # Glossary matches vary per source, so keep them after stable
+        # style/context rules and immediately before the source text.
+        glossary_context = self.build_glossary_context(
+            glossary_source_text if glossary_source_text is not None else source_text,
+            matched_terms,
+        )
+        if glossary_context:
+            glossary_append = self.prompt_manager.get(
+                "translator.glossary_instruction_append",
+                "\n以上术语仅供参考，语义不符可忽略；不得据此补全原文未出现的成分。",
+            )
+            glossary_append = self.apply_prompt_vars(glossary_append, prompt_vars)
+            sections.append(f"{glossary_context}{glossary_append}")
 
         # Source text section
         user_template = self.prompt_manager.get("translator.user_template", "原文：{text}")
@@ -117,7 +124,7 @@ class PromptBuilder:
         )
 
         sections = [
-            f"请将以下 {len(items)} 条短文本分别翻译为{prompt_vars['target_language']}。",
+            f"请将以下短文本分别翻译为{prompt_vars['target_language']}。",
             "每条文本独立处理，保持 id 不变，按原文含义自然表达。",
             "只输出 JSON，不要输出 Markdown 或说明。",
         ]

@@ -16,6 +16,7 @@
 | 配置键 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
 | `cache.cache_ttl_hours` | float | 0 | 翻译缓存 TTL（小时），0=永不过期 |
+| `general.prompt_cache_warmup_enabled` | bool | true | 串行完成前两个真实工作单元，再放开并发，使 DeepSeek V4 能识别并落盘公共前缀；不增加 API 请求 |
 | `rag.format_extra_retries` | int | 2 | 格式错误时的额外重试次数 |
 | `rag.latin_ratio_threshold` | float | 2.0 | 拉丁字符比例阈值（α > CJK × 阈值时触发未翻译告警），值越大容忍度越高 |
 
@@ -139,8 +140,11 @@ python build_exe.py --onedir --console
 
 ## 成本优化建议
 
-- **关键词提取使用更便宜的模型**：`llm_search` 配置项用于 RAG 关键词提取，这是一个结构化的低复杂度任务，不需要高端模型。建议将 `llm_search.model` 配置为轻量模型（如 `gpt-4o-mini`、`deepseek-chat`），而 `llm.model` 保留高质量模型用于翻译。关键词提取约占总 LLM 调用量的 50%，使用更便宜的模型可以在不影响翻译质量的前提下显著降低成本。
+- **国产模型前缀缓存**：DeepSeek 的上下文硬盘缓存会自动运行，只命中从第 0 个 token 开始相同的完整缓存前缀单元；无需发送厂商专属参数。程序将稳定的核心规则放在请求开头，把术语和原文等动态内容放在末尾，并默认串行完成前两个真实工作单元，让 DeepSeek 识别并落盘公共前缀，第三条起再释放其余并发。详见 [DeepSeek 上下文硬盘缓存](https://api-docs.deepseek.com/zh-cn/guides/kv_cache)。
+- **缓存命中可观测**：程序同时识别 DeepSeek 的 `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens` 和常见 OpenAI 兼容服务的 `prompt_tokens_details.cached_tokens`，翻译任务结束时会在日志中输出本次输入 token 缓存命中率。
+- **关键词提取使用更便宜的模型**：`llm_search` 配置项用于 RAG 关键词提取，这是一个结构化的低复杂度任务，不需要高端模型。建议将 `llm_search.model` 配置为轻量模型，而 `llm.model` 保留高质量模型用于翻译。关键词提取约占总 LLM 调用量的 50%，使用更便宜的模型可以在不影响翻译质量的前提下降低成本。
 - **统一关键词提取链路**：所有启用 RAG 的原文都会先经过关键词提取，再进入术语检索；若关键词提取结果为空或服务暂时不可用，仍会回退到本地规则兜底，避免完全失去术语召回。
+- **短文本批处理保持可选**：批处理能进一步减少请求数，但可能改变模型处理单条文本时的注意力分配，因此默认仍关闭；质量优先场景无需启用。
 
 ## 非标准 LLM 参数
 

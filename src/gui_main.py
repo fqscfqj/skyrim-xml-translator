@@ -540,6 +540,9 @@ class Worker(QThread):
             reset_batch_circuit = getattr(self.translator, "reset_batch_circuit", None)
             if callable(reset_batch_circuit):
                 reset_batch_circuit()
+            cost_tracker = getattr(self.translator.llm_client, "cost_tracker", None)
+            if cost_tracker is not None and hasattr(cost_tracker, "reset"):
+                cost_tracker.reset()
             
             # 优化：检测重复内容；相同原文且翻译上下文一致时只翻译一次。
             # 上下文会影响空白策略、MCM UI 规则和标识符保留，不能只按原文去重。
@@ -717,6 +720,29 @@ class Worker(QThread):
             # Honor the configured thread count while avoiding idle workers when
             # there are fewer unique items than requested threads.
             max_concurrent = self._effective_max_concurrent(len(work_units))
+            prompt_cache_warmup = (
+                max_concurrent > 1
+                and len(work_units) > 1
+                and self._config_bool(
+                    self.translator.rag_engine.config.get(
+                        "general", "prompt_cache_warmup_enabled", True
+                    ),
+                    default=True,
+                )
+            )
+            if prompt_cache_warmup:
+                log_emit(
+                    self.log.emit,
+                    self.translator.rag_engine.config,
+                    "INFO",
+                    (
+                        "Prompt-prefix cache warm-up enabled: completing the first "
+                        "two real work units sequentially before releasing remaining "
+                        "concurrent requests."
+                    ),
+                    module="gui_main",
+                    func="Worker.run",
+                )
             
             from concurrent.futures import wait, FIRST_COMPLETED
             
@@ -727,8 +753,15 @@ class Worker(QThread):
                 # Iterator for unique items only
                 items_iter = iter(work_units)
                 
-                # Fill the pool initially - only max_concurrent tasks at a time
-                for _ in range(max_concurrent):
+                # Current DeepSeek caching identifies a reusable common prefix
+                # after observing two differing requests (A+B, then A+C); the
+                # third request can then hit A. Starting every worker at once
+                # makes the initial wave race this cache construction. Warm up
+                # with two real work items (no synthetic or extra API calls),
+                # then ramp up to the configured concurrency.
+                initial_slots = 1 if prompt_cache_warmup else max_concurrent
+                warmup_remaining = min(2, len(work_units)) if prompt_cache_warmup else 0
+                for _ in range(initial_slots):
                     try:
                         item = next(items_iter)
                         future = executor.submit(translate_task, item)
@@ -846,14 +879,28 @@ class Worker(QThread):
                             completed_total = sum(len(source_to_rows.get(key, [])) for key in completed_keys)
                             self.progress.emit(int(completed_total / total * 100))
 
-                        # Submit next task
-                        try:
-                            if self.is_running and not self.stop_receiving:
+                        # After the warm-up completes, fill the entire pool.
+                        # During steady state each completed future contributes
+                        # one replacement, preserving the configured limit.
+                        refill_slots = 1
+                        if warmup_remaining > 0:
+                            warmup_remaining -= 1
+                            if warmup_remaining > 0:
+                                # Keep the second warm-up item sequential.
+                                refill_slots = 1
+                            else:
+                                refill_slots = max(
+                                    0, max_concurrent - len(active_futures)
+                                )
+                        for _ in range(refill_slots):
+                            try:
+                                if not self.is_running or self.stop_receiving:
+                                    break
                                 next_item = next(items_iter)
                                 new_future = executor.submit(translate_task, next_item)
                                 active_futures.add(new_future)
-                        except StopIteration:
-                            pass
+                            except StopIteration:
+                                break
 
             finally:
                 # Always clean up the executor.
@@ -869,6 +916,31 @@ class Worker(QThread):
             self._save_translation_cache()
 
             if not self.stop_receiving:
+                if cost_tracker is not None and hasattr(cost_tracker, "get_session_summary"):
+                    usage_summary = cost_tracker.get_session_summary()
+                    prompt_tokens = int(usage_summary.get("total_prompt_tokens", 0) or 0)
+                    cached_tokens = int(
+                        usage_summary.get("total_cached_prompt_tokens", 0) or 0
+                    )
+                    cache_usage_reports = int(
+                        usage_summary.get("counters", {}).get(
+                            "prompt_cache_usage_reports", 0
+                        ) or 0
+                    )
+                    if prompt_tokens > 0 and cache_usage_reports > 0:
+                        cache_hit_rate = cached_tokens / prompt_tokens
+                        log_emit(
+                            self.log.emit,
+                            self.translator.rag_engine.config,
+                            "INFO",
+                            (
+                                "LLM prompt-prefix cache usage: "
+                                f"hit_tokens={cached_tokens}/{prompt_tokens} "
+                                f"({cache_hit_rate:.1%})."
+                            ),
+                            module="gui_main",
+                            func="Worker.run",
+                        )
                 log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', i18n.t("msg_translation_finished"), module='gui_main', func='Worker.run')
             self.finished.emit()
         except Exception as e:
@@ -3763,6 +3835,18 @@ class MainWindow(QMainWindow):
         self.vec_threads.setValue(self.config_manager.get("threads", "vectorization", 8))
         self.vec_threads.setToolTip(i18n.t("tooltip_vec_threads"))
 
+        self.prompt_cache_warmup_enabled = QCheckBox(i18n.t(
+            "label_prompt_cache_warmup_enabled",
+            "Complete two requests before parallel cache reuse",
+        ))
+        self.prompt_cache_warmup_enabled.setChecked(bool(
+            self.config_manager.get("general", "prompt_cache_warmup_enabled", True)
+        ))
+        self.prompt_cache_warmup_enabled.setToolTip(i18n.t(
+            "tooltip_prompt_cache_warmup_enabled",
+            "Complete two real translations sequentially before starting the remaining concurrent requests.",
+        ))
+
         self.short_text_batch_enabled = QCheckBox(i18n.t(
             "label_short_text_batch_enabled", "Enable short-text LLM batching"
         ))
@@ -3799,6 +3883,7 @@ class MainWindow(QMainWindow):
 
         threads_layout.addRow(i18n.t("label_trans_threads"), self.trans_threads)
         threads_layout.addRow(i18n.t("label_vec_threads"), self.vec_threads)
+        threads_layout.addRow(self.prompt_cache_warmup_enabled)
         threads_layout.addRow(self.short_text_batch_enabled)
         threads_layout.addRow(i18n.t("label_short_text_batch_max_chars", "Batch max chars:"), self.short_text_batch_max_chars)
         threads_layout.addRow(i18n.t("label_short_text_batch_size", "Batch size:"), self.short_text_batch_size)
@@ -5206,6 +5291,7 @@ class MainWindow(QMainWindow):
                 "mcm_output_language_suffix": mcm_suffix,
                 "mcm_auto_export": mcm_auto_export,
                 "task_completion_sound_enabled": task_completion_sound_enabled,
+                "prompt_cache_warmup_enabled": bool(self.prompt_cache_warmup_enabled.isChecked()),
                 "short_text_batch_enabled": bool(self.short_text_batch_enabled.isChecked()),
                 "short_text_batch_max_chars": self.short_text_batch_max_chars.value(),
                 "short_text_batch_size": self.short_text_batch_size.value(),

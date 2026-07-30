@@ -18,7 +18,9 @@ class LLMClient:
         self.search_fallback_llm_client: Optional[OpenAI] = None
         self.embed_client: Optional[OpenAI] = None
         self.log_callback = log_callback
-        self.cost_tracker = cost_tracker
+        # Always collect lightweight per-run usage. Besides cost estimates this
+        # exposes DeepSeek/Qwen prompt-cache hit rates to the worker log.
+        self.cost_tracker = cost_tracker or CostTracker()
         self._init_clients()
 
     def _init_clients(self) -> None:
@@ -145,15 +147,38 @@ class LLMClient:
             except Exception:
                 return None
 
+        def _first_int(*values: Any) -> Optional[int]:
+            for value in values:
+                parsed = _safe_int(value)
+                if parsed is not None:
+                    return parsed
+            return None
+
+        prompt_tokens = _safe_int(usage.get("prompt_tokens"))
+        cached_tokens = _first_int(
+            # OpenAI and OpenAI-compatible Model Studio / SiliconFlow shape.
+            prompt_details.get("cached_tokens"),
+            # Native DeepSeek OpenAI-compatible response shape.
+            usage.get("prompt_cache_hit_tokens"),
+            # Other compatible providers occasionally report a flat value.
+            usage.get("cached_tokens"),
+            usage.get("cache_read_input_tokens"),
+        )
+        cache_miss_tokens = _first_int(
+            usage.get("prompt_cache_miss_tokens"),
+        )
+        if cache_miss_tokens is None and prompt_tokens is not None and cached_tokens is not None:
+            cache_miss_tokens = max(0, prompt_tokens - cached_tokens)
+
         return {
-            "prompt_tokens": _safe_int(usage.get("prompt_tokens")),
+            "prompt_tokens": prompt_tokens,
             "completion_tokens": _safe_int(usage.get("completion_tokens")),
             "total_tokens": _safe_int(usage.get("total_tokens")),
-            "cached_tokens": _safe_int(
-                prompt_details.get("cached_tokens", usage.get("cached_tokens"))
-            ),
-            "cache_creation_input_tokens": _safe_int(
-                prompt_details.get("cache_creation_input_tokens", usage.get("cache_creation_input_tokens"))
+            "cached_tokens": cached_tokens,
+            "cache_miss_tokens": cache_miss_tokens,
+            "cache_creation_input_tokens": _first_int(
+                prompt_details.get("cache_creation_input_tokens"),
+                usage.get("cache_creation_input_tokens"),
             ),
             "reasoning_tokens": _safe_int(
                 completion_details.get("reasoning_tokens")
@@ -348,6 +373,7 @@ class LLMClient:
             prompt_tokens = usage_stats.get("prompt_tokens")
             completion_tokens = usage_stats.get("completion_tokens")
             cached_tokens = usage_stats.get("cached_tokens")
+            cache_miss_tokens = usage_stats.get("cache_miss_tokens")
             cache_creation_tokens = usage_stats.get("cache_creation_input_tokens")
             reasoning_tokens = usage_stats.get("reasoning_tokens")
 
@@ -358,7 +384,8 @@ class LLMClient:
                     "DEBUG",
                     f"{operation} usage: model={model} prompt_tokens={prompt_tokens or 0} "
                     f"completion_tokens={completion_tokens or 0} total_tokens={usage_stats.get('total_tokens') or 0} "
-                    f"cached_tokens={cached_tokens or 0} cache_creation_input_tokens={cache_creation_tokens or 0} "
+                    f"cached_tokens={cached_tokens or 0} cache_miss_tokens={cache_miss_tokens or 0} "
+                    f"cache_creation_input_tokens={cache_creation_tokens or 0} "
                     f"reasoning_tokens={reasoning_tokens or 0}",
                     module="llm_client",
                     func="_call",
@@ -366,11 +393,14 @@ class LLMClient:
 
             # Track cost if tracker available
             if self.cost_tracker and hasattr(response, "usage") and response.usage:
+                if cached_tokens is not None:
+                    self.cost_tracker.increment_counter("prompt_cache_usage_reports")
                 self.cost_tracker.record(
                     model,
-                    response.usage.prompt_tokens or 0,
-                    response.usage.completion_tokens or 0,
+                    prompt_tokens or 0,
+                    completion_tokens or 0,
                     operation,
+                    cached_prompt_tokens=cached_tokens or 0,
                 )
             if not response.choices:
                 raise ValueError(

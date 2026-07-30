@@ -71,6 +71,42 @@ def _install_fake_client(client: LLMClient, fake_client: _FakeClient):
 
 
 class LLMClientParameterOverrideTests(unittest.TestCase):
+    def test_extract_usage_stats_supports_native_deepseek_cache_fields(self):
+        class _DeepSeekUsage:
+            def model_dump(self):
+                return {
+                    "prompt_tokens": 1200,
+                    "completion_tokens": 80,
+                    "total_tokens": 1280,
+                    "prompt_cache_hit_tokens": 960,
+                    "prompt_cache_miss_tokens": 240,
+                }
+
+        class _DeepSeekResponse:
+            usage = _DeepSeekUsage()
+
+        stats = LLMClient._extract_usage_stats(_DeepSeekResponse())
+
+        self.assertEqual(stats["cached_tokens"], 960)
+        self.assertEqual(stats["cache_miss_tokens"], 240)
+
+    def test_extract_usage_stats_derives_cache_misses_for_nested_compatible_shape(self):
+        class _CompatibleUsage:
+            def model_dump(self):
+                return {
+                    "prompt_tokens": 1000,
+                    "completion_tokens": 50,
+                    "prompt_tokens_details": {"cached_tokens": 640},
+                }
+
+        class _CompatibleResponse:
+            usage = _CompatibleUsage()
+
+        stats = LLMClient._extract_usage_stats(_CompatibleResponse())
+
+        self.assertEqual(stats["cached_tokens"], 640)
+        self.assertEqual(stats["cache_miss_tokens"], 360)
+
     def test_reload_config_closes_old_clients_before_reinitializing(self):
         events = []
         client = object.__new__(LLMClient)

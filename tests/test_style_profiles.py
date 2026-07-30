@@ -85,12 +85,12 @@ class StyleProfileResolverTests(unittest.TestCase):
 
 
 class PromptBuilderStyleProfileTests(unittest.TestCase):
-    def test_single_prompt_injects_resolved_style_into_system_message(self):
+    def test_single_prompt_keeps_system_level_style_and_dynamic_glossary_last(self):
         builder = PromptBuilder(_DummyPromptManager(), _DummyConfig())
 
         system_prompt, user_prompt = builder.build(
             "Speak, traveler.",
-            {},
+            {"traveler": "旅人"},
             prompt_style="nsfw",
             context_hint={"record_type": "DIAL", "text_kind": "dialogue"},
         )
@@ -99,7 +99,29 @@ class PromptBuilderStyleProfileTests(unittest.TestCase):
         self.assertIn("共享世界观规则", system_prompt)
         self.assertIn("成人内容规则", system_prompt)
         self.assertIn("成人对话规则", system_prompt)
+        self.assertLess(user_prompt.index("术语表"), user_prompt.index("原文："))
         self.assertIn("原文：Speak, traveler.", user_prompt)
+
+    def test_single_system_prompt_keeps_shared_core_before_record_profile(self):
+        builder = PromptBuilder(_DummyPromptManager(), _DummyConfig())
+
+        dialogue_system, _ = builder.build(
+            "Speak.", {},
+            prompt_style="default",
+            context_hint={"record_type": "DIAL"},
+        )
+        book_system, _ = builder.build(
+            "A chronicle.", {},
+            prompt_style="default",
+            context_hint={"record_type": "BOOK", "field_type": "TEXT"},
+        )
+
+        dialogue_core = dialogue_system.split("\n\n翻译风格包", 1)[0]
+        book_core = book_system.split("\n\n翻译风格包", 1)[0]
+        self.assertEqual(dialogue_core, book_core)
+        self.assertTrue(dialogue_core.startswith("基础规则 "))
+        self.assertIn("翻译风格包（dialogue，必须遵守）", dialogue_system)
+        self.assertIn("翻译风格包（lore_book，必须遵守）", book_system)
 
     def test_batch_prompt_keeps_item_style_rules_scoped_to_each_item(self):
         builder = PromptBuilder(_DummyPromptManager(), _DummyConfig())

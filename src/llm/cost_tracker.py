@@ -14,6 +14,7 @@ class UsageRecord:
     completion_tokens: int
     estimated_cost: float
     operation: str  # "translate", "keyword_extract", "embedding", "retry", "reformat"
+    cached_prompt_tokens: int = 0
 
 
 # Rough pricing per 1M tokens (input/output) for common models.
@@ -48,8 +49,15 @@ class CostTracker:
             return self._counters.get(name, 0)
 
     def record(self, model: str, prompt_tokens: int, completion_tokens: int,
-               operation: str = "translate") -> None:
-        cost = self.estimate_cost(model, prompt_tokens, completion_tokens)
+               operation: str = "translate",
+               cached_prompt_tokens: int = 0) -> None:
+        cached_prompt_tokens = max(0, min(int(cached_prompt_tokens or 0), int(prompt_tokens or 0)))
+        cost = self.estimate_cost(
+            model,
+            prompt_tokens,
+            completion_tokens,
+            cached_prompt_tokens=cached_prompt_tokens,
+        )
         rec = UsageRecord(
             timestamp=time.time(),
             model=model,
@@ -57,11 +65,13 @@ class CostTracker:
             completion_tokens=completion_tokens,
             estimated_cost=cost,
             operation=operation,
+            cached_prompt_tokens=cached_prompt_tokens,
         )
         with self._lock:
             self._records.append(rec)
 
-    def estimate_cost(self, model: str, prompt_tokens: int, completion_tokens: int) -> float:
+    def estimate_cost(self, model: str, prompt_tokens: int, completion_tokens: int,
+                      cached_prompt_tokens: int = 0) -> float:
         """Estimate cost in USD based on model pricing."""
         # Try exact match first, then prefix match
         pricing = self._pricing.get(model)
@@ -72,7 +82,15 @@ class CostTracker:
                     break
         if pricing is None:
             return 0.0
-        input_cost = (prompt_tokens / 1_000_000) * pricing.get("input", 0)
+        cached_prompt_tokens = max(0, min(int(cached_prompt_tokens or 0), int(prompt_tokens or 0)))
+        uncached_prompt_tokens = max(0, int(prompt_tokens or 0) - cached_prompt_tokens)
+        # Only apply a cache discount when the configured pricing explicitly
+        # provides one. Proxy providers often use different currencies/rates.
+        cached_input_price = pricing.get("cached_input", pricing.get("input", 0))
+        input_cost = (
+            (uncached_prompt_tokens / 1_000_000) * pricing.get("input", 0)
+            + (cached_prompt_tokens / 1_000_000) * cached_input_price
+        )
         output_cost = (completion_tokens / 1_000_000) * pricing.get("output", 0)
         return input_cost + output_cost
 
@@ -86,6 +104,8 @@ class CostTracker:
                 "total_requests": 0,
                 "total_prompt_tokens": 0,
                 "total_completion_tokens": 0,
+                "total_cached_prompt_tokens": 0,
+                "prompt_cache_hit_rate": 0.0,
                 "total_tokens": 0,
                 "estimated_cost_usd": 0.0,
                 "by_operation": {},
@@ -93,16 +113,23 @@ class CostTracker:
             }
         total_prompt = sum(r.prompt_tokens for r in records)
         total_completion = sum(r.completion_tokens for r in records)
+        total_cached_prompt = sum(r.cached_prompt_tokens for r in records)
         total_cost = sum(r.estimated_cost for r in records)
 
         by_op: dict[str, dict] = {}
         for r in records:
             if r.operation not in by_op:
-                by_op[r.operation] = {"requests": 0, "prompt_tokens": 0,
-                                      "completion_tokens": 0, "cost": 0.0}
+                by_op[r.operation] = {
+                    "requests": 0,
+                    "prompt_tokens": 0,
+                    "cached_prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "cost": 0.0,
+                }
             entry = by_op[r.operation]
             entry["requests"] += 1
             entry["prompt_tokens"] += r.prompt_tokens
+            entry["cached_prompt_tokens"] += r.cached_prompt_tokens
             entry["completion_tokens"] += r.completion_tokens
             entry["cost"] += r.estimated_cost
 
@@ -110,6 +137,11 @@ class CostTracker:
             "total_requests": len(records),
             "total_prompt_tokens": total_prompt,
             "total_completion_tokens": total_completion,
+            "total_cached_prompt_tokens": total_cached_prompt,
+            "prompt_cache_hit_rate": (
+                round(total_cached_prompt / total_prompt, 4)
+                if total_prompt > 0 else 0.0
+            ),
             "total_tokens": total_prompt + total_completion,
             "estimated_cost_usd": round(total_cost, 6),
             "by_operation": by_op,

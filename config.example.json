@@ -107,6 +107,7 @@
         "long_text_chunking_enabled": true,
         "long_text_chunk_threshold_chars": 4000,
         "long_text_chunk_target_chars": 1800,
+        "prompt_cache_warmup_enabled": true,
         "short_text_batch_enabled": false,
         "short_text_batch_max_chars": 50,
         "short_text_batch_size": 8,
