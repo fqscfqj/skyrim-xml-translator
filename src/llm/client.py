@@ -43,6 +43,7 @@ class LLMClient:
         self.embed_client = build_client("embedding")
 
     def reload_config(self) -> None:
+        self.close_clients()
         self._init_clients()
 
     def close_clients(self) -> None:
@@ -168,6 +169,8 @@ class LLMClient:
 
         try:
             is_batch = isinstance(text, list)
+            if self.cost_tracker:
+                self.cost_tracker.increment_counter("embedding_api_attempts")
             response = self.embed_client.embeddings.create(input=text, model=model)
 
             if self.cost_tracker:
@@ -205,12 +208,16 @@ class LLMClient:
                              self.config.get("llm", "request_timeout_step", 15)))
         timeout_max = float(self.config.get(config_section, "request_timeout_max",
                             self.config.get("llm", "request_timeout_max", 180)))
+        retry_total_timeout = float(self.config.get(config_section, "retry_total_timeout",
+                        self.config.get("llm", "retry_total_timeout", 300)))
         if timeout_base <= 0:
             timeout_base = 30.0
         if timeout_step < 0:
             timeout_step = 0.0
         if timeout_max < timeout_base:
             timeout_max = timeout_base
+        if retry_total_timeout < 0:
+            retry_total_timeout = 0.0
 
         # Build final parameters
         final_params: dict[str, Any] = {}
@@ -285,6 +292,8 @@ class LLMClient:
 
         def do_call():
             attempt_counter["count"] += 1
+            if self.cost_tracker:
+                self.cost_tracker.increment_counter(f"{operation}_api_attempts")
             call_timeout = min(
                 timeout_base + timeout_step * (attempt_counter["count"] - 1),
                 timeout_max,
@@ -308,6 +317,9 @@ class LLMClient:
                     log_emit(callback, self.config, "WARNING",
                              "Provider rejected response_format; retrying without JSON response format",
                              module="llm_client", func="_call")
+                    if self.cost_tracker:
+                        self.cost_tracker.increment_counter(f"{operation}_api_attempts")
+                        self.cost_tracker.increment_counter("response_format_fallbacks")
                     response = client.chat.completions.create(**call_args)
                 else:
                     raise
@@ -357,6 +369,7 @@ class LLMClient:
             log_callback=callback,
             log_prefix=f"{operation} LLM",
             config_manager=self.config,
+            max_total_seconds=retry_total_timeout,
         )
 
     def chat_completion(self, messages, temperature=None, top_p=None,

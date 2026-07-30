@@ -794,6 +794,15 @@ class VectorStore:
         success_count = 0
         failed_count = 0
         batch_size = 50
+        try:
+            checkpoint_terms = int(self.config.get(
+                "rag", "vector_index_checkpoint_terms", 1000))
+        except Exception:
+            checkpoint_terms = 1000
+        checkpoint_terms = max(batch_size, min(checkpoint_terms, 10_000))
+        pending_vector_batches: list[np.ndarray] = []
+        pending_terms: list[str] = []
+        pending_count = 0
 
         with ThreadPoolExecutor(max_workers=num_threads) as executor:
             for i in range(0, total, batch_size):
@@ -848,9 +857,21 @@ class VectorStore:
                     if progress_callback:
                         progress_callback(int(processed_count / total * 100))
 
-                # Save progress after each batch for resume support
                 if batch_vectors:
-                    new_vectors_np = np.vstack(batch_vectors)
+                    pending_vector_batches.append(np.vstack(batch_vectors))
+                    pending_terms.extend(batch_valid_terms)
+                    pending_count += len(batch_valid_terms)
+
+                should_checkpoint = bool(
+                    pending_vector_batches
+                    and (
+                        pending_count >= checkpoint_terms
+                        or i + batch_size >= total
+                        or self.stop_flag
+                    )
+                )
+                if should_checkpoint:
+                    new_vectors_np = np.vstack(pending_vector_batches)
                     if self.vectors is None:
                         self.vectors = new_vectors_np
                         self._vectors_are_normalized = True
@@ -858,9 +879,12 @@ class VectorStore:
                         combined_vectors = np.vstack([self.vectors, new_vectors_np])
                         self._close_mmap()
                         self.vectors = combined_vectors
-                    self.terms.extend(batch_valid_terms)
-                    self._append_terms_to_lexical_index(batch_valid_terms)
+                    self.terms.extend(pending_terms)
+                    self._append_terms_to_lexical_index(pending_terms)
                     self.save_index_state(embedding_fingerprint=current_fingerprint)
+                    pending_vector_batches.clear()
+                    pending_terms.clear()
+                    pending_count = 0
 
         result = VectorIndexBuildResult(
             mode=mode,

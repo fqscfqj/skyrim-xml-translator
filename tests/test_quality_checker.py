@@ -323,6 +323,28 @@ class QualityCheckerRefusalTests(unittest.TestCase):
 
         self.assertFalse(any(issue.rule_id == "model_refusal" for issue in issues), issues)
 
+    def test_english_fulfill_refusal_is_retryable_error(self):
+        checker = QualityChecker()
+        issues = checker.check(
+            "Translate this forbidden ritual.",
+            "I cannot fulfill this request.",
+            target_lang="zh",
+        )
+
+        self.assertTrue(any(issue.rule_id == "model_refusal" for issue in issues), issues)
+        self.assertTrue(checker.should_retry(issues))
+
+    def test_capability_boundary_refusal_is_retryable_error(self):
+        checker = QualityChecker()
+        issues = checker.check(
+            "Translate this forbidden ritual.",
+            "This request is outside my capabilities.",
+            target_lang="zh",
+        )
+
+        self.assertTrue(any(issue.rule_id == "model_refusal" for issue in issues), issues)
+        self.assertTrue(checker.should_retry(issues))
+
 
 if __name__ == "__main__":
     unittest.main()

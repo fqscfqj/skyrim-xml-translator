@@ -1,8 +1,9 @@
 import unittest
 import tempfile
-from typing import cast
+from typing import Any, cast
 
 from src.llm.client import LLMClient
+from src.llm.cost_tracker import CostTracker
 from src.rag.engine import RAGEngine
 from src.translation.translator import Translator
 
@@ -57,6 +58,74 @@ def _make_translator(llm: _DummyLLMClient, rag_engine: _DummyRAGEngine | None = 
 
 
 class TranslatorRuntimeTagTests(unittest.TestCase):
+    def test_batch_fallback_reuses_precomputed_rag_results(self):
+        llm = _SequenceLLMClient([
+            '{"translations":[{"id":0,"translation":""},{"id":1,"translation":"再见"}]}',
+            '{"translation":"你好"}',
+        ])
+        translator = _make_translator(llm)
+        rag_calls = []
+
+        def fake_rag(text, use_rag=True, log_callback=None):
+            _ = use_rag, log_callback
+            rag_calls.append(str(text))
+            return {
+                "keywords": [str(text)],
+                "keyword_debug": {},
+                "matched_terms": {},
+                "search_debug": [],
+                "glossary_context": "",
+            }
+
+        translator._run_rag_phase = cast(Any, fake_rag)
+
+        results = translator.translate_batch_texts(
+            ["Unique batch hello 7f0a", "Unique batch goodbye 7f0a"],
+            use_rag=True,
+            max_retries=0,
+        )
+
+        self.assertEqual(results, ["你好", "再见"])
+        self.assertEqual(rag_calls, [
+            "Unique batch hello 7f0a",
+            "Unique batch goodbye 7f0a",
+        ])
+        self.assertEqual(llm.calls, 2)
+
+    def test_batch_circuit_bypasses_later_batch_after_high_fallback_rate(self):
+        config = _DummyConfig({
+            ("general", "short_text_batch_circuit_min_items"): 2,
+            ("general", "short_text_batch_circuit_fallback_ratio"): 0.5,
+        })
+        llm = _SequenceLLMClient([
+            '{"translations":[]}',
+            '{"translation":"甲"}',
+            '{"translation":"乙"}',
+            '{"translation":"丙"}',
+            '{"translation":"丁"}',
+        ])
+        llm.cost_tracker = CostTracker()
+        translator = _make_translator(llm, _DummyRAGEngine(config))
+
+        first_results = translator.translate_batch_texts(
+            ["Circuit first alpha 92c1", "Circuit first beta 92c1"],
+            use_rag=False,
+            max_retries=0,
+        )
+        second_results = translator.translate_batch_texts(
+            ["Circuit second gamma 92c1", "Circuit second delta 92c1"],
+            use_rag=False,
+            max_retries=0,
+        )
+
+        self.assertEqual(first_results, ["甲", "乙"])
+        self.assertEqual(second_results, ["丙", "丁"])
+        self.assertTrue(translator._is_batch_circuit_open())
+        self.assertEqual(llm.calls, 5)
+        self.assertEqual(llm.cost_tracker.get_counter("batch_items_attempted"), 2)
+        self.assertEqual(llm.cost_tracker.get_counter("batch_fallback_items"), 2)
+        self.assertEqual(llm.cost_tracker.get_counter("batch_circuit_opens"), 1)
+
     def test_translate_text_accepts_reordered_runtime_tags_for_cjk(self):
         source = "Speak to <Alias.ShortName=Target> with <Alias.ShortName=Questgiver>'s outfit on"
         llm = _DummyLLMClient(
@@ -119,6 +188,41 @@ class TranslatorRuntimeTagTests(unittest.TestCase):
 
         self.assertGreater(llm.calls, 1)
         self.assertEqual("译文" * llm.calls, result)
+
+    def test_long_text_quality_check_only_uses_terms_present_in_source(self):
+        source = (
+            "Alduin appears in this deliberately long translation fixture. "
+            + "Additional context keeps the passage above the chunk threshold. " * 30
+        )
+        llm = _DummyLLMClient('{"translation":"译文"}')
+        translator = _make_translator(llm, _DummyRAGEngine(_DummyConfig({
+            ("general", "long_text_chunking_enabled"): True,
+            ("general", "long_text_chunk_threshold_chars"): 300,
+            ("general", "long_text_chunk_target_chars"): 220,
+        })))
+        captured_terms = []
+
+        translator._run_rag_phase = cast(Any, lambda *args, **kwargs: {
+            "keywords": ["Alduin"],
+            "keyword_debug": {},
+            "matched_terms": {
+                "Alduin": "奥杜因",
+                "Reference Only": "仅参考",
+            },
+            "search_debug": [],
+            "glossary_context": "",
+        })
+
+        def capture_check(source_text, translation, matched_terms=None, **kwargs):
+            _ = source_text, translation, kwargs
+            captured_terms.append(matched_terms)
+            return []
+
+        translator._quality_checker.check = cast(Any, capture_check)
+
+        translator.translate_text(source, use_rag=True, max_retries=0)
+
+        self.assertEqual(captured_terms[-1], {"Alduin": "奥杜因"})
 
     def test_save_translation_cache_persists_cached_results(self):
         with tempfile.TemporaryDirectory() as temp_dir:

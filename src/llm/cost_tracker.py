@@ -33,8 +33,19 @@ class CostTracker:
 
     def __init__(self, pricing: Optional[dict[str, dict[str, float]]] = None):
         self._records: list[UsageRecord] = []
+        self._counters: dict[str, int] = {}
         self._lock = Lock()
         self._pricing = pricing or DEFAULT_PRICING
+
+    def increment_counter(self, name: str, amount: int = 1) -> None:
+        if not name or amount == 0:
+            return
+        with self._lock:
+            self._counters[name] = self._counters.get(name, 0) + int(amount)
+
+    def get_counter(self, name: str) -> int:
+        with self._lock:
+            return self._counters.get(name, 0)
 
     def record(self, model: str, prompt_tokens: int, completion_tokens: int,
                operation: str = "translate") -> None:
@@ -69,6 +80,7 @@ class CostTracker:
         """Return a summary of the current session's usage."""
         with self._lock:
             records = list(self._records)
+            counters = dict(self._counters)
         if not records:
             return {
                 "total_requests": 0,
@@ -77,6 +89,7 @@ class CostTracker:
                 "total_tokens": 0,
                 "estimated_cost_usd": 0.0,
                 "by_operation": {},
+                "counters": counters,
             }
         total_prompt = sum(r.prompt_tokens for r in records)
         total_completion = sum(r.completion_tokens for r in records)
@@ -100,6 +113,7 @@ class CostTracker:
             "total_tokens": total_prompt + total_completion,
             "estimated_cost_usd": round(total_cost, 6),
             "by_operation": by_op,
+            "counters": counters,
         }
 
     def get_total_cost(self) -> float:
@@ -113,6 +127,7 @@ class CostTracker:
     def reset(self) -> None:
         with self._lock:
             self._records.clear()
+            self._counters.clear()
 
 
 def estimate_tokens(text: str) -> int:

@@ -353,7 +353,8 @@ class PromptBuilder:
                 '只输出 JSON：{"translation":"..."}。'
                 "先理解全句含义再用自然地道的{target_language}重新表达，禁止逐词硬译；"
                 "口语称呼和习语按语境真实含义翻译，不取字面义。"
-                "保留所有 XML/HTML 标签、占位符和空白。"
+                "保留所有 XML/HTML 标签、占位符、数字和结构性空白。"
+                "任何 __FMT_*__ 哨兵都是不可修改的格式占位符，必须原样、完整保留。"
                 "术语表仅作候选参考，语义匹配时采用；"
                 "简称不得扩写为全名/头衔，短词不得扩写为整句。"
             )
@@ -444,8 +445,7 @@ class PromptBuilder:
         return stripped
 
     def _compact_glossary_value(self, value: str, max_chars: int) -> str:
-        text = self._text_analyzer.normalize_text(value)
-        text = re.sub(r"\s+", " ", text).strip()
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
         if len(text) <= max_chars:
             return text
         return text[:max_chars].rstrip() + "…"

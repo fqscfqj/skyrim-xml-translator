@@ -21,7 +21,17 @@ class ResponseParser:
         flags=re.DOTALL | re.IGNORECASE,
     )
     _BARE_TRANSLATION_RE = re.compile(
-        r"""translation\s*[:：]\s*(.+)""",
+        r"""^\s*translation\s*[:：]\s*(.+)""",
+        flags=re.IGNORECASE,
+    )
+    _META_TRANSLATION_PREFIX_RE = re.compile(
+        r"^\s*(?:"
+        r"here(?:'s|\s+is)\s+(?:the\s+)?(?:translation|translated\s+text|result)|"
+        r"the\s+translation\s+is|"
+        r"i\s+translated\s+(?:it|this)\s+as|"
+        r"以下(?:是|为)(?:最终)?(?:翻译|译文)|"
+        r"(?:翻译|译文)(?:如下|结果(?:如下)?|是)"
+        r")\s*[:：\-—]?\s*",
         flags=re.IGNORECASE,
     )
 
@@ -103,7 +113,7 @@ class ResponseParser:
         """Parse batch translation response into {item_id: translation}."""
         response_text = "" if response is None else str(response)
         clean_response = self._MARKDOWN_CODE_RE.sub("", response_text).strip()
-        if is_model_refusal(clean_response):
+        if not clean_response.startswith(("{", "[")) and is_model_refusal(clean_response):
             log_emit(log_callback, self.config, "WARNING",
                      "Batch response was a task-level model refusal",
                      module="response_parser", func="parse_batch")
@@ -142,7 +152,7 @@ class ResponseParser:
                     item_id = int(raw_id)
                 except Exception:
                     item_id = pos
-                parsed[item_id] = "" if value is None else str(value)
+                parsed[item_id] = self._coerce_batch_translation(value)
         elif isinstance(raw_items, dict):
             for raw_id, value in raw_items.items():
                 try:
@@ -151,7 +161,7 @@ class ResponseParser:
                     continue
                 if isinstance(value, dict):
                     value = value.get("translation", "")
-                parsed[item_id] = "" if value is None else str(value)
+                parsed[item_id] = self._coerce_batch_translation(value)
         elif isinstance(data, dict):
             # Accept {"0":"...", "1":"..."} as a compact fallback.
             for raw_id, value in data.items():
@@ -161,7 +171,7 @@ class ResponseParser:
                     continue
                 if isinstance(value, dict):
                     value = value.get("translation", "")
-                parsed[item_id] = "" if value is None else str(value)
+                parsed[item_id] = self._coerce_batch_translation(value)
 
         if not parsed:
             log_emit(log_callback, self.config, "WARNING",
@@ -255,9 +265,17 @@ class ResponseParser:
         value = data.get("translation")
         if value is None:
             return True, ""
+        if not isinstance(value, str):
+            return True, ""
+        return True, value if value.strip() else ""
 
-        text = value if isinstance(value, str) else str(value)
-        return True, text if text.strip() else ""
+    @staticmethod
+    def _coerce_batch_translation(value: object) -> str:
+        if not isinstance(value, str) or not value.strip():
+            return ""
+        if is_model_refusal(value):
+            return ""
+        return value
 
     def _try_relaxed_json_extract(self, response: str,
                                   log_callback: Optional[Callable] = None) -> Optional[str]:
@@ -434,6 +452,8 @@ class ResponseParser:
             "<|user|>",
         )
         if any(marker in lowered for marker in unsafe_markers):
+            return True
+        if ResponseParser._META_TRANSLATION_PREFIX_RE.match(text):
             return True
         if re.search(r"(?im)^\s*(system|developer|assistant|user)\s*[:：]", text):
             return True

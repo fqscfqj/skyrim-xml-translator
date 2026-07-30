@@ -113,7 +113,7 @@ class ESPXMLProcessor:
             if prefer_mixed_content:
                 set_node_inner_content(traduit_node, safe_translation, etree)
             else:
-                set_node_text_content(traduit_node, safe_translation)
+                set_node_text_content(traduit_node, safe_translation, etree)
 
     def save_file(self, output_path=None):
         if output_path is None:
@@ -129,7 +129,7 @@ class ESPXMLProcessor:
 
         try:
             if LXML_AVAILABLE:
-                self.tree.write(output_path, encoding="utf-8", xml_declaration=True, pretty_print=True)
+                self.tree.write(output_path, encoding="utf-8", xml_declaration=True, pretty_print=False)
             else:
                 self.tree.write(output_path, encoding="utf-8", xml_declaration=True)
             return True

@@ -213,6 +213,14 @@ class TextAnalyzerPercentProtectionTests(unittest.TestCase):
 
 
 class PromptBuilderGlossaryContextTests(unittest.TestCase):
+    def test_fallback_system_prompt_protects_format_sentinels(self):
+        builder = PromptBuilder(_DummyPromptManager(), _DummyConfig())
+
+        system_prompt, _user_prompt = builder.build("Hello", {})
+
+        self.assertIn("__FMT_*__", system_prompt)
+        self.assertIn("必须原样、完整保留", system_prompt)
+
     def test_glossary_context_respects_configured_max_chars(self):
         builder = PromptBuilder(
             _DummyPromptManager(),
@@ -249,6 +257,16 @@ class PromptBuilderGlossaryContextTests(unittest.TestCase):
         line = next(line for line in context.splitlines() if "Reference ->" in line)
         value = line.split("->", 1)[1].strip()
         self.assertLessEqual(len(value), 61)
+
+    def test_glossary_context_preserves_runtime_tags_in_translation_values(self):
+        builder = PromptBuilder(_DummyPromptManager(), _DummyConfig())
+
+        context = builder.build_glossary_context(
+            "Follower",
+            {"Follower": "<Alias=NPC> 追随者"},
+        )
+
+        self.assertIn("Follower -> <Alias=NPC> 追随者", context)
 
     def test_build_adds_dialogue_whitespace_rule_for_relaxed_spaces(self):
         builder = PromptBuilder(_DummyPromptManager(), _DummyConfig())

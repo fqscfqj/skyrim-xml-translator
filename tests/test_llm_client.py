@@ -2,6 +2,7 @@ import unittest
 from typing import Any, cast
 
 from src.llm.client import LLMClient
+from src.llm.cost_tracker import CostTracker
 
 
 class _DummyConfig:
@@ -54,11 +55,39 @@ class _ResponseFormatRejected(Exception):
     status_code = 400
 
 
+class _ClosableClient:
+    def __init__(self, name, events):
+        self.name = name
+        self.events = events
+
+    def close(self):
+        self.events.append(f"close:{self.name}")
+
+
 def _install_fake_client(client: LLMClient, fake_client: _FakeClient):
     client.llm_client = cast(Any, fake_client)
 
 
 class LLMClientParameterOverrideTests(unittest.TestCase):
+    def test_reload_config_closes_old_clients_before_reinitializing(self):
+        events = []
+        client = object.__new__(LLMClient)
+        client.llm_client = cast(Any, _ClosableClient("llm", events))
+        client.search_llm_client = cast(Any, _ClosableClient("search", events))
+        client.search_fallback_llm_client = cast(Any, _ClosableClient("fallback", events))
+        client.embed_client = cast(Any, _ClosableClient("embedding", events))
+        client._init_clients = cast(Any, lambda: events.append("init"))
+
+        client.reload_config()
+
+        self.assertEqual(events, [
+            "close:llm",
+            "close:search",
+            "close:fallback",
+            "close:embedding",
+            "init",
+        ])
+
     def test_chat_completion_can_disable_configured_thinking(self):
         config = _DummyConfig({
             ("llm", "model"): "deepseek-v4-pro",
@@ -162,7 +191,8 @@ class LLMClientParameterOverrideTests(unittest.TestCase):
             ("llm", "max_retries"): 0,
             ("llm", "json_response_format_enabled"): True,
         })
-        client = LLMClient(config)
+        tracker = CostTracker()
+        client = LLMClient(config, cost_tracker=tracker)
         fake_client = _FakeClient([
             _ResponseFormatRejected("Unrecognized request argument supplied: response_format"),
             _Response(),
@@ -179,6 +209,8 @@ class LLMClientParameterOverrideTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[0]["response_format"], {"type": "json_object"})
         self.assertNotIn("response_format", calls[1])
+        self.assertEqual(tracker.get_counter("translate_api_attempts"), 2)
+        self.assertEqual(tracker.get_counter("response_format_fallbacks"), 1)
 
 
 if __name__ == "__main__":

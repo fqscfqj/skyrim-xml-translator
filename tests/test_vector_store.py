@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -289,6 +290,30 @@ class VectorStoreRebuildTests(unittest.TestCase):
 
         self.assertFalse(store._vectors_are_normalized)
         np.testing.assert_allclose(scores, np.array([1.0, 1.0 / np.sqrt(2)], dtype=np.float32))
+
+    def test_build_index_checkpoints_multiple_embedding_batches_together(self):
+        vector_path, terms_path, _ = self.make_paths()
+        config = _DummyConfig(dimensions=2)
+        config._config["rag"] = {"vector_index_checkpoint_terms": 100}
+        store = VectorStore(
+            vector_path=vector_path,
+            terms_path=terms_path,
+            embed_dim=2,
+            config_manager=config,
+        )
+        terms = [f"Term {index}" for index in range(120)]
+
+        with patch.object(store, "save_index_state") as save_mock:
+            result = store.build_index(
+                glossary_keys=terms,
+                embed_fn=_make_embed_fn(2),
+                num_threads=1,
+                force_full=True,
+            )
+
+        self.assertEqual(result.successful_terms, 120)
+        self.assertEqual(store.vectors.shape, (120, 2))
+        self.assertEqual(save_mock.call_count, 2)
 
 
 class EmbeddingCacheFingerprintTests(unittest.TestCase):

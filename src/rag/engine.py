@@ -35,7 +35,27 @@ class RAGEngine:
 
         # Caches
         kw_cache_size = self.config.get("cache", "translation_cache_size", 50000)
-        embed_cache_size = self.config.get("cache", "embedding_cache_size", 5000)
+        requested_embed_cache_size = self.config.get("cache", "embedding_cache_size", 5000)
+        embed_cache_memory_mb = self.config.get("cache", "embedding_cache_memory_mb", 256)
+        embed_cache_size, safe_embed_cache_limit = self._effective_embedding_cache_size(
+            requested_embed_cache_size,
+            embed_dim,
+            embed_cache_memory_mb,
+        )
+        if embed_cache_size < max(1, self._coerce_positive_int(requested_embed_cache_size, 5000)):
+            log_emit(
+                None,
+                self.config,
+                "WARNING",
+                (
+                    "Clamping embedding cache capacity from "
+                    f"{requested_embed_cache_size} to {embed_cache_size} entries "
+                    f"for {embed_dim}-dimension vectors "
+                    f"(memory budget: {embed_cache_memory_mb} MB, safe limit: {safe_embed_cache_limit})."
+                ),
+                module="rag_engine",
+                func="__init__",
+            )
         try:
             cache_ttl_seconds = max(0.0, float(self.config.get("cache", "cache_ttl_hours", 0)) * 3600)
         except Exception:
@@ -59,6 +79,27 @@ class RAGEngine:
 
         # Track whether we already warned about fingerprint mismatch this session
         self._fingerprint_mismatch_warned: bool = False
+
+    @staticmethod
+    def _coerce_positive_int(value, default: int) -> int:
+        try:
+            parsed = int(value)
+        except Exception:
+            parsed = default
+        return max(1, parsed)
+
+    @classmethod
+    def _effective_embedding_cache_size(cls, requested_size, dimensions,
+                                        memory_budget_mb) -> tuple[int, int]:
+        requested = cls._coerce_positive_int(requested_size, 5000)
+        dimension_count = cls._coerce_positive_int(dimensions, 1536)
+        budget_mb = max(32, min(cls._coerce_positive_int(memory_budget_mb, 256), 4096))
+
+        # Cached embeddings are currently Python list[float] values. A conservative
+        # estimate is one list pointer plus one Python float per dimension (~36 B).
+        estimated_entry_bytes = 512 + dimension_count * 36
+        safe_limit = max(128, (budget_mb * 1024 * 1024) // estimated_entry_bytes)
+        return min(requested, safe_limit), safe_limit
 
     # --- Properties for backward compat ---
 

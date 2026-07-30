@@ -30,9 +30,19 @@ _MODEL_REFUSAL_PATTERNS = (
         re.IGNORECASE,
     ),
     re.compile(
-        r"i (?:cannot|can't|am unable to)[^.!?\n]{0,40}"
-        r"(?:comply with|assist with|translate|process)[^.!?\n]{0,30}"
-        r"(?:request|content|text|task)",
+        r"i (?:cannot|can't|am unable to|am not able to|won't|will not)[^.!?\n]{0,50}"
+        r"(?:comply with|assist with|help with|translate|process|fulfill|generate|write|create)"
+        r"[^.!?\n]{0,40}(?:request|content|text|task)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:this|that)\s+(?:request|content|task)\s+(?:is|falls)\s+"
+        r"(?:outside|beyond)[^.!?\n]{0,30}(?:my\s+)?(?:capabilities|ability|scope)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:该|此|这个)(?:请求|内容|任务)[^。！？\n]{0,20}"
+        r"(?:超出|超过)[^。！？\n]{0,20}(?:能力|处理范围)",
         re.IGNORECASE,
     ),
 )

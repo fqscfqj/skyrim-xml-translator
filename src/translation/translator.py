@@ -58,6 +58,10 @@ class Translator:
         self._last_rag_debug_info_lock = Lock()
         self._runtime_flags = {"mcm_ui_mode": False}
         self._runtime_flags_lock = Lock()
+        self._batch_circuit_lock = Lock()
+        self._batch_circuit_attempted = 0
+        self._batch_circuit_fallback = 0
+        self._batch_circuit_open = False
 
         # Configurable extra retries for format errors
         self._format_extra_retries = int(rag_engine.config.get(
@@ -91,6 +95,43 @@ class Translator:
 
     def save_translation_cache(self) -> None:
         self._translation_cache.save()
+
+    def _increment_runtime_counter(self, name: str, amount: int = 1) -> None:
+        tracker = getattr(self.llm_client, "cost_tracker", None)
+        if tracker is not None and hasattr(tracker, "increment_counter"):
+            tracker.increment_counter(name, amount)
+
+    def reset_batch_circuit(self) -> None:
+        with self._batch_circuit_lock:
+            self._batch_circuit_attempted = 0
+            self._batch_circuit_fallback = 0
+            self._batch_circuit_open = False
+
+    def _is_batch_circuit_open(self) -> bool:
+        with self._batch_circuit_lock:
+            return self._batch_circuit_open
+
+    def _record_batch_outcome(self, attempted: int, fallback: int) -> bool:
+        if attempted <= 0:
+            return False
+        min_items = self._config_int(
+            "general", "short_text_batch_circuit_min_items", 16,
+            min_value=2, max_value=10_000,
+        )
+        fallback_ratio_limit = self._config_float(
+            "general", "short_text_batch_circuit_fallback_ratio", 0.5,
+            min_value=0.1, max_value=1.0,
+        )
+        with self._batch_circuit_lock:
+            self._batch_circuit_attempted += attempted
+            self._batch_circuit_fallback += max(0, min(fallback, attempted))
+            if self._batch_circuit_open or self._batch_circuit_attempted < min_items:
+                return False
+            fallback_ratio = self._batch_circuit_fallback / self._batch_circuit_attempted
+            if fallback_ratio < fallback_ratio_limit:
+                return False
+            self._batch_circuit_open = True
+            return True
 
     def set_runtime_flags(self, flags: Optional[dict] = None) -> None:
         mcm_ui_mode = False
@@ -263,7 +304,8 @@ class Translator:
 
     def translate_text(self, text, use_rag=True, log_callback=None,
                        max_retries=2, return_debug_info: bool = False,
-                       context_hint: Optional[dict] = None):
+                       context_hint: Optional[dict] = None,
+                       _precomputed_rag_result: Optional[dict] = None):
         source_text = str(text) if text is not None else ""
         resolved_context_hint = self._with_resolved_whitespace_policy(
             source_text,
@@ -363,6 +405,7 @@ class Translator:
                 log_emit(log_callback, self.rag_engine.config, "DEBUG",
                          f"Translation cache hit for text (len={len(source_text)})",
                          module="translator", func="translate_text")
+                self._increment_runtime_counter("translation_cache_hits")
                 cached_translation = self._finalize_translation_text(
                     str(cached),
                     target_lang=str(target_lang),
@@ -388,7 +431,11 @@ class Translator:
                      module="translator", func="translate_text")
 
         # RAG phase
-        rag_result = self._run_rag_phase(text, use_rag=use_rag, log_callback=log_callback)
+        rag_result = (
+            _precomputed_rag_result
+            if isinstance(_precomputed_rag_result, dict)
+            else self._run_rag_phase(text, use_rag=use_rag, log_callback=log_callback)
+        )
         keywords = rag_result["keywords"]
         keyword_debug = rag_result["keyword_debug"]
         matched_terms = rag_result["matched_terms"]
@@ -435,6 +482,7 @@ class Translator:
                     self._format_extra_retries if self._has_format_error(issues) else 0
                 )
                 if retry_count > 0:
+                    self._increment_runtime_counter("translation_retry_attempts")
                     retry_context = self._quality_checker.get_retry_context(issues)
                     retry_prompt = self._build_retry_prompt(
                         target_lang, retry_context, last_translation=last_translation)
@@ -595,6 +643,19 @@ class Translator:
             )
             return [result]
 
+        if self._is_batch_circuit_open():
+            return [
+                self.translate_text(
+                    text,
+                    use_rag=use_rag,
+                    log_callback=log_callback,
+                    max_retries=max_retries,
+                    return_debug_info=return_debug_info,
+                    context_hint=hints[idx],
+                )
+                for idx, text in enumerate(texts)
+            ]
+
         try:
             max_chars = int(self.rag_engine.config.get("general", "short_text_batch_max_chars", 50))
         except Exception:
@@ -607,6 +668,7 @@ class Translator:
         results: list[Optional[object]] = [None] * len(texts)
         batch_entries: list[dict] = []
         fallback_indices: set[int] = set()
+        rag_results_by_index: dict[int, dict] = {}
 
         self._reload_prompts_if_needed()
 
@@ -646,6 +708,7 @@ class Translator:
                     target_lang=str(target_lang),
                     reference_id=reference_id,
                     whitespace_policy=quality_whitespace_policy):
+                self._increment_runtime_counter("translation_cache_hits")
                 cached_translation = self._finalize_translation_text(
                     str(cached),
                     target_lang=str(target_lang),
@@ -687,7 +750,9 @@ class Translator:
                 "matched_terms": rag_result["matched_terms"],
                 "glossary_context": rag_result["glossary_context"],
             })
+            rag_results_by_index[idx] = rag_result
 
+        batch_attempted_ids = {int(item["id"]) for item in batch_entries}
         if batch_entries:
             system_prompt, user_content = self._prompt_builder.build_batch(
                 batch_entries, prompt_style, mcm_ui_mode=mcm_ui_mode)
@@ -770,6 +835,23 @@ class Translator:
                     else:
                         results[idx] = translation
 
+        batch_fallback_count = len(batch_attempted_ids.intersection(fallback_indices))
+        self._increment_runtime_counter("batch_items_attempted", len(batch_attempted_ids))
+        self._increment_runtime_counter("batch_fallback_items", batch_fallback_count)
+        if self._record_batch_outcome(len(batch_attempted_ids), batch_fallback_count):
+            self._increment_runtime_counter("batch_circuit_opens")
+            log_emit(
+                log_callback,
+                self.rag_engine.config,
+                "WARNING",
+                (
+                    "Short-text batch circuit opened after persistent fallback failures; "
+                    "remaining batches in this translation run will use single-item calls."
+                ),
+                module="translator",
+                func="translate_batch_texts",
+            )
+
         for idx in sorted(fallback_indices):
             if results[idx] is not None:
                 continue
@@ -777,6 +859,7 @@ class Translator:
                 texts[idx], use_rag=use_rag, log_callback=log_callback,
                 max_retries=max_retries, return_debug_info=return_debug_info,
                 context_hint=hints[idx],
+                _precomputed_rag_result=rag_results_by_index.get(idx),
             )
 
         for idx, result in enumerate(results):
@@ -785,6 +868,7 @@ class Translator:
                     texts[idx], use_rag=use_rag, log_callback=log_callback,
                     max_retries=max_retries, return_debug_info=return_debug_info,
                     context_hint=hints[idx],
+                    _precomputed_rag_result=rag_results_by_index.get(idx),
                 )
 
         return results
@@ -833,6 +917,7 @@ class Translator:
                 log_emit(log_callback, self.rag_engine.config, "DEBUG",
                          f"Long-text translation cache hit for text (len={len(source_text)})",
                          module="translator", func="_translate_long_text")
+                self._increment_runtime_counter("translation_cache_hits")
                 cached_translation = self._finalize_translation_text(
                     str(cached),
                     target_lang=str(target_lang),
@@ -863,6 +948,7 @@ class Translator:
         )
         chunk_target = min(chunk_target, max(1, chunk_threshold))
         chunks = self._text_analyzer.chunk_text(source_text, chunk_target)
+        self._increment_runtime_counter("long_text_chunks", len(chunks))
         if len(chunks) <= 1:
             log_emit(log_callback, self.rag_engine.config, "ERROR",
                      f"Text exceeds chunk threshold but could not be split (len={len(source_text)})",
@@ -1009,14 +1095,14 @@ class Translator:
                     retry_count += 1
 
         translation = "".join(translated_chunks)
-        # For book-sized text, RAG matches are broad background hints and often
-        # include proper names or whole-entry neighbors. Use them for prompting,
-        # but do not let advisory glossary-fragment checks mark the whole book
-        # as warning after an otherwise valid chunked translation.
+        quality_matched_terms = self._filter_matched_terms_present_in_source(
+            source_text,
+            matched_terms,
+        )
         issues = self._quality_checker.check(
             source_text,
             translation,
-            matched_terms=None,
+            matched_terms=quality_matched_terms,
             reference_id=reference_id,
             target_lang=str(target_lang),
             strict_format_whitespace=False,
@@ -1050,6 +1136,17 @@ class Translator:
 
     # --- Internal helpers ---
 
+    def _filter_matched_terms_present_in_source(self, source_text: str,
+                                                matched_terms: Optional[dict]) -> dict:
+        if not matched_terms:
+            return {}
+        return {
+            term: translation
+            for term, translation in matched_terms.items()
+            if isinstance(term, str)
+            and self._prompt_builder._term_appears_in_source(term, source_text)
+        }
+
     def _config_bool(self, section: str, key: str, default: bool) -> bool:
         try:
             value = self.rag_engine.config.get(section, key, default)
@@ -1067,6 +1164,14 @@ class Translator:
                     min_value: int = 1, max_value: int = 100_000) -> int:
         try:
             value = int(self.rag_engine.config.get(section, key, default))
+        except Exception:
+            value = default
+        return max(min_value, min(max_value, value))
+
+    def _config_float(self, section: str, key: str, default: float,
+                      min_value: float, max_value: float) -> float:
+        try:
+            value = float(self.rag_engine.config.get(section, key, default))
         except Exception:
             value = default
         return max(min_value, min(max_value, value))

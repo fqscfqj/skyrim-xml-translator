@@ -96,6 +96,30 @@ class ESPXMLProcessorInnerContentTests(unittest.TestCase):
         self.assertIsNotNone(traduit_node)
         self.assertEqual(0, len(list(traduit_node)))
 
+    def test_update_dest_preserves_existing_cdata_shape(self):
+        file_path = self._write_fixture(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+            "<Root><ESP>"
+            "<EDID>BookText</EDID>"
+            "<ORIGINAL><![CDATA[Source <mag>]]></ORIGINAL>"
+            "<TRADUIT><![CDATA[Old <mag>]]></TRADUIT>"
+            "</ESP></Root>"
+        )
+
+        processor = ESPXMLProcessor()
+        self.assertTrue(processor.load_file(file_path))
+        node = next(processor.get_strings())[0]
+
+        processor.update_dest(node, "新译文 <mag>", overwrite=True)
+        self.assertTrue(processor.save_file(file_path))
+
+        raw_output = Path(file_path).read_text(encoding="utf-8")
+        self.assertIn("<TRADUIT><![CDATA[新译文 <mag>]]></TRADUIT>", raw_output)
+
+        reloaded = ESPXMLProcessor()
+        self.assertTrue(reloaded.load_file(file_path))
+        self.assertEqual("新译文 <mag>", next(reloaded.get_strings())[3])
+
     def test_rejects_doctype_entity_declarations(self):
         file_path = self._write_fixture(
             "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"

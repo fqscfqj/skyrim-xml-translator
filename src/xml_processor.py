@@ -127,7 +127,7 @@ class XMLProcessor:
             if prefer_mixed_content:
                 set_node_inner_content(dest_node, safe_translation, etree)
             else:
-                set_node_text_content(dest_node, safe_translation)
+                set_node_text_content(dest_node, safe_translation, etree)
 
     def save_file(self, output_path=None):
         if output_path is None:
@@ -143,8 +143,7 @@ class XMLProcessor:
         
         try:
             if LXML_AVAILABLE:
-                # lxml supports pretty_print
-                self.tree.write(output_path, encoding="utf-8", xml_declaration=True, pretty_print=True)
+                self.tree.write(output_path, encoding="utf-8", xml_declaration=True, pretty_print=False)
             else:
                 # stdlib ElementTree doesn't support pretty_print argument
                 self.tree.write(output_path, encoding="utf-8", xml_declaration=True)

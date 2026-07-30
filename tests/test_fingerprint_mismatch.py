@@ -74,6 +74,35 @@ class _DummyLLMClient:
         return [1.0, 0.0]
 
 
+class RAGEngineEmbeddingCacheLimitTests(unittest.TestCase):
+    def test_high_dimension_embedding_cache_is_clamped_to_memory_budget(self):
+        config = _DummyConfig({
+            ("cache", "embedding_cache_size"): 100000,
+            ("cache", "embedding_cache_memory_mb"): 256,
+        }, dimensions=4096)
+
+        engine = RAGEngine(config, _DummyLLMClient())
+
+        expected_size, safe_limit = RAGEngine._effective_embedding_cache_size(
+            100000,
+            4096,
+            256,
+        )
+        self.assertEqual(engine._embedding_cache.max_size, expected_size)
+        self.assertEqual(expected_size, safe_limit)
+        self.assertLess(expected_size, 5000)
+
+    def test_requested_embedding_cache_below_limit_is_unchanged(self):
+        config = _DummyConfig({
+            ("cache", "embedding_cache_size"): 1000,
+            ("cache", "embedding_cache_memory_mb"): 256,
+        }, dimensions=1536)
+
+        engine = RAGEngine(config, _DummyLLMClient())
+
+        self.assertEqual(engine._embedding_cache.max_size, 1000)
+
+
 class _DummyVectorStoreWithStatus:
     """VectorStore stand-in whose get_index_status() is controllable."""
 

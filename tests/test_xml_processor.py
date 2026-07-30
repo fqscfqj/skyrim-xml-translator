@@ -110,6 +110,43 @@ class XMLProcessorInnerContentTests(unittest.TestCase):
         rows = list(reloaded.get_strings())
         self.assertEqual("<i>已有译文</i>", rows[0][3])
 
+    def test_update_dest_preserves_existing_cdata_shape(self):
+        file_path = self._write_fixture(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+            "<Root><String id=\"1\" EDID=\"BookText\">"
+            "<Source><![CDATA[Source <mag>]]></Source>"
+            "<Dest><![CDATA[Old <mag>]]></Dest>"
+            "</String></Root>"
+        )
+
+        processor = XMLProcessor()
+        self.assertTrue(processor.load_file(file_path))
+        node = next(processor.get_strings())[0]
+
+        processor.update_dest(node, "新译文 <mag>", overwrite=True)
+        self.assertTrue(processor.save_file(file_path))
+
+        raw_output = Path(file_path).read_text(encoding="utf-8")
+        self.assertIn("<Dest><![CDATA[新译文 <mag>]]></Dest>", raw_output)
+
+        reloaded = XMLProcessor()
+        self.assertTrue(reloaded.load_file(file_path))
+        self.assertEqual("新译文 <mag>", next(reloaded.get_strings())[3])
+
+    def test_save_file_does_not_pretty_print_compact_document(self):
+        file_path = self._write_fixture(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>"
+            "<Root><String id=\"1\"><Source>Hello</Source><Dest></Dest></String></Root>"
+        )
+
+        processor = XMLProcessor()
+        self.assertTrue(processor.load_file(file_path))
+        self.assertTrue(processor.save_file(file_path))
+
+        raw_output = Path(file_path).read_text(encoding="utf-8")
+        self.assertNotIn("\n  <String", raw_output)
+        self.assertIn("<Root><String", raw_output)
+
     def test_rejects_doctype_entity_declarations(self):
         file_path = self._write_fixture(
             "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"

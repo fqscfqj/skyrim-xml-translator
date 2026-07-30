@@ -482,6 +482,9 @@ class Worker(QThread):
     def run(self):
         try:
             total = len(self.items_to_process)
+            reset_batch_circuit = getattr(self.translator, "reset_batch_circuit", None)
+            if callable(reset_batch_circuit):
+                reset_batch_circuit()
             
             # 优化：检测重复内容；相同原文且翻译上下文一致时只翻译一次。
             # 上下文会影响空白策略、MCM UI 规则和标识符保留，不能只按原文去重。
@@ -5237,7 +5240,7 @@ class MainWindow(QMainWindow):
         self.worker.log.connect(self.log)
         self.worker.progress.connect(self._handle_translation_progress)
         self.worker.result_ready.connect(self.update_table_row)
-        # lf.worker.row_failed.connect(self.update_table_row_failed)
+        self.worker.row_failed.connect(self.update_table_row_failed)
         self.worker.rag_debug_ready.connect(self.cache_rag_debug_info)
         self.worker.finished.connect(self.on_translation_finished)
         self._translation_task_active = True

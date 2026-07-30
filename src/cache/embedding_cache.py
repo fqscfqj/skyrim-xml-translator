@@ -50,6 +50,10 @@ class EmbeddingCache:
     def size(self) -> int:
         return self._cache.size()
 
+    @property
+    def max_size(self) -> int:
+        return self._cache._max_size
+
     @staticmethod
     def _make_key(text: str, fingerprint: Any) -> str:
         if isinstance(fingerprint, dict):

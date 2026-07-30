@@ -105,6 +105,32 @@ class ResponseParserTests(unittest.TestCase):
         self.assertEqual(result, "Hi")
         self.assertTrue(any("Rejected unsafe plain-text" in message for message in logs), logs)
 
+    def test_plain_text_fallback_rejects_english_translation_preamble(self):
+        result, logs = self._parse_with_logs(
+            "Here is the translation: 你好",
+            original_text="Hello",
+        )
+
+        self.assertEqual(result, "Hello")
+        self.assertTrue(any("Rejected unsafe plain-text" in message for message in logs), logs)
+
+    def test_plain_text_fallback_rejects_chinese_translation_preamble(self):
+        result, logs = self._parse_with_logs(
+            "以下是翻译：你好",
+            original_text="Hello",
+        )
+
+        self.assertEqual(result, "Hello")
+        self.assertTrue(any("Rejected unsafe plain-text" in message for message in logs), logs)
+
+    def test_non_string_json_translation_is_not_stringified(self):
+        for value in (None, True, 42, {"text": "你好"}, ["你好"]):
+            with self.subTest(value=value):
+                result, _logs = self._parse_with_logs(
+                    '{"translation":' + __import__("json").dumps(value, ensure_ascii=False) + '}'
+                )
+                self.assertEqual(result, "")
+
     def test_empty_content_is_logged_separately(self):
         result, logs = self._parse_with_logs("")
 
@@ -137,6 +163,21 @@ class ResponseParserTests(unittest.TestCase):
 
         self.assertEqual(result, {0: "你好", 1: "再见"})
 
+    def test_batch_non_string_translation_becomes_empty(self):
+        result = self.parser.parse_batch(
+            '{"translations":[{"id":0,"translation":false},{"id":1,"translation":"再见"}]}'
+        )
+
+        self.assertEqual(result, {0: "", 1: "再见"})
+
+    def test_batch_item_refusal_becomes_empty_for_single_item_fallback(self):
+        result = self.parser.parse_batch(
+            '{"translations":[{"id":0,"translation":"I cannot fulfill this request."},'
+            '{"id":1,"translation":"再见"}]}'
+        )
+
+        self.assertEqual(result, {0: "", 1: "再见"})
+
     def test_rejects_chinese_task_level_refusal(self):
         with self.assertRaises(ModelRefusalError):
             self._parse_with_logs("抱歉，我无法协助翻译这段内容。", original_text="Forbidden ritual")
@@ -145,6 +186,20 @@ class ResponseParserTests(unittest.TestCase):
         with self.assertRaises(ModelRefusalError):
             self._parse_with_logs(
                 '{"translation":"As an AI, I am unable to translate this content."}',
+                original_text="Forbidden ritual",
+            )
+
+    def test_rejects_english_fulfill_refusal(self):
+        with self.assertRaises(ModelRefusalError):
+            self._parse_with_logs(
+                "I cannot fulfill this request.",
+                original_text="Forbidden ritual",
+            )
+
+    def test_rejects_capability_boundary_refusal(self):
+        with self.assertRaises(ModelRefusalError):
+            self._parse_with_logs(
+                "This request is outside my capabilities.",
                 original_text="Forbidden ritual",
             )
 
