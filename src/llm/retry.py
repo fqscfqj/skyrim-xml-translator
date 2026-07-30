@@ -21,6 +21,10 @@ class ErrorType(Enum):
     UNKNOWN = "unknown"
 
 
+class RetryTimeBudgetExceeded(TimeoutError):
+    """Raised when retries would exceed the configured total elapsed-time budget."""
+
+
 @dataclass
 class RetryStrategy:
     max_retries: int = 3
@@ -196,6 +200,7 @@ def execute_with_retry(
     log_callback: Optional[Callable] = None,
     log_prefix: str = "LLM",
     config_manager: Any = None,
+    max_total_seconds: float = 0.0,
 ) -> Any:
     """Execute fn() with error-type-aware retry logic.
 
@@ -207,6 +212,7 @@ def execute_with_retry(
     from src.logging_helper import emit as log_emit
 
     attempt = 0
+    started_at = time.monotonic()
     while True:
         try:
             return fn()
@@ -237,6 +243,24 @@ def execute_with_retry(
 
             retry_after = _extract_retry_after_seconds(exc) if error_type == ErrorType.RATE_LIMIT else 0.0
             delay = compute_delay(strategy, attempt, min_delay=retry_after)
+            elapsed = time.monotonic() - started_at
+            if max_total_seconds > 0 and elapsed + delay >= max_total_seconds:
+                log_emit(
+                    log_callback,
+                    config_manager,
+                    "ERROR",
+                    (
+                        f"{log_prefix} retry time budget exhausted "
+                        f"(elapsed={elapsed:.2f}s, next_wait={delay:.2f}s, "
+                        f"limit={max_total_seconds:.2f}s)"
+                    ),
+                    exc=exc,
+                    module="llm.retry",
+                    func="execute_with_retry",
+                )
+                raise RetryTimeBudgetExceeded(
+                    f"{log_prefix} retry time budget exceeded ({max_total_seconds:.2f}s)"
+                ) from exc
             log_emit(log_callback, config_manager, "WARNING",
                      f"{log_prefix} transient error ({error_type.value}, attempt {attempt}/{strategy.max_retries}, wait={delay:.2f}s): {exc}",
                      module="llm.retry", func="execute_with_retry")

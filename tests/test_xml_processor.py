@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from src.xml_processor import XMLProcessor
 
@@ -109,6 +110,88 @@ class XMLProcessorInnerContentTests(unittest.TestCase):
         self.assertTrue(reloaded.load_file(file_path))
         rows = list(reloaded.get_strings())
         self.assertEqual("<i>已有译文</i>", rows[0][3])
+
+    def test_update_dest_preserves_existing_cdata_shape(self):
+        file_path = self._write_fixture(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+            "<Root><String id=\"1\" EDID=\"BookText\">"
+            "<Source><![CDATA[Source <mag>]]></Source>"
+            "<Dest><![CDATA[Old <mag>]]></Dest>"
+            "</String></Root>"
+        )
+
+        processor = XMLProcessor()
+        self.assertTrue(processor.load_file(file_path))
+        node = next(processor.get_strings())[0]
+
+        processor.update_dest(node, "新译文 <mag>", overwrite=True)
+        self.assertTrue(processor.save_file(file_path))
+
+        raw_output = Path(file_path).read_text(encoding="utf-8")
+        self.assertIn("<Dest><![CDATA[新译文 <mag>]]></Dest>", raw_output)
+
+        reloaded = XMLProcessor()
+        self.assertTrue(reloaded.load_file(file_path))
+        self.assertEqual("新译文 <mag>", next(reloaded.get_strings())[3])
+
+    def test_save_file_does_not_pretty_print_compact_document(self):
+        file_path = self._write_fixture(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>"
+            "<Root><String id=\"1\"><Source>Hello</Source><Dest></Dest></String></Root>"
+        )
+
+        processor = XMLProcessor()
+        self.assertTrue(processor.load_file(file_path))
+        self.assertTrue(processor.save_file(file_path))
+
+        raw_output = Path(file_path).read_text(encoding="utf-8")
+        self.assertNotIn("\n  <String", raw_output)
+        self.assertIn("<Root><String", raw_output)
+
+    def test_rejects_doctype_entity_declarations(self):
+        file_path = self._write_fixture(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+            "<!DOCTYPE Root [<!ENTITY xxe SYSTEM \"file:///etc/passwd\">]>\n"
+            "<Root><String id=\"1\"><Source>&xxe;</Source><Dest></Dest></String></Root>"
+        )
+
+        processor = XMLProcessor()
+        self.assertFalse(processor.load_file(file_path))
+
+    def test_rejects_utf16_doctype_entity_declarations(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        file_path = Path(temp_dir.name) / "unsafe-utf16.xml"
+        file_path.write_text(
+            "<?xml version=\"1.0\" encoding=\"utf-16\"?>\n"
+            "<!DOCTYPE Root [<!ENTITY x \"X\">]>\n"
+            "<Root><String id=\"1\"><Source>&x;</Source><Dest/></String></Root>",
+            encoding="utf-16",
+        )
+
+        processor = XMLProcessor()
+        self.assertFalse(processor.load_file(str(file_path)))
+
+    def test_allows_declaration_text_inside_comment_and_cdata(self):
+        file_path = self._write_fixture(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+            "<Root><!-- <!DOCTYPE harmless> -->"
+            "<String id=\"1\"><Source><![CDATA[hello <!ENTITY harmless>]]></Source><Dest/></String>"
+            "</Root>"
+        )
+
+        processor = XMLProcessor()
+        self.assertTrue(processor.load_file(file_path))
+        self.assertEqual("hello <!ENTITY harmless>", next(processor.get_strings())[2])
+
+    def test_missing_lxml_fails_instead_of_using_lossy_fallback(self):
+        file_path = self._write_fixture(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?><Root/>"
+        )
+
+        with patch("src.safe_xml.LXML_AVAILABLE", False):
+            processor = XMLProcessor()
+            self.assertFalse(processor.load_file(file_path))
 
 
 if __name__ == "__main__":

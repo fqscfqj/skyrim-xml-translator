@@ -1,6 +1,7 @@
 """Glossary CRUD, normalization, lookup table, and token DF computation."""
 
 import json
+import hashlib
 import os
 import re
 from typing import Dict, Optional
@@ -74,6 +75,7 @@ class GlossaryManager:
         self._term_token_index: Dict[str, list[str]] = {}
         self._token_df: Dict[str, int] = {}
         self._token_df_dirty = True
+        self._content_fingerprint = ""
 
         self.load()
 
@@ -118,6 +120,17 @@ class GlossaryManager:
         self._glossary_lookup = lookup
         self._term_token_index = term_token_index
         self._token_df_dirty = True
+        raw = json.dumps(
+            self.glossary,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        self._content_fingerprint = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def get_content_fingerprint(self) -> str:
+        return self._content_fingerprint
 
     def _term_index_tokens(self, term: str) -> list[str]:
         """Return entity-like tokens eligible for lexical glossary indexes."""
@@ -143,9 +156,6 @@ class GlossaryManager:
             return []
 
         split_tokens = norm.split()
-        allowed_name_connectors = {"of", "the", "and"}
-        if any((t in self._COMMON_WORDS) and (t not in allowed_name_connectors) for t in split_tokens):
-            return []
         if len(split_tokens) > 8 or len(norm) > 60:
             return []
         return [t for t in split_tokens if t and len(t) >= 2 and t not in self._COMMON_WORDS]

@@ -1,16 +1,8 @@
-import os
-
-try:
-    from lxml import etree  # type: ignore
-    LXML_AVAILABLE = True
-except Exception:
-    import xml.etree.ElementTree as etree  # type: ignore
-    LXML_AVAILABLE = False
-
 from typing import Any, Optional
 
 from src.config.manager import ConfigManager
 from src.logging_helper import emit as log_emit
+from src.safe_xml import etree, parse_xml_file
 from src.xml_content import (
     get_node_inner_content,
     node_has_child_elements,
@@ -28,23 +20,7 @@ class ESPXMLProcessor:
     def load_file(self, file_path: str) -> bool:
         self.file_path = file_path
         try:
-            if LXML_AVAILABLE:
-                parser_kwargs = {
-                    "remove_blank_text": False,
-                    "strip_cdata": False,
-                }
-                try:
-                    if os.path.getsize(file_path) > 10 * 1024 * 1024:
-                        parser_kwargs["huge_tree"] = True
-                except OSError:
-                    pass
-                try:
-                    parser = etree.XMLParser(**parser_kwargs)  # type: ignore[arg-type]
-                except TypeError:
-                    parser = etree.XMLParser(remove_blank_text=False)  # type: ignore[arg-type]
-                self.tree = etree.parse(file_path, parser)
-            else:
-                self.tree = etree.parse(file_path)
+            self.tree = parse_xml_file(file_path)
             self.root = self.tree.getroot()
             return True
         except Exception as e:
@@ -90,7 +66,7 @@ class ESPXMLProcessor:
             if prefer_mixed_content:
                 set_node_inner_content(traduit_node, safe_translation, etree)
             else:
-                set_node_text_content(traduit_node, safe_translation)
+                set_node_text_content(traduit_node, safe_translation, etree)
 
     def save_file(self, output_path=None):
         if output_path is None:
@@ -105,10 +81,7 @@ class ESPXMLProcessor:
             cfg = None
 
         try:
-            if LXML_AVAILABLE:
-                self.tree.write(output_path, encoding="utf-8", xml_declaration=True, pretty_print=True)
-            else:
-                self.tree.write(output_path, encoding="utf-8", xml_declaration=True)
+            self.tree.write(output_path, encoding="utf-8", xml_declaration=True, pretty_print=False)
             return True
         except TypeError:
             try:

@@ -1,11 +1,17 @@
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
 from src.cache.embedding_cache import EmbeddingCache
 from src.rag.vector_store import VectorStore
+
+
+class _ExplodingNormalizedTerms(list):
+    def __getitem__(self, index):
+        raise AssertionError("search_containment should not scan normalized terms without indexed candidates")
 
 
 class _DummyConfig:
@@ -57,6 +63,21 @@ class VectorStoreContainmentTests(unittest.TestCase):
         hits = store.search_containment("dragon", top_k=5, similarities=similarities)
 
         self.assertEqual(hits, [(0, "Scorched Dragonbone"), (1, "Dragon")])
+
+    def test_short_single_token_uses_exact_token_index_only(self):
+        store = self.make_store(["Golden Road", "Go Home", "Gormlaith"])
+
+        hits = store.search_containment("go", top_k=5)
+
+        self.assertEqual(hits, [(1, "Go Home")])
+
+    def test_no_indexed_candidate_returns_empty_without_full_scan(self):
+        store = self.make_store(["Aardvark", "Balmora"])
+        store._normalized_terms = _ExplodingNormalizedTerms(store._normalized_terms)
+
+        hits = store.search_containment("zzz", top_k=5)
+
+        self.assertEqual(hits, [])
 
 
 class VectorStoreRebuildTests(unittest.TestCase):
@@ -183,6 +204,116 @@ class VectorStoreRebuildTests(unittest.TestCase):
             import json
             metadata = json.load(f)
         self.assertEqual(metadata["embedding"]["dimensions"], 3)
+
+    def test_full_rebuild_stores_unit_vectors_and_metadata(self):
+        vector_path, terms_path, meta_path = self.make_paths()
+        store = VectorStore(
+            vector_path=vector_path,
+            terms_path=terms_path,
+            embed_dim=2,
+            config_manager=_DummyConfig(dimensions=2),
+        )
+
+        store.build_index(
+            glossary_keys=["Term A", "Term B"],
+            embed_fn=_make_embed_fn(2),
+            num_threads=1,
+            force_full=True,
+        )
+
+        np.testing.assert_allclose(
+            np.linalg.norm(np.asarray(store.vectors), axis=1),
+            np.ones(2),
+            atol=1e-6,
+        )
+        with open(meta_path, "r", encoding="utf-8") as f:
+            import json
+            metadata = json.load(f)
+        self.assertEqual(metadata["normalization"], {"version": 1, "unit_l2": True})
+
+    def test_legacy_metadata_detects_normalized_index_once_and_persists(self):
+        vector_path, terms_path, meta_path = self.make_paths()
+        self._write_legacy_index(vector_path, terms_path, ["A", "B"], [[1.0, 0.0], [0.0, 1.0]])
+        self._write_metadata(
+            meta_path,
+            base_url="http://embed.local/v1",
+            model="embed-model-a",
+            dimensions=2,
+            term_count=2,
+            vector_count=2,
+        )
+        store = VectorStore(
+            vector_path=vector_path,
+            terms_path=terms_path,
+            embed_dim=2,
+            config_manager=_DummyConfig(dimensions=2),
+        )
+
+        first = store.search_cosine_full(np.array([1.0, 0.0], dtype=np.float32))
+        self.assertTrue(store._vectors_are_normalized)
+        with open(meta_path, "r", encoding="utf-8") as f:
+            import json
+            metadata = json.load(f)
+        self.assertTrue(metadata["normalization"]["unit_l2"])
+
+        reloaded = VectorStore(
+            vector_path=vector_path,
+            terms_path=terms_path,
+            embed_dim=2,
+            config_manager=_DummyConfig(dimensions=2),
+        )
+        self.assertTrue(reloaded._vectors_are_normalized)
+        np.testing.assert_allclose(
+            reloaded.search_cosine_full(np.array([1.0, 0.0], dtype=np.float32)),
+            first,
+        )
+
+    def test_non_normalized_legacy_index_keeps_cosine_compatibility(self):
+        vector_path, terms_path, meta_path = self.make_paths()
+        self._write_legacy_index(vector_path, terms_path, ["A", "B"], [[2.0, 0.0], [1.0, 1.0]])
+        self._write_metadata(
+            meta_path,
+            base_url="http://embed.local/v1",
+            model="embed-model-a",
+            dimensions=2,
+            term_count=2,
+            vector_count=2,
+        )
+        store = VectorStore(
+            vector_path=vector_path,
+            terms_path=terms_path,
+            embed_dim=2,
+            config_manager=_DummyConfig(dimensions=2),
+        )
+
+        scores = store.search_cosine_full(np.array([1.0, 0.0], dtype=np.float32))
+
+        self.assertFalse(store._vectors_are_normalized)
+        np.testing.assert_allclose(scores, np.array([1.0, 1.0 / np.sqrt(2)], dtype=np.float32))
+
+    def test_build_index_checkpoints_multiple_embedding_batches_together(self):
+        vector_path, terms_path, _ = self.make_paths()
+        config = _DummyConfig(dimensions=2)
+        config._config["rag"] = {"vector_index_checkpoint_terms": 100}
+        store = VectorStore(
+            vector_path=vector_path,
+            terms_path=terms_path,
+            embed_dim=2,
+            config_manager=config,
+        )
+        terms = [f"Term {index}" for index in range(120)]
+
+        with patch.object(store, "save_index_state") as save_mock:
+            result = store.build_index(
+                glossary_keys=terms,
+                embed_fn=_make_embed_fn(2),
+                num_threads=1,
+                force_full=True,
+            )
+
+        self.assertEqual(result.successful_terms, 120)
+        self.assertEqual(store.vectors.shape, (120, 2))
+        self.assertEqual(save_mock.call_count, 2)
 
 
 class EmbeddingCacheFingerprintTests(unittest.TestCase):

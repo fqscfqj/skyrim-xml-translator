@@ -41,6 +41,26 @@ class TaskCompletionSoundConfigTests(unittest.TestCase):
         self.assertIn("task_completion_sound_enabled", config_example["general"])
         self.assertFalse(config_example["general"]["task_completion_sound_enabled"])
 
+    def test_long_text_chunk_target_default_does_not_exceed_threshold(self):
+        config = dataclass_to_dict(AppConfig())
+
+        self.assertLessEqual(
+            config["general"]["long_text_chunk_target_chars"],
+            config["general"]["long_text_chunk_threshold_chars"],
+        )
+
+    def test_config_example_long_text_chunk_target_does_not_exceed_threshold(self):
+        repo_root = os.path.dirname(os.path.dirname(__file__))
+        config_example_path = os.path.join(repo_root, "config.example.json")
+
+        with open(config_example_path, "r", encoding="utf-8-sig") as handle:
+            config_example = json.load(handle)
+
+        self.assertLessEqual(
+            config_example["general"]["long_text_chunk_target_chars"],
+            config_example["general"]["long_text_chunk_threshold_chars"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

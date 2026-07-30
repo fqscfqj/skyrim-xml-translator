@@ -5,7 +5,6 @@ import shutil
 import datetime
 import re
 import ctypes
-import xml.etree.ElementTree as stdlib_etree
 from typing import Mapping, Optional, cast
 import csv
 from collections import deque
@@ -40,6 +39,7 @@ from src.config.manager import ConfigManager
 from src.config.schema import RAGConfig
 from src.llm.client import LLMClient
 from src.rag.engine import RAGEngine
+from src.safe_xml import parse_xml_file
 from src.esp_xml_processor import ESPXMLProcessor
 from src.xml_processor import XMLProcessor
 from src.mcm_processor import MCMProcessor
@@ -92,6 +92,42 @@ def determine_translation_completion_state(
     if was_stopped or untranslated > 0:
         return TASK_COMPLETION_STATE_WARNING
     return TASK_COMPLETION_STATE_SUCCESS
+
+
+def read_glossary_csv(
+    file_path: str,
+    *,
+    max_rows: int = 0,
+    max_field_chars: int = 0,
+) -> tuple[dict[str, str], int, int]:
+    terms: dict[str, str] = {}
+    invalid_rows = 0
+    limited_rows = 0
+    max_rows = max(0, int(max_rows or 0))
+    max_field_chars = max(0, int(max_field_chars or 0))
+
+    with open(file_path, "r", encoding="utf-8") as handle:
+        reader = csv.reader(handle)
+        for row_number, row in enumerate(reader, start=1):
+            if max_rows and row_number > max_rows:
+                limited_rows += 1
+                continue
+            if len(row) < 2:
+                invalid_rows += 1
+                continue
+            term = row[0].strip()
+            translation = row[1].strip()
+            if not term or not translation:
+                invalid_rows += 1
+                continue
+            if max_field_chars and (
+                len(term) > max_field_chars or len(translation) > max_field_chars
+            ):
+                limited_rows += 1
+                continue
+            terms[term] = translation
+
+    return terms, invalid_rows, limited_rows
 
 
 class StatusSegmentedProgressBar(QProgressBar):
@@ -268,18 +304,48 @@ class GlossaryWorker(QThread):
                         self.finished.emit()
                         return
 
-                    terms = {}
-                    with open(self.data, 'r', encoding='utf-8') as f:
-                        reader = csv.reader(f)
-                        for row in reader:
-                            if len(row) >= 2:
-                                terms[row[0].strip()] = row[1].strip()
+                    max_rows = self.rag_engine.config.get(
+                        "rag", "glossary_import_max_rows", 0)
+                    max_field_chars = self.rag_engine.config.get(
+                        "rag", "glossary_import_max_field_chars", 0)
+                    terms, invalid_rows, limited_rows = read_glossary_csv(
+                        self.data,
+                        max_rows=max_rows,
+                        max_field_chars=max_field_chars,
+                    )
+                    skipped_rows = invalid_rows + limited_rows
+                    self.task_result = {
+                        "imported_terms": len(terms),
+                        "invalid_rows": invalid_rows,
+                        "limited_rows": limited_rows,
+                    }
+                    if skipped_rows:
+                        log_emit(
+                            self.log.emit,
+                            self.rag_engine.config,
+                            'WARNING',
+                            (
+                                f"Glossary CSV skipped {invalid_rows} invalid rows and "
+                                f"{limited_rows} rows excluded by configured limits."
+                            ),
+                            module='gui_main',
+                            func='GlossaryWorker.run',
+                        )
                     
                     if terms:
                         log_emit(self.log.emit, self.rag_engine.config, 'INFO', i18n.t("msg_found_terms").format(count=len(terms), threads=self.num_threads), module='gui_main', func='GlossaryWorker.run')
                         self.rag_engine.add_terms_batch(terms, num_threads=self.num_threads, progress_callback=self.progress.emit, log_callback=self.log.emit)
-                        self.completion_message = i18n.t("msg_import_completed")
-                        log_emit(self.log.emit, self.rag_engine.config, 'INFO', i18n.t("msg_import_completed"), module='gui_main', func='GlossaryWorker.run')
+                        if skipped_rows:
+                            self.completion_state = TASK_COMPLETION_STATE_WARNING
+                            self.completion_message = i18n.t("msg_import_completed_with_warning").format(
+                                imported=len(terms),
+                                invalid=invalid_rows,
+                                limited=limited_rows,
+                            )
+                            log_emit(self.log.emit, self.rag_engine.config, 'WARNING', self.completion_message, module='gui_main', func='GlossaryWorker.run')
+                        else:
+                            self.completion_message = i18n.t("msg_import_completed")
+                            log_emit(self.log.emit, self.rag_engine.config, 'INFO', self.completion_message, module='gui_main', func='GlossaryWorker.run')
                     else:
                         self.completion_state = TASK_COMPLETION_STATE_WARNING
                         self.completion_message = i18n.t("msg_no_valid_terms")
@@ -359,6 +425,30 @@ class Worker(QThread):
             parsed = default
         return max(min_value, min(max_value, parsed))
 
+    @staticmethod
+    def _translation_context_signature(source: str, context_hint) -> tuple:
+        if not isinstance(context_hint, dict):
+            return ()
+
+        signature = []
+        for key in ("domain", "text_kind", "entry_type", "whitespace_policy"):
+            value = str(context_hint.get(key, "") or "")
+            if value:
+                signature.append((key, value))
+
+        source_text = str(source or "").strip()
+        if source_text and not any(ch.isspace() for ch in source_text):
+            entry_id = str(context_hint.get("entry_id", "") or "")
+            if entry_id:
+                signature.append(("entry_id", entry_id))
+
+        return tuple(signature)
+
+    @classmethod
+    def _translation_dedupe_key(cls, source: str, context_hint) -> tuple:
+        source_text = str(source) if source is not None else ""
+        return source_text, cls._translation_context_signature(source_text, context_hint)
+
     def _build_work_units(self, unique_items: list[tuple]) -> list:
         config = self.translator.rag_engine.config
         enabled = self._config_bool(
@@ -419,27 +509,44 @@ class Worker(QThread):
             )
         return work_units
 
+    def _save_translation_cache(self) -> None:
+        save_cache = getattr(self.translator, "save_translation_cache", None)
+        if not callable(save_cache):
+            return
+        try:
+            save_cache()
+        except Exception as e:
+            log_emit(self.log.emit, self.translator.rag_engine.config, 'WARNING',
+                     f"Failed to save translation cache: {e}",
+                     module='gui_main', func='Worker._save_translation_cache')
+
     def run(self):
         try:
             total = len(self.items_to_process)
+            reset_batch_circuit = getattr(self.translator, "reset_batch_circuit", None)
+            if callable(reset_batch_circuit):
+                reset_batch_circuit()
             
-            # 优化：检测重复内容，相同内容只翻译一次
-            # 构建源文本到行索引列表的映射
-            source_to_rows = {}  # source_text -> [row_idx1, row_idx2, ...]
-            source_to_context = {}  # source_text -> first context hint
+            # 优化：检测重复内容；相同原文且翻译上下文一致时只翻译一次。
+            # 上下文会影响空白策略、MCM UI 规则和标识符保留，不能只按原文去重。
+            source_to_rows = {}  # dedupe_key -> [row_idx1, row_idx2, ...]
+            source_to_context = {}  # dedupe_key -> first context hint
+            source_to_text = {}  # dedupe_key -> source text
             for item in self.items_to_process:
                 row_idx = item[0]
                 source = item[1]
                 context_hint = item[2] if len(item) > 2 else None
-                if source not in source_to_rows:
-                    source_to_rows[source] = []
-                    source_to_context[source] = context_hint
-                source_to_rows[source].append(row_idx)
+                dedupe_key = self._translation_dedupe_key(source, context_hint)
+                if dedupe_key not in source_to_rows:
+                    source_to_rows[dedupe_key] = []
+                    source_to_context[dedupe_key] = context_hint
+                    source_to_text[dedupe_key] = source
+                source_to_rows[dedupe_key].append(row_idx)
             
             # 只需要翻译的唯一文本列表
             unique_items = [
-                (rows[0], source, source_to_context.get(source))
-                for source, rows in source_to_rows.items()
+                (rows[0], source_to_text.get(dedupe_key, ""), source_to_context.get(dedupe_key), dedupe_key)
+                for dedupe_key, rows in source_to_rows.items()
             ]
             unique_count = len(unique_items)
             work_units = self._build_work_units(unique_items)
@@ -453,9 +560,7 @@ class Worker(QThread):
             log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', i18n.t("msg_starting_translation").format(total=unique_count, threads=self.num_threads), module='gui_main', func='Worker.run')
 
             processed_count = 0
-            # 用于存储已翻译结果的缓存
-            translation_cache = {}  # source_text -> translation
-            completed_sources = set()
+            completed_keys = set()
 
             def translate_task(item):
                 if isinstance(item, list):
@@ -484,6 +589,7 @@ class Worker(QThread):
                         for batch_item, batch_result in zip(item, batch_results):
                             row_idx = batch_item[0]
                             source = batch_item[1]
+                            dedupe_key = batch_item[3] if len(batch_item) > 3 else self._translation_dedupe_key(source, batch_item[2] if len(batch_item) > 2 else None)
                             translation, debug_info = batch_result
                             result_status = "success"
                             result_details = ""
@@ -494,6 +600,7 @@ class Worker(QThread):
                                 "ok": True,
                                 "row_idx": row_idx,
                                 "source": source,
+                                "dedupe_key": dedupe_key,
                                 "translation": translation,
                                 "debug_info": debug_info,
                                 "task_logs": task_logs,
@@ -507,6 +614,7 @@ class Worker(QThread):
                             row_idx = batch_item[0]
                             source = batch_item[1]
                             context_hint = batch_item[2] if len(batch_item) > 2 else None
+                            dedupe_key = batch_item[3] if len(batch_item) > 3 else self._translation_dedupe_key(source, context_hint)
                             try:
                                 translation, debug_info = self.translator.translate_text(
                                     source,
@@ -523,6 +631,7 @@ class Worker(QThread):
                                     "ok": True,
                                     "row_idx": row_idx,
                                     "source": source,
+                                    "dedupe_key": dedupe_key,
                                     "translation": translation,
                                     "debug_info": debug_info,
                                     "task_logs": task_logs,
@@ -534,6 +643,7 @@ class Worker(QThread):
                                     "ok": False,
                                     "row_idx": row_idx,
                                     "source": source,
+                                    "dedupe_key": dedupe_key,
                                     "error": f"{batch_error}; fallback failed: {e}",
                                     "task_logs": task_logs,
                                 })
@@ -542,6 +652,7 @@ class Worker(QThread):
                 row_idx = item[0]
                 source = item[1]
                 context_hint = item[2] if len(item) > 2 else None
+                dedupe_key = item[3] if len(item) > 3 else self._translation_dedupe_key(source, context_hint)
                 task_logs: list[str] = []
                 if not self.is_running or self.stop_receiving:
                     return None
@@ -572,6 +683,7 @@ class Worker(QThread):
                         "ok": True,
                         "row_idx": row_idx,
                         "source": source,
+                        "dedupe_key": dedupe_key,
                         "translation": translation,
                         "debug_info": debug_info,
                         "task_logs": task_logs,
@@ -583,6 +695,7 @@ class Worker(QThread):
                         "ok": False,
                         "row_idx": row_idx,
                         "source": source,
+                        "dedupe_key": dedupe_key,
                         "error": str(e),
                         "task_logs": task_logs,
                     }
@@ -647,7 +760,8 @@ class Worker(QThread):
                                 result_details = str(result.get("result_details", "") or "")
                                 safe_translation = str(translation) if translation is not None else ""
                                 safe_source = str(source) if source is not None else ""
-                                all_rows = source_to_rows.get(source, [row_idx])
+                                dedupe_key = result.get("dedupe_key", self._translation_dedupe_key(safe_source, None))
+                                all_rows = source_to_rows.get(dedupe_key, [row_idx])
 
                                 if not self.stop_receiving:
                                     for target_row in all_rows:
@@ -658,8 +772,7 @@ class Worker(QThread):
                                             result_details,
                                         )
 
-                                    translation_cache[source] = safe_translation
-                                    completed_sources.add(source)
+                                    completed_keys.add(dedupe_key)
 
                                     status_line = ""
                                     status_suffix = ""
@@ -691,13 +804,14 @@ class Worker(QThread):
                                 source = result.get("source", "")
                                 error = result.get("error", "")
                                 task_logs = list(result.get("task_logs", []))
+                                dedupe_key = result.get("dedupe_key", self._translation_dedupe_key(source, None))
                                 if not self.stop_receiving:
                                     log_emit(self.log.emit, self.translator.rag_engine.config, 'ERROR', f"Error translating {str(source)[:20]}...: {error}", module='gui_main', func='Worker.run')
                                     safe_source = str(source) if source is not None else ""
-                                    all_rows = source_to_rows.get(source, [row_idx])
+                                    all_rows = source_to_rows.get(dedupe_key, [row_idx])
                                     for target_row in all_rows:
                                         self.row_failed.emit(target_row, str(error))
-                                    completed_sources.add(source)
+                                    completed_keys.add(dedupe_key)
                                     if safe_source:
                                         self.rag_debug_ready.emit(safe_source, {
                                             "original_text": safe_source,
@@ -715,7 +829,7 @@ class Worker(QThread):
                         if not self.stop_receiving and future_processed_count > 0:
                             processed_count += future_processed_count
                             # 进度基于总项目数而非唯一项目数，以反映实际完成进度
-                            completed_total = sum(len(source_to_rows.get(s, [])) for s in completed_sources)
+                            completed_total = sum(len(source_to_rows.get(key, [])) for key in completed_keys)
                             self.progress.emit(int(completed_total / total * 100))
 
                         # Submit next task
@@ -738,12 +852,15 @@ class Worker(QThread):
                 except TypeError:
                     executor.shutdown(wait=False)
 
+            self._save_translation_cache()
+
             if not self.stop_receiving:
                 log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', i18n.t("msg_translation_finished"), module='gui_main', func='Worker.run')
             self.finished.emit()
         except Exception as e:
             log_emit(self.log.emit, self.translator.rag_engine.config, 'ERROR', i18n.t("msg_worker_error").format(error=e), exc=e, module='gui_main', func='Worker.run')
             try:
+                self._save_translation_cache()
                 self.finished.emit()
             except Exception:
                 pass
@@ -2087,7 +2204,7 @@ class MainWindow(QMainWindow):
             QTabBar::tab {
                 background-color: #e9eef5;
                 color: #6b7280;
-                padding: 7px 18px;
+                padding: 6px 14px;
                 border: 1px solid #d2dbe7;
                 border-bottom: none;
                 margin-right: 2px;
@@ -2102,20 +2219,21 @@ class MainWindow(QMainWindow):
                 color: #475569;
             }
             QPushButton {
-                border: 1px solid #ced8e4;
-                border-radius: 4px;
-                padding: 5px 14px;
-                background-color: #f4f7fb;
-                color: #334155;
+                border: 1px solid #c8d3e2;
+                border-radius: 6px;
+                padding: 4px 12px;
+                background-color: #f8fafc;
+                color: #1f2937;
                 min-height: 22px;
+                font-weight: 500;
             }
             QPushButton:hover {
                 background-color: #ffffff;
-                border-color: #b8c7d9;
-                color: #1f2937;
+                border-color: #7aa2f7;
+                color: #1d4ed8;
             }
             QPushButton:pressed {
-                background-color: #e7eef8;
+                background-color: #e0ecff;
                 border-color: #2563eb;
             }
             QPushButton:disabled {
@@ -2124,9 +2242,9 @@ class MainWindow(QMainWindow):
                 border-color: #dde5ef;
             }
             QLineEdit {
-                border: 1px solid #ced8e4;
-                border-radius: 4px;
-                padding: 4px 8px;
+                border: 1px solid #c8d3e2;
+                border-radius: 6px;
+                padding: 3px 8px;
                 background-color: #ffffff;
                 color: #334155;
                 selection-background-color: #2563eb;
@@ -2134,11 +2252,12 @@ class MainWindow(QMainWindow):
                 min-height: 22px;
             }
             QLineEdit:focus {
-                border-color: #4a80e4;
+                border-color: #2563eb;
+                background-color: #fbfdff;
             }
             QPlainTextEdit {
                 border: 1px solid #d2dbe7;
-                border-radius: 4px;
+                border-radius: 6px;
                 background-color: #ffffff;
                 color: #334155;
                 selection-background-color: #dbeafe;
@@ -2224,15 +2343,16 @@ class MainWindow(QMainWindow):
                 border-radius: 4px;
             }
             QComboBox {
-                border: 1px solid #ced8e4;
-                border-radius: 4px;
-                padding: 4px 8px;
+                border: 1px solid #c8d3e2;
+                border-radius: 6px;
+                padding: 3px 8px;
                 background-color: #ffffff;
                 color: #334155;
                 min-height: 22px;
             }
             QComboBox:focus {
-                border-color: #4a80e4;
+                border-color: #2563eb;
+                background-color: #fbfdff;
             }
             QComboBox::drop-down {
                 border: none;
@@ -2246,15 +2366,16 @@ class MainWindow(QMainWindow):
                 selection-color: #1e3a8a;
             }
             QAbstractSpinBox {
-                border: 1px solid #ced8e4;
-                border-radius: 4px;
-                padding: 4px 8px;
+                border: 1px solid #c8d3e2;
+                border-radius: 6px;
+                padding: 3px 8px;
                 background-color: #ffffff;
                 color: #334155;
                 min-height: 22px;
             }
             QAbstractSpinBox:focus {
-                border-color: #4a80e4;
+                border-color: #2563eb;
+                background-color: #fbfdff;
             }
             QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {
                 background-color: #eef2f7;
@@ -2268,22 +2389,26 @@ class MainWindow(QMainWindow):
             }
             QCheckBox {
                 color: #334155;
-                spacing: 8px;
+                spacing: 7px;
             }
             QCheckBox::indicator {
-                width: 16px;
-                height: 16px;
+                width: 15px;
+                height: 15px;
                 border: 1px solid #94a3b8;
-                border-radius: 3px;
+                border-radius: 4px;
                 background-color: #ffffff;
             }
             QCheckBox::indicator:hover {
-                border-color: #4a80e4;
+                border-color: #2563eb;
                 background-color: #eff6ff;
             }
             QCheckBox::indicator:checked {
-                border-color: #4a80e4;
+                border-color: #2563eb;
                 background-color: #2563eb;
+            }
+            QCheckBox::indicator:disabled {
+                border-color: #d7e0ec;
+                background-color: #eef2f7;
             }
             QTreeWidget {
                 border: 1px solid #d2dbe7;
@@ -2333,7 +2458,7 @@ class MainWindow(QMainWindow):
         QTabBar::tab {
             background-color: #181c22;
             color: #7a8799;
-            padding: 7px 18px;
+            padding: 6px 14px;
             border: 1px solid #2a3040;
             border-bottom: none;
             margin-right: 2px;
@@ -2349,16 +2474,17 @@ class MainWindow(QMainWindow):
         }
         QPushButton {
             border: 1px solid #353d4e;
-            border-radius: 4px;
-            padding: 5px 14px;
+            border-radius: 6px;
+            padding: 4px 12px;
             background-color: #252b38;
-            color: #c8d4e4;
+            color: #dce7f7;
             min-height: 22px;
+            font-weight: 500;
         }
         QPushButton:hover {
             background-color: #2e3648;
-            border-color: #4a5870;
-            color: #e0e8f8;
+            border-color: #76a9ff;
+            color: #ffffff;
         }
         QPushButton:pressed {
             background-color: #1a2030;
@@ -2371,8 +2497,8 @@ class MainWindow(QMainWindow):
         }
         QLineEdit {
             border: 1px solid #353d4e;
-            border-radius: 4px;
-            padding: 4px 8px;
+            border-radius: 6px;
+            padding: 3px 8px;
             background-color: #161a20;
             color: #dce3ec;
             selection-background-color: #2f6fd4;
@@ -2380,11 +2506,12 @@ class MainWindow(QMainWindow):
             min-height: 22px;
         }
         QLineEdit:focus {
-            border-color: #4a80e4;
+            border-color: #76a9ff;
+            background-color: #111821;
         }
         QPlainTextEdit {
             border: 1px solid #2a3040;
-            border-radius: 4px;
+            border-radius: 6px;
             background-color: #13171d;
             color: #c8d4e4;
             selection-background-color: #1d4a9a;
@@ -2470,14 +2597,15 @@ class MainWindow(QMainWindow):
         }
         QComboBox {
             border: 1px solid #353d4e;
-            border-radius: 4px;
-            padding: 4px 8px;
+            border-radius: 6px;
+            padding: 3px 8px;
             background-color: #161a20;
             color: #dce3ec;
             min-height: 22px;
         }
         QComboBox:focus {
-            border-color: #4a80e4;
+            border-color: #76a9ff;
+            background-color: #111821;
         }
         QComboBox::drop-down {
             border: none;
@@ -2492,14 +2620,15 @@ class MainWindow(QMainWindow):
         }
         QAbstractSpinBox {
             border: 1px solid #353d4e;
-            border-radius: 4px;
-            padding: 4px 8px;
+            border-radius: 6px;
+            padding: 3px 8px;
             background-color: #161a20;
             color: #dce3ec;
             min-height: 22px;
         }
         QAbstractSpinBox:focus {
-            border-color: #4a80e4;
+            border-color: #76a9ff;
+            background-color: #111821;
         }
         QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {
             background-color: #252b35;
@@ -2513,22 +2642,26 @@ class MainWindow(QMainWindow):
         }
         QCheckBox {
             color: #c8d4e4;
-            spacing: 8px;
+            spacing: 7px;
         }
         QCheckBox::indicator {
-            width: 16px;
-            height: 16px;
+            width: 15px;
+            height: 15px;
             border: 1px solid #4a5468;
-            border-radius: 3px;
+            border-radius: 4px;
             background-color: #161a20;
         }
         QCheckBox::indicator:hover {
-            border-color: #4a80e4;
+            border-color: #76a9ff;
             background-color: #1a2030;
         }
         QCheckBox::indicator:checked {
-            border-color: #4a80e4;
+            border-color: #76a9ff;
             background-color: #2f6fd4;
+        }
+        QCheckBox::indicator:disabled {
+            border-color: #303541;
+            background-color: #242932;
         }
         QTreeWidget {
             border: 1px solid #2a3040;
@@ -3116,10 +3249,10 @@ class MainWindow(QMainWindow):
         if not is_dark:
             return """
             #configTab QGroupBox {
-                border: 1px solid #d2dbe7;
-                border-radius: 8px;
+                border: 1px solid #d8e2ef;
+                border-radius: 9px;
                 margin-top: 10px;
-                padding-top: 10px;
+                padding-top: 11px;
                 background-color: #ffffff;
                 color: #334155;
             }
@@ -3127,11 +3260,15 @@ class MainWindow(QMainWindow):
                 subcontrol-origin: margin;
                 left: 12px;
                 padding: 0 6px;
-                color: #475569;
+                color: #1e3a8a;
+                font-weight: 700;
             }
-            #configTab QScrollArea {
+            QScrollArea {
                 border: none;
-                background: transparent;
+                background: #f6f8fb;
+            }
+            QWidget#configTab {
+                background: #f6f8fb;
             }
             #configTab QLabel {
                 color: #334155;
@@ -3139,10 +3276,10 @@ class MainWindow(QMainWindow):
             #configTab QLineEdit,
             #configTab QComboBox,
             #configTab QAbstractSpinBox {
-                min-height: 28px;
+                min-height: 24px;
                 padding: 2px 8px;
-                border: 1px solid #ced8e4;
-                border-radius: 5px;
+                border: 1px solid #c8d3e2;
+                border-radius: 6px;
                 background-color: #ffffff;
                 color: #334155;
                 selection-background-color: #2563eb;
@@ -3158,7 +3295,7 @@ class MainWindow(QMainWindow):
             #configTab QComboBox:disabled,
             #configTab QAbstractSpinBox:disabled {
                 border-color: #dde5ef;
-                background-color: #eef1f5;
+                background-color: #eef2f7;
                 color: #94a3b8;
             }
             #configTab QComboBox::drop-down {
@@ -3167,25 +3304,25 @@ class MainWindow(QMainWindow):
                 background: transparent;
             }
             #configTab QCheckBox {
-                spacing: 8px;
+                spacing: 7px;
                 color: #334155;
             }
             #configTab QCheckBox:disabled {
                 color: #94a3b8;
             }
             #configTab QCheckBox::indicator {
-                width: 16px;
-                height: 16px;
+                width: 15px;
+                height: 15px;
                 border: 1px solid #94a3b8;
                 border-radius: 4px;
                 background-color: #ffffff;
             }
             #configTab QCheckBox::indicator:hover {
-                border-color: #4a80e4;
+                border-color: #2563eb;
                 background-color: #eff6ff;
             }
             #configTab QCheckBox::indicator:checked {
-                border-color: #4a80e4;
+                border-color: #2563eb;
                 background-color: #2563eb;
             }
             #configTab QCheckBox::indicator:checked:hover {
@@ -3199,26 +3336,37 @@ class MainWindow(QMainWindow):
                 border-color: #a7c0f5;
                 background-color: #bfdbfe;
             }
+            #configTab QWidget#paramOptionRow {
+                border-radius: 7px;
+                background-color: #f8fafc;
+            }
+            #configTab QWidget#paramOptionRow:hover {
+                background-color: #eef6ff;
+            }
             """
 
         return """
         #configTab QGroupBox {
-            border: 1px solid #353a45;
-            border-radius: 8px;
+            border: 1px solid #303847;
+            border-radius: 9px;
             margin-top: 10px;
-            padding-top: 10px;
-            background-color: #20242b;
+            padding-top: 11px;
+            background-color: #20242d;
             color: #e6edf3;
         }
         #configTab QGroupBox::title {
             subcontrol-origin: margin;
             left: 12px;
             padding: 0 6px;
-            color: #f3f4f6;
+            color: #dbeafe;
+            font-weight: 700;
         }
-        #configTab QScrollArea {
+        QScrollArea {
             border: none;
-            background: transparent;
+            background: #151922;
+        }
+        QWidget#configTab {
+            background: #151922;
         }
         #configTab QLabel {
             color: #d8dee9;
@@ -3226,10 +3374,10 @@ class MainWindow(QMainWindow):
         #configTab QLineEdit,
         #configTab QComboBox,
         #configTab QAbstractSpinBox {
-            min-height: 28px;
+            min-height: 24px;
             padding: 2px 8px;
             border: 1px solid #4a5366;
-            border-radius: 5px;
+            border-radius: 6px;
             background-color: #14181f;
             color: #f3f4f6;
             selection-background-color: #4c7dff;
@@ -3254,15 +3402,15 @@ class MainWindow(QMainWindow):
             background: transparent;
         }
         #configTab QCheckBox {
-            spacing: 8px;
+            spacing: 7px;
             color: #dce3ec;
         }
         #configTab QCheckBox:disabled {
             color: #9099ab;
         }
         #configTab QCheckBox::indicator {
-            width: 16px;
-            height: 16px;
+            width: 15px;
+            height: 15px;
             border: 1px solid #5a6477;
             border-radius: 4px;
             background-color: #14181f;
@@ -3286,6 +3434,13 @@ class MainWindow(QMainWindow):
             border-color: #55688f;
             background-color: #3c5cb2;
         }
+        #configTab QWidget#paramOptionRow {
+            border-radius: 7px;
+            background-color: #262c37;
+        }
+        #configTab QWidget#paramOptionRow:hover {
+            background-color: #2c3545;
+        }
         """
 
     def create_config_tab(self):
@@ -3303,7 +3458,8 @@ class MainWindow(QMainWindow):
         form_widget = QWidget()
         form_widget.setObjectName("configTab")
         form_layout = QVBoxLayout(form_widget)
-        form_layout.setSpacing(10)
+        form_layout.setContentsMargins(8, 6, 8, 10)
+        form_layout.setSpacing(8)
 
         param_tooltips = {
             "temperature": i18n.t(
@@ -3327,8 +3483,9 @@ class MainWindow(QMainWindow):
         # Wrap settings in a scroll area so controls remain usable on smaller windows.
         llm_group = QGroupBox(i18n.t('group_llm_settings'))
         llm_layout = QFormLayout(llm_group)
-        llm_layout.setContentsMargins(12, 10, 12, 12)
-        llm_layout.setSpacing(8)
+        llm_layout.setContentsMargins(12, 9, 12, 12)
+        llm_layout.setHorizontalSpacing(10)
+        llm_layout.setVerticalSpacing(6)
 
         self.llm_base = QLineEdit(self.config_manager.get("llm", "base_url"))
         self.llm_key = QLineEdit(self.config_manager.get("llm", "api_key"))
@@ -3353,8 +3510,10 @@ class MainWindow(QMainWindow):
                 lambda checked, w=widget: w.setEnabled(bool(checked))
             )
             row_widget = QWidget()
+            row_widget.setObjectName("paramOptionRow")
             row_layout = QHBoxLayout(row_widget)
-            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setContentsMargins(6, 3, 6, 3)
+            row_layout.setSpacing(8)
             row_layout.addWidget(checkbox)
             row_layout.addWidget(widget)
             row_layout.addStretch()
@@ -3400,8 +3559,9 @@ class MainWindow(QMainWindow):
         # --- Search LLM Settings ---
         search_group = QGroupBox(i18n.t('group_search_llm_settings'))
         search_layout = QFormLayout(search_group)
-        search_layout.setContentsMargins(12, 10, 12, 12)
-        search_layout.setSpacing(8)
+        search_layout.setContentsMargins(12, 9, 12, 12)
+        search_layout.setHorizontalSpacing(10)
+        search_layout.setVerticalSpacing(6)
 
         self.search_base = QLineEdit(self.config_manager.get("llm_search", "base_url"))
         self.search_key = QLineEdit(self.config_manager.get("llm_search", "api_key"))
@@ -3426,8 +3586,10 @@ class MainWindow(QMainWindow):
                 lambda checked, w=widget: w.setEnabled(bool(checked))
             )
             row_widget = QWidget()
+            row_widget.setObjectName("paramOptionRow")
             row_layout = QHBoxLayout(row_widget)
-            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setContentsMargins(6, 3, 6, 3)
+            row_layout.setSpacing(8)
             row_layout.addWidget(checkbox)
             row_layout.addWidget(widget)
             row_layout.addStretch()
@@ -3473,8 +3635,9 @@ class MainWindow(QMainWindow):
         # --- Search Fallback LLM Settings ---
         search_fallback_group = QGroupBox(i18n.t('group_search_fallback_llm_settings'))
         search_fallback_layout = QFormLayout(search_fallback_group)
-        search_fallback_layout.setContentsMargins(12, 10, 12, 12)
-        search_fallback_layout.setSpacing(8)
+        search_fallback_layout.setContentsMargins(12, 9, 12, 12)
+        search_fallback_layout.setHorizontalSpacing(10)
+        search_fallback_layout.setVerticalSpacing(6)
 
         self.search_fallback_base = QLineEdit(self.config_manager.get("llm_search_fallback", "base_url"))
         self.search_fallback_key = QLineEdit(self.config_manager.get("llm_search_fallback", "api_key"))
@@ -3498,8 +3661,10 @@ class MainWindow(QMainWindow):
                 lambda checked, w=widget: w.setEnabled(bool(checked))
             )
             row_widget = QWidget()
+            row_widget.setObjectName("paramOptionRow")
             row_layout = QHBoxLayout(row_widget)
-            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setContentsMargins(6, 3, 6, 3)
+            row_layout.setSpacing(8)
             row_layout.addWidget(checkbox)
             row_layout.addWidget(widget)
             row_layout.addStretch()
@@ -3545,8 +3710,9 @@ class MainWindow(QMainWindow):
 
         embedding_group = QGroupBox(i18n.t('group_embedding_settings'))
         embedding_layout = QFormLayout(embedding_group)
-        embedding_layout.setContentsMargins(12, 10, 12, 12)
-        embedding_layout.setSpacing(8)
+        embedding_layout.setContentsMargins(12, 9, 12, 12)
+        embedding_layout.setHorizontalSpacing(10)
+        embedding_layout.setVerticalSpacing(6)
 
         self.embed_base = QLineEdit(self.config_manager.get("embedding", "base_url"))
         self.embed_key = QLineEdit(self.config_manager.get("embedding", "api_key"))
@@ -3567,8 +3733,9 @@ class MainWindow(QMainWindow):
 
         threads_group = QGroupBox(i18n.t('group_threads'))
         threads_layout = QFormLayout(threads_group)
-        threads_layout.setContentsMargins(12, 10, 12, 12)
-        threads_layout.setSpacing(8)
+        threads_layout.setContentsMargins(12, 9, 12, 12)
+        threads_layout.setHorizontalSpacing(10)
+        threads_layout.setVerticalSpacing(6)
 
         self.trans_threads = NoWheelSpinBox()
         self.trans_threads.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
@@ -3625,8 +3792,9 @@ class MainWindow(QMainWindow):
 
         rag_group = QGroupBox(i18n.t('group_rag_settings'))
         rag_layout = QFormLayout(rag_group)
-        rag_layout.setContentsMargins(12, 10, 12, 12)
-        rag_layout.setSpacing(8)
+        rag_layout.setContentsMargins(12, 9, 12, 12)
+        rag_layout.setHorizontalSpacing(10)
+        rag_layout.setVerticalSpacing(6)
 
         self.rag_threshold = NoWheelDoubleSpinBox()
         self.rag_threshold.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
@@ -3787,6 +3955,38 @@ class MainWindow(QMainWindow):
         self.rag_keyword_weight_anchor_boost.setToolTip(i18n.t("tooltip_rag_keyword_weight_anchor_boost"))
         expert_layout.addRow(i18n.t("label_rag_keyword_weight_anchor_boost", "Anchor boost:"), self.rag_keyword_weight_anchor_boost)
 
+        self.rag_glossary_context_max_chars = NoWheelSpinBox()
+        self.rag_glossary_context_max_chars.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_glossary_context_max_chars.setRange(0, 200000)
+        self.rag_glossary_context_max_chars.setSingleStep(100)
+        self.rag_glossary_context_max_chars.setValue(self.config_manager.get("rag", "glossary_context_max_chars", 4000))
+        self.rag_glossary_context_max_chars.setToolTip(i18n.t(
+            "tooltip_rag_glossary_context_max_chars",
+            "Maximum glossary context characters injected into prompts; 0 disables truncation."
+        ))
+        expert_layout.addRow(i18n.t("label_rag_glossary_context_max_chars", "Glossary context max chars:"), self.rag_glossary_context_max_chars)
+
+        self.rag_format_extra_retries = NoWheelSpinBox()
+        self.rag_format_extra_retries.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_format_extra_retries.setRange(0, 10)
+        self.rag_format_extra_retries.setValue(self.config_manager.get("rag", "format_extra_retries", 2))
+        self.rag_format_extra_retries.setToolTip(i18n.t(
+            "tooltip_rag_format_extra_retries",
+            "Extra retries allowed when translation format preservation fails."
+        ))
+        expert_layout.addRow(i18n.t("label_rag_format_extra_retries", "Format extra retries:"), self.rag_format_extra_retries)
+
+        self.rag_latin_ratio_threshold = NoWheelDoubleSpinBox()
+        self.rag_latin_ratio_threshold.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_latin_ratio_threshold.setRange(0.1, 20.0)
+        self.rag_latin_ratio_threshold.setSingleStep(0.1)
+        self.rag_latin_ratio_threshold.setValue(self.config_manager.get("rag", "latin_ratio_threshold", 2.0))
+        self.rag_latin_ratio_threshold.setToolTip(i18n.t(
+            "tooltip_rag_latin_ratio_threshold",
+            "Latin-to-CJK ratio threshold used by untranslated text detection."
+        ))
+        expert_layout.addRow(i18n.t("label_rag_latin_ratio_threshold", "Latin ratio threshold:"), self.rag_latin_ratio_threshold)
+
         reset_rag_advanced_btn = QPushButton(i18n.t("btn_reset_rag_advanced"))
         reset_rag_advanced_btn.clicked.connect(self.reset_rag_advanced_settings)
         expert_layout.addRow(reset_rag_advanced_btn)
@@ -3798,8 +3998,9 @@ class MainWindow(QMainWindow):
 
         system_group = QGroupBox(i18n.t('group_system_settings'))
         system_layout = QFormLayout(system_group)
-        system_layout.setContentsMargins(12, 10, 12, 12)
-        system_layout.setSpacing(8)
+        system_layout.setContentsMargins(12, 9, 12, 12)
+        system_layout.setHorizontalSpacing(10)
+        system_layout.setVerticalSpacing(6)
 
         self.language_combo = NoWheelComboBox()
         self.language_combo.addItem(i18n.t("language_option_auto"), "auto")
@@ -4066,6 +4267,39 @@ class MainWindow(QMainWindow):
         if not self._log_flush_timer.isActive():
             self._log_flush_timer.start()
 
+    def _check_index_fingerprint_before_translate(self) -> bool:
+        """Check if the vector index model matches current config before translation.
+
+        Returns True if translation can proceed, False if the user chose to
+        rebuild the index instead.
+        """
+        try:
+            status = self.rag_engine.get_vector_index_status()
+        except Exception:
+            return True
+
+        if not status.is_stale or status.reason != "fingerprint_mismatch":
+            return True
+
+        stored = status.stored_fingerprint or {}
+        current = status.current_fingerprint or {}
+        message = i18n.t("msg_vector_index_mismatch_prompt").format(
+            stored_model=stored.get("model", "?"),
+            stored_url=stored.get("base_url", "?"),
+            current_model=current.get("model", "?"),
+            current_url=current.get("base_url", "?"),
+        )
+        self.log(i18n.t("msg_vector_index_mismatch_continue"))
+
+        confirm = QMessageBox.question(
+            self, i18n.t("title_vector_index_mismatch"), message,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if confirm == QMessageBox.StandardButton.Yes:
+            self.rebuild_index()
+            return False
+        return True
+
     def start_translation(self):
         # Bug #5: Prevent concurrent translation tasks
         if self._translation_task_active:
@@ -4078,6 +4312,10 @@ class MainWindow(QMainWindow):
         if self.trans_table.rowCount() == 0:
             if not self.load_xml_to_table():
                 return
+
+        # Check vector index fingerprint before starting
+        if not self._check_index_fingerprint_before_translate():
+            return
 
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
@@ -4149,7 +4387,7 @@ class MainWindow(QMainWindow):
 
     def _detect_xml_variant(self, file_path: str) -> str:
         try:
-            tree = stdlib_etree.parse(file_path)
+            tree = parse_xml_file(file_path)
             root = tree.getroot()
         except Exception:
             return "xml"
@@ -4828,6 +5066,9 @@ class MainWindow(QMainWindow):
         self.rag_keyword_weight_token_boost.setValue(defaults.keyword_weight_token_boost)
         self.rag_keyword_weight_anchor_max_df.setValue(defaults.keyword_weight_anchor_max_df)
         self.rag_keyword_weight_anchor_boost.setValue(defaults.keyword_weight_anchor_boost)
+        self.rag_glossary_context_max_chars.setValue(defaults.glossary_context_max_chars)
+        self.rag_format_extra_retries.setValue(defaults.format_extra_retries)
+        self.rag_latin_ratio_threshold.setValue(defaults.latin_ratio_threshold)
         QMessageBox.information(
             self,
             i18n.t("title_info"),
@@ -4839,9 +5080,9 @@ class MainWindow(QMainWindow):
             return
 
         def _embedding_snapshot(base_url: object, model: object, dimensions: object) -> dict[str, object]:
-            try:
+            if isinstance(dimensions, (int, float, str)):
                 normalized_dimensions = max(0, int(dimensions))
-            except Exception:
+            else:
                 normalized_dimensions = 0
             return {
                 "base_url": str(base_url or "").strip().rstrip("/"),
@@ -4917,6 +5158,9 @@ class MainWindow(QMainWindow):
                 "keyword_weight_token_boost": self.rag_keyword_weight_token_boost.value(),
                 "keyword_weight_anchor_max_df": self.rag_keyword_weight_anchor_max_df.value(),
                 "keyword_weight_anchor_boost": self.rag_keyword_weight_anchor_boost.value(),
+                "glossary_context_max_chars": self.rag_glossary_context_max_chars.value(),
+                "format_extra_retries": self.rag_format_extra_retries.value(),
+                "latin_ratio_threshold": self.rag_latin_ratio_threshold.value(),
             },
             "general": {
                 "log_level": self.log_level_combo.currentText(),
@@ -5010,6 +5254,10 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, i18n.t("title_warning"), i18n.t("msg_no_items_selected"))
             return
 
+        # Check vector index fingerprint before starting
+        if not self._check_index_fingerprint_before_translate():
+            return
+
         self.start_btn.setEnabled(False)
         self.trans_sel_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
@@ -5033,20 +5281,20 @@ class MainWindow(QMainWindow):
         self.worker.log.connect(self.log)
         self.worker.progress.connect(self._handle_translation_progress)
         self.worker.result_ready.connect(self.update_table_row)
-        seBug #18: Prevent clearing while translation is running
-        if self._translation_task_active:
-            log_emit(self.log, self.config_manager, 'WARNING',
-                     "Cannot clear translations while translation is in progress",
-                     module='gui_main', func='clear_all_translations')
-            return
-
-        # lf.worker.row_failed.connect(self.update_table_row_failed)
+        self.worker.row_failed.connect(self.update_table_row_failed)
         self.worker.rag_debug_ready.connect(self.cache_rag_debug_info)
         self.worker.finished.connect(self.on_translation_finished)
         self._translation_task_active = True
         self.worker.start()
 
     def clear_all_translations(self):
+        # Bug #18: Prevent clearing while translation is running
+        if self._translation_task_active:
+            log_emit(self.log, self.config_manager, 'WARNING',
+                     "Cannot clear translations while translation is in progress",
+                     module='gui_main', func='clear_all_translations')
+            return
+
         # Confirm with user
         if self.trans_table.rowCount() == 0:
             QMessageBox.information(self, i18n.t("title_info"), i18n.t("msg_no_translations_to_clear"))

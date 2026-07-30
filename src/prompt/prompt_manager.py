@@ -16,6 +16,7 @@ This is intentionally lightweight so end users can edit prompt JSON files.
 """
 
 import json
+import hashlib
 import os
 import sys
 from threading import RLock
@@ -30,6 +31,7 @@ class PromptManager:
         self._file_path: Optional[str] = None
         self._loaded_paths: list[str] = []
         self._mtime: Optional[float] = None
+        self._fingerprint: str = ""
         self._lock = RLock()
 
         if getattr(sys, "frozen", False):
@@ -136,6 +138,7 @@ class PromptManager:
                     self._file_path = None
                     self._loaded_paths = loaded_paths
                     self._mtime = latest_mtime
+                    self._refresh_fingerprint()
                     return
 
             legacy_path = os.path.join(self.prompts_dir, "en.json")
@@ -149,6 +152,7 @@ class PromptManager:
                         self._mtime = os.path.getmtime(legacy_path)
                     except Exception:
                         self._mtime = None
+                    self._refresh_fingerprint()
                     return
                 except Exception:
                     pass
@@ -157,6 +161,21 @@ class PromptManager:
             self._file_path = None
             self._loaded_paths = []
             self._mtime = None
+            self._refresh_fingerprint()
+
+    def _refresh_fingerprint(self) -> None:
+        raw = json.dumps(
+            self.prompts,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        self._fingerprint = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def get_fingerprint(self) -> str:
+        with self._lock:
+            return self._fingerprint
 
     def load_language(self, lang_code: Optional[str] = None) -> None:
         """Compatibility shim.

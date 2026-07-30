@@ -1,16 +1,7 @@
-try:
-    # Prefer lxml if available for better XML features (pretty_print, advanced parser options)
-    from lxml import etree  # type: ignore
-    LXML_AVAILABLE = True
-except Exception:
-    # Fall back to stdlib ElementTree if lxml is not installed
-    import xml.etree.ElementTree as etree  # type: ignore
-    LXML_AVAILABLE = False
-
-import os
 from typing import Optional, Any
 from src.logging_helper import emit as log_emit
 from src.config.manager import ConfigManager
+from src.safe_xml import etree, parse_xml_file
 from src.xml_content import (
     get_node_inner_content,
     node_has_child_elements,
@@ -27,28 +18,7 @@ class XMLProcessor:
     def load_file(self, file_path: str) -> bool:
         self.file_path = file_path
         try:
-            if LXML_AVAILABLE:
-                # Some versions of lxml may not support all XMLParser named args
-                parser_kwargs = {
-                    "remove_blank_text": False,
-                    "strip_cdata": False,
-                    "resolve_entities": False,
-                    "no_network": True,
-                    "compact": True,
-                }
-                try:
-                    if os.path.getsize(file_path) > 10 * 1024 * 1024:
-                        parser_kwargs["huge_tree"] = True
-                except OSError:
-                    pass
-                try:
-                    parser = etree.XMLParser(**parser_kwargs)  # type: ignore[arg-type]
-                except TypeError:
-                    parser = etree.XMLParser(remove_blank_text=False)  # type: ignore[arg-type]
-                self.tree = etree.parse(file_path, parser)
-            else:
-                # xml.etree.ElementTree doesn't use the same parser options
-                self.tree = etree.parse(file_path)
+            self.tree = parse_xml_file(file_path)
             self.root = self.tree.getroot()
             return True
         except Exception as e:
@@ -107,7 +77,7 @@ class XMLProcessor:
             if prefer_mixed_content:
                 set_node_inner_content(dest_node, safe_translation, etree)
             else:
-                set_node_text_content(dest_node, safe_translation)
+                set_node_text_content(dest_node, safe_translation, etree)
 
     def save_file(self, output_path=None):
         if output_path is None:
@@ -122,12 +92,7 @@ class XMLProcessor:
             cfg = None
         
         try:
-            if LXML_AVAILABLE:
-                # lxml supports pretty_print
-                self.tree.write(output_path, encoding="utf-8", xml_declaration=True, pretty_print=True)
-            else:
-                # stdlib ElementTree doesn't support pretty_print argument
-                self.tree.write(output_path, encoding="utf-8", xml_declaration=True)
+            self.tree.write(output_path, encoding="utf-8", xml_declaration=True, pretty_print=False)
             return True
         except TypeError:
             # Fallback for lxml versions that don't support pretty_print

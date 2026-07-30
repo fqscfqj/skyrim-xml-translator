@@ -12,11 +12,12 @@ def collect_data_files():
     candidates = [
         ('locales', 'locales'),
         ('prompts', 'prompts'),
-        ('config.json', '.'),
         ('config.example.json', '.'),
         ('assets', 'assets'),
     ]
     add_data = []
+    if os.path.exists('config.json'):
+        print('Skipping config.json during build to avoid bundling local API keys. Use config.example.json instead.')
     for src, dst in candidates:
         if os.path.exists(src):
             add_data.append(f'{src};{dst}')

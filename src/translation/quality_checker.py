@@ -11,8 +11,50 @@ from src.translation.text_analyzer import TextAnalyzer
 
 class QualityIssueType(Enum):
     UNTRANSLATED = "untranslated"
+    REFUSAL = "refusal"
     FORMAT_VIOLATION = "format"
     PLACEHOLDER_MISMATCH = "placeholder"
+
+
+_MODEL_REFUSAL_PATTERNS = (
+    re.compile(
+        r"(?:抱歉|对不起)?[^。！？\n]{0,30}"
+        r"(?:无法|不能|不便)(?:协助|帮助)?(?:翻译|处理|提供|满足)"
+        r"[^。！？\n]{0,40}(?:内容|文本|请求|要求|任务)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:as an ai|i(?:'m| am) sorry|i apologize)[^.!?\n]{0,80}"
+        r"(?:cannot|can't|unable to|not able to)[^.!?\n]{0,40}"
+        r"(?:comply|assist|translate|process|provide|fulfill)(?:\b|\s)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"i (?:cannot|can't|am unable to|am not able to|won't|will not)[^.!?\n]{0,50}"
+        r"(?:comply with|assist with|help with|translate|process|fulfill|generate|write|create)"
+        r"[^.!?\n]{0,40}(?:request|content|text|task)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:this|that)\s+(?:request|content|task)\s+(?:is|falls)\s+"
+        r"(?:outside|beyond)[^.!?\n]{0,30}(?:my\s+)?(?:capabilities|ability|scope)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:该|此|这个)(?:请求|内容|任务)[^。！？\n]{0,20}"
+        r"(?:超出|超过)[^。！？\n]{0,20}(?:能力|处理范围)",
+        re.IGNORECASE,
+    ),
+)
+
+
+def is_model_refusal(text: str, original_text: str = "") -> bool:
+    """Return whether output is a high-confidence task-level model refusal."""
+    candidate = str(text or "").strip()
+    original = str(original_text or "").strip()
+    if not candidate or (original and candidate.casefold() == original.casefold()):
+        return False
+    return any(pattern.search(candidate) is not None for pattern in _MODEL_REFUSAL_PATTERNS)
 
 
 @dataclass
@@ -88,6 +130,14 @@ class QualityChecker:
                 whitespace_policy=normalized_whitespace_policy,
             ))
             return issues
+
+        if is_model_refusal(translation_text, source_text):
+            issues.append(QualityIssue(
+                issue_type=QualityIssueType.REFUSAL,
+                severity="error",
+                details="Model returned a task-level refusal instead of a translation",
+                rule_id="model_refusal",
+            ))
 
         # Layer 1: Complete untranslated detection
         issue = self._check_untranslated(

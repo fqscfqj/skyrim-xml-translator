@@ -35,10 +35,34 @@ class RAGEngine:
 
         # Caches
         kw_cache_size = self.config.get("cache", "translation_cache_size", 50000)
-        embed_cache_size = self.config.get("cache", "embedding_cache_size", 100000)
+        requested_embed_cache_size = self.config.get("cache", "embedding_cache_size", 5000)
+        embed_cache_memory_mb = self.config.get("cache", "embedding_cache_memory_mb", 256)
+        embed_cache_size, safe_embed_cache_limit = self._effective_embedding_cache_size(
+            requested_embed_cache_size,
+            embed_dim,
+            embed_cache_memory_mb,
+        )
+        if embed_cache_size < max(1, self._coerce_positive_int(requested_embed_cache_size, 5000)):
+            log_emit(
+                None,
+                self.config,
+                "WARNING",
+                (
+                    "Clamping embedding cache capacity from "
+                    f"{requested_embed_cache_size} to {embed_cache_size} entries "
+                    f"for {embed_dim}-dimension vectors "
+                    f"(memory budget: {embed_cache_memory_mb} MB, safe limit: {safe_embed_cache_limit})."
+                ),
+                module="rag_engine",
+                func="__init__",
+            )
+        try:
+            cache_ttl_seconds = max(0.0, float(self.config.get("cache", "cache_ttl_hours", 0)) * 3600)
+        except Exception:
+            cache_ttl_seconds = 0
 
-        self._keyword_cache = LRUCache(max_size=max(1000, kw_cache_size // 10))
-        self._embedding_cache = EmbeddingCache(max_size=embed_cache_size)
+        self._keyword_cache = LRUCache(max_size=max(1000, kw_cache_size // 10), ttl_seconds=cache_ttl_seconds)
+        self._embedding_cache = EmbeddingCache(max_size=embed_cache_size, ttl_seconds=cache_ttl_seconds)
 
         self._keyword_extractor = KeywordExtractor(
             llm_client, self.prompt_manager, config_manager,
@@ -52,6 +76,30 @@ class RAGEngine:
         # Preserved flags for GUI pause/stop
         self.stop_flag: bool = False
         self.pause_flag: bool = False
+
+        # Track whether we already warned about fingerprint mismatch this session
+        self._fingerprint_mismatch_warned: bool = False
+
+    @staticmethod
+    def _coerce_positive_int(value, default: int) -> int:
+        try:
+            parsed = int(value)
+        except Exception:
+            parsed = default
+        return max(1, parsed)
+
+    @classmethod
+    def _effective_embedding_cache_size(cls, requested_size, dimensions,
+                                        memory_budget_mb) -> tuple[int, int]:
+        requested = cls._coerce_positive_int(requested_size, 5000)
+        dimension_count = cls._coerce_positive_int(dimensions, 1536)
+        budget_mb = max(32, min(cls._coerce_positive_int(memory_budget_mb, 256), 4096))
+
+        # Cached embeddings are currently Python list[float] values. A conservative
+        # estimate is one list pointer plus one Python float per dimension (~36 B).
+        estimated_entry_bytes = 512 + dimension_count * 36
+        safe_limit = max(128, (budget_mb * 1024 * 1024) // estimated_entry_bytes)
+        return min(requested, safe_limit), safe_limit
 
     # --- Properties for backward compat ---
 
@@ -97,6 +145,9 @@ class RAGEngine:
 
     def get_embedding_fingerprint(self) -> dict:
         return self._vector_store.current_embedding_fingerprint()
+
+    def get_glossary_fingerprint(self) -> str:
+        return self._glossary_mgr.get_content_fingerprint()
 
     def get_vector_index_status(self) -> VectorIndexStatus:
         return self._vector_store.get_index_status()
@@ -204,6 +255,26 @@ class RAGEngine:
 
     def search_terms(self, query_list, threshold=0.8, log_callback=None,
                      top_k=3, return_debug=False, source_text=None):
+        # Warn once per session if embedding model differs from index
+        if not self._fingerprint_mismatch_warned:
+            status = self._vector_store.get_index_status()
+            if status.is_stale and status.reason == "fingerprint_mismatch":
+                self._fingerprint_mismatch_warned = True
+                stored = status.stored_fingerprint or {}
+                current = status.current_fingerprint or {}
+                log_emit(
+                    log_callback, self.config, "WARNING",
+                    (
+                        f"[RAG] Vector index model mismatch - "
+                        f"index built with model='{stored.get('model', '?')}' "
+                        f"url='{stored.get('base_url', '?')}', "
+                        f"but current config uses model='{current.get('model', '?')}' "
+                        f"url='{current.get('base_url', '?')}'. "
+                        f"Vector search will be skipped. Please rebuild the index."
+                    ),
+                    module="rag_engine", func="search_terms",
+                )
+
         return self._searcher.search(
             keywords=query_list,
             source_text=source_text,

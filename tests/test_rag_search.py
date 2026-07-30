@@ -4,6 +4,7 @@ from typing import Any, cast
 
 import numpy as np
 
+from src.rag.glossary_manager import GlossaryManager
 from src.rag.search import RAGSearcher
 from src.translation.prompt_builder import PromptBuilder
 
@@ -85,13 +86,39 @@ class _DummyVectorStore:
 
 
 class _DummyLLMClient:
+    def __init__(self):
+        self.embedding_calls = []
+
     def get_embedding(self, value, log_callback=None):
+        self.embedding_calls.append(value)
         if isinstance(value, list):
             return [[1.0, 0.0] for _ in value]
         return [1.0, 0.0]
 
 
 class RAGSearchSentenceLikeFilterTests(unittest.TestCase):
+    def test_low_signal_keyword_does_not_request_embedding(self):
+        glossary = _DummyGlossaryManager({"Dragonborn": "龙裔"})
+        llm = _DummyLLMClient()
+        searcher = RAGSearcher(
+            cast(Any, _DummyVectorStore(["Dragonborn"], [0.99])),
+            cast(Any, glossary),
+            _DummyConfig({
+                ("rag", "keyword_weight_enabled"): False,
+                ("rag", "min_vector_score"): 0.0,
+            }),
+            llm,
+        )
+
+        results, debug = cast(
+            tuple[dict[str, str], list[dict[str, Any]]],
+            searcher.search(["honestly"], source_text="Honestly, I do not know.", return_debug=True),
+        )
+
+        self.assertEqual({}, results)
+        self.assertEqual([], llm.embedding_calls)
+        self.assertTrue(debug[0]["low_signal_skipped"])
+
     def test_filters_sentence_like_candidates_not_present_in_source(self):
         sentence_term = "So, it is real after all."
         short_term = "Real"
@@ -163,6 +190,17 @@ class RAGSearchSentenceLikeFilterTests(unittest.TestCase):
 
         self.assertEqual(results[sentence_term], "原来这一切是真的。")
         self.assertEqual(debug[0]["sentence_like_filtered_count"], 0)
+
+
+class GlossaryManagerTokenIndexTests(unittest.TestCase):
+    def test_common_words_do_not_drop_entity_tokens_from_index(self):
+        manager = GlossaryManager.__new__(GlossaryManager)
+
+        tokens = manager._term_index_tokens("Old Hroldan Inn")
+
+        self.assertIn("hroldan", tokens)
+        self.assertIn("inn", tokens)
+        self.assertNotIn("old", tokens)
 
 
 class RAGSearchPluralDirectMatchTests(unittest.TestCase):

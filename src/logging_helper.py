@@ -2,6 +2,7 @@ import datetime
 import traceback
 import inspect
 import os
+import re
 import sys
 import tempfile
 from typing import Optional, Callable
@@ -13,6 +14,32 @@ LEVELS = {
     'WARNING': 30,
     'ERROR': 40
 }
+
+
+_SENSITIVE_KEY_RE = re.compile(
+    r"(?i)(api[_-]?key|authorization|access[_-]?token|refresh[_-]?token|secret|password)"
+)
+_SENSITIVE_ASSIGNMENT_RE = re.compile(
+    r"(?i)\b(api[_-]?key|authorization|access[_-]?token|refresh[_-]?token|secret|password)"
+    r"(\s*[=:]\s*)"
+    r"([^\s,;\]\}\)]+)"
+)
+_BEARER_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
+_OPENAI_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9][A-Za-z0-9._-]{8,}\b")
+
+
+def _redact_sensitive_text(value) -> str:
+    text = str(value)
+    text = _SENSITIVE_ASSIGNMENT_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}***", text)
+    text = _BEARER_RE.sub("Bearer ***", text)
+    text = _OPENAI_KEY_RE.sub("sk-***", text)
+    return text
+
+
+def _redact_extra_value(key, value) -> str:
+    if _SENSITIVE_KEY_RE.search(str(key)):
+        return "***"
+    return _redact_sensitive_text(value)
 
 
 def _now_ts():
@@ -107,7 +134,7 @@ def format_log_message(level: str, message: str, module: Optional[str] = None,
     extra_str = ''
     if extra:
         try:
-            parts = [f"{k}={v}" for k, v in extra.items()]
+            parts = [f"{k}={_redact_extra_value(k, v)}" for k, v in extra.items()]
             extra_str = ' | ' + ', '.join(parts)
         except Exception:
             extra_str = ''
@@ -120,7 +147,7 @@ def format_log_message(level: str, message: str, module: Optional[str] = None,
         except Exception:
             exc_str = f"\n{exc}"
 
-    return f"{base}{context} {message}{extra_str}{exc_str}"
+    return _redact_sensitive_text(f"{base}{context} {message}{extra_str}{exc_str}")
 
 
 def emit(log_callback: Optional[Callable[[str], None]], config_manager, level: str, message: str,

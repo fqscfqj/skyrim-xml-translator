@@ -568,6 +568,23 @@ class RAGSearcher:
                 return {}, []
             return {}
 
+        # Log fingerprint mismatch details at DEBUG level (complements engine-level WARNING)
+        if not vector_ready:
+            try:
+                status = self.vector_store.get_index_status()
+                if status.is_stale and status.reason == "fingerprint_mismatch":
+                    stored = status.stored_fingerprint or {}
+                    current = status.current_fingerprint or {}
+                    log_emit(log_callback, self.config, "DEBUG",
+                             (
+                                 f"[RAG] Degraded to glossary-only: index model="
+                                 f"'{stored.get('model', '?')}' vs config="
+                                 f"'{current.get('model', '?')}'"
+                             ),
+                             module="rag_search", func="search")
+            except Exception:
+                pass
+
         try:
             log_emit(log_callback, self.config, "DEBUG",
                      f"[RAG] Starting vector search for {len(keywords)} keywords: {keywords}",
@@ -590,10 +607,18 @@ class RAGSearcher:
         short_term_max_chars = self._get_short_term_max_chars()
         min_vector_score = self._get_rag_float("min_vector_score", 0.45, 0.0, 1.0)
 
-        query_embeddings = self._batch_embed_keywords(keywords, log_callback)
+        skip_semantic_by_query = {
+            query: self._is_low_signal_query(query)
+            for query in keywords
+        }
+        embedding_queries = [
+            query for query in keywords
+            if not skip_semantic_by_query.get(query, True)
+        ]
+        query_embeddings = self._batch_embed_keywords(embedding_queries, log_callback)
 
         for query in keywords:
-            skip_semantic_recall = self._is_low_signal_query(query)
+            skip_semantic_recall = skip_semantic_by_query.get(query, True)
             query_norm = self.glossary_manager.normalize_term_key(query)
 
             query_selected_terms: list[str] = []
@@ -747,7 +772,6 @@ class RAGSearcher:
             try:
                 semantic_matches: list[tuple[str, float]] = []
                 keyword_weighted_matches: list[tuple[str, float]] = []
-                vector_matches: list[tuple[str, float]] = []
 
                 if skip_semantic_recall:
                     log_emit(log_callback, self.config, "DEBUG",
@@ -803,18 +827,17 @@ class RAGSearcher:
                     del similarities
                     del ranked_idx
 
-                merged_scores: Dict[str, float] = {}
-                for term, score in semantic_matches:
-                    prev = merged_scores.get(term)
-                    if prev is None or score > prev:
-                        merged_scores[term] = score
-                for term, score in keyword_weighted_matches:
-                    prev = merged_scores.get(term)
-                    if prev is None or score > prev:
-                        merged_scores[term] = score
-                vector_matches = sorted(merged_scores.items(), key=lambda x: x[1], reverse=True)
-
                 if return_debug:
+                    merged_scores: Dict[str, float] = {}
+                    for term, score in semantic_matches:
+                        prev = merged_scores.get(term)
+                        if prev is None or score > prev:
+                            merged_scores[term] = score
+                    for term, score in keyword_weighted_matches:
+                        prev = merged_scores.get(term)
+                        if prev is None or score > prev:
+                            merged_scores[term] = score
+                    vector_matches = sorted(merged_scores.items(), key=lambda x: x[1], reverse=True)
                     query_details["vector_matches"] = vector_matches
                     query_details["semantic_match_count"] = len(semantic_matches)
                     query_details["keyword_weighted_count"] = len(keyword_weighted_matches)
@@ -951,10 +974,11 @@ class RAGSearcher:
         if not uncached:
             return query_embeddings
 
+        remaining = list(uncached)
         try:
             batch_size_embed = 100
-            for i in range(0, len(uncached), batch_size_embed):
-                batch_qs = uncached[i:i + batch_size_embed]
+            for i in range(0, len(remaining), batch_size_embed):
+                batch_qs = remaining[i:i + batch_size_embed]
                 batch_vecs = self.llm_client.get_embedding(batch_qs, log_callback=log_callback)
                 for q, v in zip(batch_qs, batch_vecs):
                     query_embeddings[q] = v
@@ -964,6 +988,18 @@ class RAGSearcher:
             log_emit(log_callback, self.config, "WARNING",
                      f"[RAG] Batch embedding failed, falling back to individual: {e}",
                      exc=e, module="rag_search", func="_batch_embed_keywords")
+            for q in remaining:
+                if q in query_embeddings:
+                    continue
+                try:
+                    vec = self.llm_client.get_embedding(q, log_callback=log_callback)
+                    query_embeddings[q] = vec
+                    if self.embedding_cache is not None:
+                        self.embedding_cache.put(q, cache_fingerprint, vec)
+                except Exception as single_e:
+                    log_emit(log_callback, self.config, "WARNING",
+                             f"[RAG] Individual embedding failed for '{q}': {single_e}",
+                             exc=single_e, module="rag_search", func="_batch_embed_keywords")
 
         return query_embeddings
 

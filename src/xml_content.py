@@ -35,13 +35,19 @@ def node_has_child_elements(node: Any) -> bool:
     return bool(list(node))
 
 
-def set_node_text_content(node: Any, value: str) -> None:
+def set_node_text_content(node: Any, value: str, etree_module: Any = None) -> None:
     """Replace node content as plain text, preserving literal angle-bracket text."""
     if node is None:
         return
 
+    preserve_cdata = _node_text_uses_cdata(node, etree_module)
     _clear_node_children(node)
-    node.text = "" if value is None else str(value)
+    _assign_node_text(
+        node,
+        "" if value is None else str(value),
+        etree_module,
+        preserve_cdata=preserve_cdata,
+    )
 
 
 def set_node_inner_content(node: Any, value: str, etree_module: Any) -> None:
@@ -53,10 +59,14 @@ def set_node_inner_content(node: Any, value: str, etree_module: Any) -> None:
     if node is None:
         return
 
+    preserve_cdata = _node_text_uses_cdata(node, etree_module)
     _clear_node_children(node)
     node.text = None
 
     content = "" if value is None else str(value)
+    if preserve_cdata:
+        _assign_node_text(node, content, etree_module, preserve_cdata=True)
+        return
     if not content:
         node.text = ""
         return
@@ -81,6 +91,28 @@ def set_node_inner_content(node: Any, value: str, etree_module: Any) -> None:
 def _clear_node_children(node: Any) -> None:
     for child in list(node):
         node.remove(child)
+
+
+def _node_text_uses_cdata(node: Any, etree_module: Any) -> bool:
+    if node is None or etree_module is None or not getattr(node, "text", None):
+        return False
+    try:
+        serialized = _serialize_element(node, etree_module)
+    except Exception:
+        return False
+    opening_end = serialized.find(">")
+    if opening_end < 0:
+        return False
+    return serialized[opening_end + 1:].startswith("<![CDATA[")
+
+
+def _assign_node_text(node: Any, value: str, etree_module: Any,
+                      preserve_cdata: bool = False) -> None:
+    cdata_factory = getattr(etree_module, "CDATA", None) if etree_module is not None else None
+    if preserve_cdata and callable(cdata_factory):
+        node.text = cdata_factory(value)
+    else:
+        node.text = value
 
 
 

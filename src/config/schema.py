@@ -16,6 +16,7 @@ class LLMConfig:
     request_timeout: int = 30
     request_timeout_step: int = 15
     request_timeout_max: int = 180
+    retry_total_timeout: int = 300
     parameters: dict = field(default_factory=lambda: {
         "temperature": None,
         "top_p": None,
@@ -54,6 +55,9 @@ class RAGConfig:
     glossary_context_max_chars: int = 4000
     format_extra_retries: int = 2
     latin_ratio_threshold: float = 2.0
+    vector_index_checkpoint_terms: int = 1000
+    glossary_import_max_rows: int = 0
+    glossary_import_max_field_chars: int = 0
 
 
 @dataclass
@@ -70,11 +74,13 @@ class GeneralConfig:
     log_file: str = "logs/app.log"
     long_text_chunking_enabled: bool = True
     long_text_chunk_threshold_chars: int = 4000
-    long_text_chunk_target_chars: int = 8000
+    long_text_chunk_target_chars: int = 1800
     long_text_disable_thinking: bool = True
     short_text_batch_enabled: bool = False
     short_text_batch_max_chars: int = 50
     short_text_batch_size: int = 8
+    short_text_batch_circuit_min_items: int = 16
+    short_text_batch_circuit_fallback_ratio: float = 0.5
 
 
 @dataclass
@@ -93,6 +99,7 @@ class ThreadsConfig:
 class CacheConfig:
     translation_cache_size: int = 50000
     embedding_cache_size: int = 5000
+    embedding_cache_memory_mb: int = 256
     cache_persist_dir: str = "cache"
     cache_ttl_hours: float = 0  # 0 = no expiry
 

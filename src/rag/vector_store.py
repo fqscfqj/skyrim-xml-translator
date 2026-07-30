@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+from threading import RLock
 from typing import Optional, Callable, Any
 
 import numpy as np
@@ -43,6 +44,8 @@ class VectorIndexBuildResult:
 
 
 class VectorStore:
+    _NORMALIZATION_VERSION = 1
+    _NORMALIZATION_ATOL = 1e-4
     _NORMALIZE_TERM_RE = re.compile(r"[^0-9a-zA-Z\u4e00-\u9fff]+")
     _WHITESPACE_RE = re.compile(r"\s+")
 
@@ -57,8 +60,11 @@ class VectorStore:
         self.terms: list[str] = []
         self._normalized_terms: list[str] = []
         self._token_to_indices: dict[str, list[int]] = {}
+        self._trigram_to_indices: dict[str, set[int]] = {}
         self._lexical_index_dirty = False
         self._index_metadata: dict[str, Any] = {}
+        self._normalization_lock = RLock()
+        self._vectors_are_normalized: Optional[bool] = None
         self._index_status = VectorIndexStatus(
             is_ready=False,
             is_stale=False,
@@ -86,6 +92,14 @@ class VectorStore:
             return max(0, int(value))
         except Exception:
             return 0
+
+    @staticmethod
+    def _embed_task(term: str, embed_fn: Callable) -> tuple[str, Optional[list[float]], Optional[str]]:
+        try:
+            vec = embed_fn(term)
+            return term, vec, None
+        except Exception as e:
+            return term, None, str(e)
 
     @staticmethod
     def _normalize_base_url(value: Any) -> str:
@@ -127,11 +141,13 @@ class VectorStore:
         if self.vectors is not None:
             try:
                 # Try the standard close() method first (numpy >= 1.x memmap)
-                if hasattr(self.vectors, 'close') and callable(self.vectors.close):
-                    self.vectors.close()
+                close_fn = getattr(self.vectors, 'close', None)
+                mmap_obj = getattr(self.vectors, '_mmap', None)
+                if callable(close_fn):
+                    close_fn()
                 # Fallback: try internal _mmap attribute
-                elif hasattr(self.vectors, '_mmap') and self.vectors._mmap is not None:
-                    self.vectors._mmap.close()
+                elif mmap_obj is not None:
+                    mmap_obj.close()
             except Exception:
                 pass
         self.vectors = None
@@ -171,10 +187,91 @@ class VectorStore:
             "term_count": len(self.terms),
             "vector_count": int(self.vectors.shape[0]) if self.vectors is not None else 0,
             "vector_dimensions": int(self.vectors.shape[1]) if self.vectors is not None else 0,
+            "normalization": {
+                "version": self._NORMALIZATION_VERSION,
+                "unit_l2": bool(self._vectors_are_normalized),
+            },
         }
-        with open(self.meta_path, "w", encoding="utf-8") as f:
-            json.dump(metadata, f, indent=4, ensure_ascii=False)
+        self._write_metadata_atomic(metadata)
         self._index_metadata = metadata
+
+    def _write_metadata_atomic(self, metadata: dict[str, Any]) -> None:
+        tmp_path = self.meta_path + ".tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(metadata, f, indent=4, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, self.meta_path)
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+
+    def _metadata_normalization_state(self) -> Optional[bool]:
+        normalization = self._index_metadata.get("normalization")
+        if not isinstance(normalization, dict):
+            return None
+        if normalization.get("version") != self._NORMALIZATION_VERSION:
+            return None
+        unit_l2 = normalization.get("unit_l2")
+        return unit_l2 if isinstance(unit_l2, bool) else None
+
+    def _persist_detected_normalization_state(self) -> None:
+        if not self._index_metadata or self._vectors_are_normalized is None:
+            return
+        metadata = dict(self._index_metadata)
+        metadata["normalization"] = {
+            "version": self._NORMALIZATION_VERSION,
+            "unit_l2": self._vectors_are_normalized,
+        }
+        self._write_metadata_atomic(metadata)
+        self._index_metadata = metadata
+
+    def _ensure_normalization_state(self) -> bool:
+        with self._normalization_lock:
+            if self._vectors_are_normalized is not None:
+                return self._vectors_are_normalized
+            if self.vectors is None:
+                self._vectors_are_normalized = False
+                return False
+
+            normalized = True
+            batch_size = 10000
+            for start_idx in range(0, self.vectors.shape[0], batch_size):
+                batch = np.asarray(
+                    self.vectors[start_idx:start_idx + batch_size], dtype=np.float32
+                )
+                if not np.all(np.isfinite(batch)):
+                    normalized = False
+                    break
+                norms = np.linalg.norm(batch, axis=1)
+                if not np.all(np.isfinite(norms)) or not np.allclose(
+                    norms, 1.0, rtol=0.0, atol=self._NORMALIZATION_ATOL
+                ):
+                    normalized = False
+                    break
+
+            self._vectors_are_normalized = normalized
+            try:
+                self._persist_detected_normalization_state()
+            except Exception as e:
+                log_emit(None, self.config, "WARNING",
+                         f"Failed to persist vector normalization metadata: {e}",
+                         exc=e, module="vector_store", func="_ensure_normalization_state")
+            return normalized
+
+    @staticmethod
+    def _normalize_vector(vector: Any) -> np.ndarray:
+        vec = np.asarray(vector, dtype=np.float32).flatten()
+        if vec.size == 0 or not np.all(np.isfinite(vec)):
+            raise ValueError("Embedding vector must contain finite values")
+        norm = float(np.linalg.norm(vec))
+        if not np.isfinite(norm) or norm <= 0:
+            raise ValueError("Embedding vector must have a non-zero finite norm")
+        return vec / norm
 
     def _evaluate_index_status(self) -> VectorIndexStatus:
         current_fingerprint = self.current_embedding_fingerprint()
@@ -327,6 +424,7 @@ class VectorStore:
                 self.terms = []
 
         self._index_metadata = self._load_index_metadata()
+        self._vectors_are_normalized = self._metadata_normalization_state()
 
         self._close_mmap()
         if os.path.exists(self.vector_path):
@@ -366,10 +464,21 @@ class VectorStore:
         self._normalized_terms.append(normalized)
         for token in set(t for t in normalized.split() if t):
             self._token_to_indices.setdefault(token, []).append(index)
+        for trigram in self._extract_trigrams(normalized):
+            self._trigram_to_indices.setdefault(trigram, set()).add(index)
+
+    @staticmethod
+    def _extract_trigrams(text: str) -> set[str]:
+        """Extract character trigrams from a normalized string."""
+        trigrams: set[str] = set()
+        for i in range(len(text) - 2):
+            trigrams.add(text[i:i + 3])
+        return trigrams
 
     def _rebuild_lexical_index(self) -> None:
         self._normalized_terms = []
         self._token_to_indices = {}
+        self._trigram_to_indices = {}
         for idx, term in enumerate(self.terms):
             self._add_term_to_lexical_index(idx, term)
         self._lexical_index_dirty = False
@@ -421,6 +530,7 @@ class VectorStore:
 
     def clear_index(self, delete_files: bool = True) -> None:
         self._close_mmap()
+        self._vectors_are_normalized = None
         self.terms = []
         self._rebuild_lexical_index()
         self._delete_index_metadata()
@@ -455,10 +565,13 @@ class VectorStore:
         if self.vectors is None and self.terms:
             self._reset_terms_without_vectors()
         """Add a single term's vector to the index."""
-        vec_np = np.array([vector], dtype=np.float32)
+        if self.vectors is not None:
+            self._ensure_normalization_state()
+        vec_np = self._normalize_vector(vector).reshape(1, -1)
         if self.vectors is None:
             self.vectors = vec_np
             self.terms = [term]
+            self._vectors_are_normalized = True
         else:
             new_vectors = np.vstack([self.vectors, vec_np])
             self._close_mmap()
@@ -494,12 +607,11 @@ class VectorStore:
                 indices_to_delete.append(idx)
 
         if indices_to_delete and self.vectors is not None:
-            indices_to_delete.sort(reverse=True)
+            delete_set = set(indices_to_delete)
             new_vectors = np.delete(self.vectors, indices_to_delete, axis=0)
             self._close_mmap()
             self.vectors = new_vectors if new_vectors.size > 0 else None
-            for idx in indices_to_delete:
-                self.terms.pop(idx)
+            self.terms = [t for i, t in enumerate(self.terms) if i not in delete_set]
             self._mark_lexical_index_dirty()
             if not self.terms or self.vectors is None:
                 self.clear_index(delete_files=True)
@@ -518,6 +630,8 @@ class VectorStore:
         self.stop_flag = False
         self.pause_flag = False
         self._reset_terms_without_vectors()
+        if self.vectors is not None:
+            self._ensure_normalization_state()
 
         if not new_terms:
             if log_callback:
@@ -537,13 +651,6 @@ class VectorStore:
         new_vectors_batches = []
         new_terms_added = []
 
-        def embed_task(term):
-            try:
-                vec = embed_fn(term)
-                return term, vec, None
-            except Exception as e:
-                return term, None, str(e)
-
         with ThreadPoolExecutor(max_workers=num_threads) as executor:
             for i in range(0, total, batch_size):
                 if self.stop_flag:
@@ -559,7 +666,7 @@ class VectorStore:
                         break
 
                 batch_terms_input = new_terms[i:i + batch_size]
-                futures = {executor.submit(embed_task, term): term for term in batch_terms_input}
+                futures = {executor.submit(self._embed_task, term, embed_fn): term for term in batch_terms_input}
 
                 batch_results = []
                 batch_terms_confirmed = []
@@ -570,8 +677,15 @@ class VectorStore:
                     term, vec, error = future.result()
                     processed_count += 1
 
+                    normalized_vec = None
                     if vec is not None:
-                        batch_results.append(np.array(vec, dtype=np.float32))
+                        try:
+                            normalized_vec = self._normalize_vector(vec)
+                        except ValueError as normalize_error:
+                            error = str(normalize_error)
+
+                    if normalized_vec is not None:
+                        batch_results.append(normalized_vec)
                         batch_terms_confirmed.append(term)
                         if log_callback and processed_count % 10 == 0:
                             log_emit(log_callback, self.config, "DEBUG",
@@ -596,6 +710,7 @@ class VectorStore:
             new_vectors_np = np.vstack(new_vectors_batches)
             if self.vectors is None:
                 self.vectors = new_vectors_np
+                self._vectors_are_normalized = True
             else:
                 combined_vectors = np.vstack([self.vectors, new_vectors_np])
                 self._close_mmap()
@@ -635,11 +750,14 @@ class VectorStore:
                          ),
                          module="vector_store", func="build_index")
             self.clear_index(delete_files=True)
+            self._vectors_are_normalized = True
             terms_to_process = list(glossary_keys)
             mode = "full"
             reason = stale_reason_before or "requested"
         else:
             self._reset_terms_without_vectors()
+            if self.vectors is not None:
+                self._ensure_normalization_state()
             existing_terms_set = set(self.terms)
             terms_to_process = [t for t in glossary_keys if t not in existing_terms_set]
             mode = "incremental"
@@ -676,13 +794,15 @@ class VectorStore:
         success_count = 0
         failed_count = 0
         batch_size = 50
-
-        def embed_task(term):
-            try:
-                vec = embed_fn(term)
-                return term, vec, None
-            except Exception as e:
-                return term, None, str(e)
+        try:
+            checkpoint_terms = int(self.config.get(
+                "rag", "vector_index_checkpoint_terms", 1000))
+        except Exception:
+            checkpoint_terms = 1000
+        checkpoint_terms = max(batch_size, min(checkpoint_terms, 10_000))
+        pending_vector_batches: list[np.ndarray] = []
+        pending_terms: list[str] = []
+        pending_count = 0
 
         with ThreadPoolExecutor(max_workers=num_threads) as executor:
             for i in range(0, total, batch_size):
@@ -699,7 +819,7 @@ class VectorStore:
                         break
 
                 batch_terms = terms_to_process[i:i + batch_size]
-                futures = {executor.submit(embed_task, term): term for term in batch_terms}
+                futures = {executor.submit(self._embed_task, term, embed_fn): term for term in batch_terms}
 
                 batch_vectors = []
                 batch_valid_terms = []
@@ -710,8 +830,15 @@ class VectorStore:
                     term, vec, error = future.result()
                     processed_count += 1
 
+                    normalized_vec = None
                     if vec is not None:
-                        batch_vectors.append(np.array(vec, dtype=np.float32))
+                        try:
+                            normalized_vec = self._normalize_vector(vec)
+                        except ValueError as normalize_error:
+                            error = str(normalize_error)
+
+                    if normalized_vec is not None:
+                        batch_vectors.append(normalized_vec)
                         batch_valid_terms.append(term)
                         success_count += 1
                         if log_callback and processed_count % 10 == 0:
@@ -730,18 +857,34 @@ class VectorStore:
                     if progress_callback:
                         progress_callback(int(processed_count / total * 100))
 
-                # Save progress after each batch for resume support
                 if batch_vectors:
-                    new_vectors_np = np.vstack(batch_vectors)
+                    pending_vector_batches.append(np.vstack(batch_vectors))
+                    pending_terms.extend(batch_valid_terms)
+                    pending_count += len(batch_valid_terms)
+
+                should_checkpoint = bool(
+                    pending_vector_batches
+                    and (
+                        pending_count >= checkpoint_terms
+                        or i + batch_size >= total
+                        or self.stop_flag
+                    )
+                )
+                if should_checkpoint:
+                    new_vectors_np = np.vstack(pending_vector_batches)
                     if self.vectors is None:
                         self.vectors = new_vectors_np
+                        self._vectors_are_normalized = True
                     else:
                         combined_vectors = np.vstack([self.vectors, new_vectors_np])
                         self._close_mmap()
                         self.vectors = combined_vectors
-                    self.terms.extend(batch_valid_terms)
-                    self._append_terms_to_lexical_index(batch_valid_terms)
+                    self.terms.extend(pending_terms)
+                    self._append_terms_to_lexical_index(pending_terms)
                     self.save_index_state(embedding_fingerprint=current_fingerprint)
+                    pending_vector_batches.clear()
+                    pending_terms.clear()
+                    pending_count = 0
 
         result = VectorIndexBuildResult(
             mode=mode,
@@ -769,26 +912,9 @@ class VectorStore:
 
     def search_cosine(self, query_vec: np.ndarray, top_k: int = 10) -> list[tuple[str, float]]:
         """Return [(term, similarity_score), ...] sorted by score desc."""
-        if self.vectors is None or len(self.terms) == 0:
+        similarities = self.search_cosine_full(query_vec)
+        if similarities.size == 0:
             return []
-
-        query_vec = query_vec.astype(np.float32).flatten()
-        query_norm = np.linalg.norm(query_vec)
-        if query_norm > 0:
-            query_vec = query_vec / query_norm
-
-        num_vectors = self.vectors.shape[0]
-        similarities = np.zeros(num_vectors, dtype=np.float32)
-        batch_size = 10000
-
-        for start_idx in range(0, num_vectors, batch_size):
-            end_idx = min(start_idx + batch_size, num_vectors)
-            batch_vectors = np.array(self.vectors[start_idx:end_idx], dtype=np.float32)
-            batch_norms = np.linalg.norm(batch_vectors, axis=1, keepdims=True)
-            batch_norms[batch_norms == 0] = 1
-            batch_vectors = batch_vectors / batch_norms
-            similarities[start_idx:end_idx] = batch_vectors @ query_vec
-            del batch_vectors
 
         if top_k >= len(similarities):
             ranked_idx = np.argsort(similarities)[::-1]
@@ -799,8 +925,6 @@ class VectorStore:
         for idx in ranked_idx:
             if idx < len(self.terms):
                 results.append((self.terms[idx], float(similarities[idx])))
-
-        del similarities
         return results
 
     def search_containment(self, query_lower: str, top_k: int = 5,
@@ -815,12 +939,25 @@ class VectorStore:
 
         self._ensure_lexical_index()
 
-        candidate_indices = range(len(self.terms))
+        candidate_indices = None
         query_tokens = [t for t in query_norm.split() if t]
         if len(query_tokens) > 1:
+            # Multi-token: use token inverted index (narrowest posting list).
             indexed_hits = [self._token_to_indices[t] for t in set(query_tokens) if t in self._token_to_indices]
             if indexed_hits:
                 candidate_indices = min(indexed_hits, key=len)
+        elif len(query_norm) >= 3:
+            # Single token >= 3 chars: use trigram index for substring matching.
+            trigrams = self._extract_trigrams(query_norm)
+            trigram_hits = [self._trigram_to_indices[tg] for tg in trigrams if tg in self._trigram_to_indices]
+            if trigram_hits:
+                candidate_indices = set.intersection(*trigram_hits)
+        else:
+            # Very short single-token queries are too broad for substring scans.
+            # Restrict them to exact token-index hits; otherwise return no hits.
+            candidate_indices = self._token_to_indices.get(query_norm, [])
+        if candidate_indices is None:
+            return []
 
         indices = [
             i for i in candidate_indices
@@ -836,21 +973,26 @@ class VectorStore:
             return np.array([], dtype=np.float32)
 
         query_vec = query_vec.astype(np.float32).flatten()
-        query_norm = np.linalg.norm(query_vec)
-        if query_norm > 0:
-            query_vec = query_vec / query_norm
+        if query_vec.size != self.vectors.shape[1] or not np.all(np.isfinite(query_vec)):
+            return np.array([], dtype=np.float32)
+        query_norm = float(np.linalg.norm(query_vec))
+        if not np.isfinite(query_norm) or query_norm <= 0:
+            return np.zeros(self.vectors.shape[0], dtype=np.float32)
+        query_vec = query_vec / query_norm
+        vectors_are_normalized = self._ensure_normalization_state()
 
         num_vectors = self.vectors.shape[0]
-        similarities = np.zeros(num_vectors, dtype=np.float32)
         batch_size = 10000
+        similarities = np.zeros(num_vectors, dtype=np.float32)
 
         for start_idx in range(0, num_vectors, batch_size):
             end_idx = min(start_idx + batch_size, num_vectors)
-            batch_vectors = np.array(self.vectors[start_idx:end_idx], dtype=np.float32)
-            batch_norms = np.linalg.norm(batch_vectors, axis=1, keepdims=True)
-            batch_norms[batch_norms == 0] = 1
-            batch_vectors = batch_vectors / batch_norms
-            similarities[start_idx:end_idx] = batch_vectors @ query_vec
-            del batch_vectors
+            batch = np.asarray(self.vectors[start_idx:end_idx], dtype=np.float32)
+            if vectors_are_normalized:
+                similarities[start_idx:end_idx] = batch @ query_vec
+            else:
+                norms = np.linalg.norm(batch, axis=1, keepdims=True)
+                norms[norms == 0] = 1
+                similarities[start_idx:end_idx] = (batch / norms) @ query_vec
 
         return similarities

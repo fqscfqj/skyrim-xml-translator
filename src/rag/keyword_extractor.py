@@ -1,5 +1,6 @@
 """Keyword extraction from source text using LLM-first strategy."""
 
+import hashlib
 import json
 import re
 from collections import Counter
@@ -66,7 +67,8 @@ class KeywordExtractor:
             return []
 
         if self._cache is not None:
-            cache_key = LRUCache.make_key(self._KW_CACHE_VERSION, text)
+            cache_fingerprint = self._keyword_cache_fingerprint()
+            cache_key = LRUCache.make_key(self._KW_CACHE_VERSION, cache_fingerprint, text)
             cached = self._cache.get(cache_key)
             if cached is not None:
                 try:
@@ -84,7 +86,7 @@ class KeywordExtractor:
                     name="cache_hit",
                     before=[],
                     after=cached,
-                    note=f"cache_version={self._KW_CACHE_VERSION}",
+                    note=f"cache_version={self._KW_CACHE_VERSION}; fingerprint={cache_fingerprint[:12]}",
                 )
                 if return_debug:
                     return cached, debug_info
@@ -139,7 +141,7 @@ class KeywordExtractor:
             pass
 
         if self._cache is not None:
-            cache_key = LRUCache.make_key(self._KW_CACHE_VERSION, text)
+            cache_key = LRUCache.make_key(self._KW_CACHE_VERSION, self._keyword_cache_fingerprint(), text)
             self._cache.put(cache_key, keywords)
 
         debug_info["final_keywords"] = list(keywords)
@@ -194,6 +196,31 @@ class KeywordExtractor:
                     phrases.append(phrase)
             i = max(i + 1, j)
         return phrases
+
+    def _keyword_cache_fingerprint(self) -> str:
+        prompt_config = self.prompt_manager.get("rag.keywords", "")
+        model_config = {}
+        for section in ("llm_search", "llm_search_fallback", "llm"):
+            for key in ("base_url", "model"):
+                try:
+                    model_config[f"{section}.{key}"] = self.config.get(section, key, "")
+                except Exception:
+                    model_config[f"{section}.{key}"] = ""
+            try:
+                params = self.config.get(section, "parameters", {}) or {}
+            except Exception:
+                params = {}
+            model_config[f"{section}.parameters"] = params if isinstance(params, dict) else str(params)
+        payload = {
+            "prompt": prompt_config,
+            "model": model_config,
+            "keyword_overrides": {
+                "temperature": 0.1,
+                "max_tokens": None,
+            },
+        }
+        raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     # --- Internal ---
 

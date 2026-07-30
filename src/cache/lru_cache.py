@@ -8,6 +8,8 @@ from collections import OrderedDict
 from threading import Lock
 from typing import Any, Optional
 
+from src.logging_helper import emit as log_emit
+
 
 class LRUCache:
     def __init__(self, max_size: int = 10000, ttl_seconds: float = 0,
@@ -19,6 +21,7 @@ class LRUCache:
         self._persist_path = persist_path
 
         if persist_path:
+            self._cleanup_tmp_file()
             self.load_from_disk()
 
     def get(self, key: str) -> Optional[Any]:
@@ -69,21 +72,32 @@ class LRUCache:
         try:
             os.makedirs(os.path.dirname(self._persist_path) or ".", exist_ok=True)
             with self._lock:
-                # Only persist JSON-serializable values
-                data = {}
-                for k, (v, ts) in self._cache.items():
-                    try:
-                        json.dumps(v)  # test serializability
-                        data[k] = {"v": v, "ts": ts}
-                    except (TypeError, ValueError):
-                        continue
-                # Write inside lock to prevent concurrent corruption
-                tmp_path = self._persist_path + ".tmp"
-                with open(tmp_path, "w", encoding="utf-8") as f:
-                    json.dump(data, f, ensure_ascii=False)
-                os.replace(tmp_path, self._persist_path)
-        except Exception:
-            pass
+                snapshot = list(self._cache.items())
+
+            # Serialize and write outside the cache lock so translation workers
+            # can continue reading and updating the in-memory cache.
+            data = {}
+            for k, (v, ts) in snapshot:
+                try:
+                    json.dumps(v)  # test serializability
+                    data[k] = {"v": v, "ts": ts}
+                except (TypeError, ValueError):
+                    continue
+
+            tmp_path = self._persist_path + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+            os.replace(tmp_path, self._persist_path)
+        except Exception as e:
+            log_emit(
+                None,
+                None,
+                "WARNING",
+                f"Failed to persist LRU cache: {e}",
+                exc=e,
+                module="lru_cache",
+                func="save_to_disk",
+            )
 
     def load_from_disk(self) -> None:
         if not self._persist_path or not os.path.exists(self._persist_path):
@@ -103,6 +117,24 @@ class LRUCache:
                 # Trim to max size (keep most recent)
                 while len(self._cache) > self._max_size:
                     self._cache.popitem(last=False)
+        except Exception as e:
+            log_emit(
+                None,
+                None,
+                "WARNING",
+                f"Failed to load persisted LRU cache: {e}",
+                exc=e,
+                module="lru_cache",
+                func="load_from_disk",
+            )
+
+    def _cleanup_tmp_file(self) -> None:
+        if not self._persist_path:
+            return
+        tmp_path = self._persist_path + ".tmp"
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
         except Exception:
             pass
 

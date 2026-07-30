@@ -28,8 +28,11 @@ class _DummyPromptManager:
 
 
 class _DummyConfig:
+    def __init__(self, config=None):
+        self._config = config or {}
+
     def get(self, section, key, default=None):
-        return default
+        return self._config.get(section, {}).get(key, default)
 
 
 class _DummyGlossaryManager:
@@ -180,6 +183,61 @@ class KeywordExtractorPromptStructureTests(unittest.TestCase):
             if step["phase"] == "llm" and step["name"] == "filter_keyword_is_source_text"
         )
         self.assertEqual(["Give it to me"], source_filter_step["dropped"])
+
+    def test_keyword_cache_fingerprint_changes_with_search_parameters_and_fallback_model(self):
+        base_config = {
+            "llm_search": {
+                "base_url": "http://search.local/v1",
+                "model": "search-model",
+                "parameters": {"top_p": 0.9, "enable_thinking": False},
+            },
+            "llm_search_fallback": {
+                "base_url": "http://fallback.local/v1",
+                "model": "fallback-model-a",
+                "parameters": {"top_p": 0.8},
+            },
+            "llm": {
+                "base_url": "http://main.local/v1",
+                "model": "main-model",
+                "parameters": {"top_p": None},
+            },
+        }
+        changed_parameter_config = {
+            **base_config,
+            "llm_search": {
+                **base_config["llm_search"],
+                "parameters": {"top_p": 0.5, "enable_thinking": False},
+            },
+        }
+        changed_fallback_config = {
+            **base_config,
+            "llm_search_fallback": {
+                **base_config["llm_search_fallback"],
+                "model": "fallback-model-b",
+            },
+        }
+
+        base = KeywordExtractor(
+            llm_client=_DummyLLMClient(),
+            prompt_manager=_DummyPromptManager('原文："{text}"'),
+            config_manager=_DummyConfig(base_config),
+            glossary_manager=_DummyGlossaryManager(),
+        )
+        changed_parameter = KeywordExtractor(
+            llm_client=_DummyLLMClient(),
+            prompt_manager=_DummyPromptManager('原文："{text}"'),
+            config_manager=_DummyConfig(changed_parameter_config),
+            glossary_manager=_DummyGlossaryManager(),
+        )
+        changed_fallback = KeywordExtractor(
+            llm_client=_DummyLLMClient(),
+            prompt_manager=_DummyPromptManager('原文："{text}"'),
+            config_manager=_DummyConfig(changed_fallback_config),
+            glossary_manager=_DummyGlossaryManager(),
+        )
+
+        self.assertNotEqual(base._keyword_cache_fingerprint(), changed_parameter._keyword_cache_fingerprint())
+        self.assertNotEqual(base._keyword_cache_fingerprint(), changed_fallback._keyword_cache_fingerprint())
 
 
 if __name__ == "__main__":

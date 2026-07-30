@@ -1,7 +1,10 @@
 import unittest
 from typing import Any, cast
+from unittest.mock import patch
 
 from src.llm.client import LLMClient
+from src.llm.cost_tracker import CostTracker
+from src.llm.retry import ErrorType
 
 
 class _DummyConfig:
@@ -54,11 +57,39 @@ class _ResponseFormatRejected(Exception):
     status_code = 400
 
 
+class _ClosableClient:
+    def __init__(self, name, events):
+        self.name = name
+        self.events = events
+
+    def close(self):
+        self.events.append(f"close:{self.name}")
+
+
 def _install_fake_client(client: LLMClient, fake_client: _FakeClient):
     client.llm_client = cast(Any, fake_client)
 
 
 class LLMClientParameterOverrideTests(unittest.TestCase):
+    def test_reload_config_closes_old_clients_before_reinitializing(self):
+        events = []
+        client = object.__new__(LLMClient)
+        client.llm_client = cast(Any, _ClosableClient("llm", events))
+        client.search_llm_client = cast(Any, _ClosableClient("search", events))
+        client.search_fallback_llm_client = cast(Any, _ClosableClient("fallback", events))
+        client.embed_client = cast(Any, _ClosableClient("embedding", events))
+        client._init_clients = cast(Any, lambda: events.append("init"))
+
+        client.reload_config()
+
+        self.assertEqual(events, [
+            "close:llm",
+            "close:search",
+            "close:fallback",
+            "close:embedding",
+            "init",
+        ])
+
     def test_chat_completion_can_disable_configured_thinking(self):
         config = _DummyConfig({
             ("llm", "model"): "deepseek-v4-pro",
@@ -162,7 +193,8 @@ class LLMClientParameterOverrideTests(unittest.TestCase):
             ("llm", "max_retries"): 0,
             ("llm", "json_response_format_enabled"): True,
         })
-        client = LLMClient(config)
+        tracker = CostTracker()
+        client = LLMClient(config, cost_tracker=tracker)
         fake_client = _FakeClient([
             _ResponseFormatRejected("Unrecognized request argument supplied: response_format"),
             _Response(),
@@ -179,6 +211,34 @@ class LLMClientParameterOverrideTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[0]["response_format"], {"type": "json_object"})
         self.assertNotIn("response_format", calls[1])
+        self.assertEqual(tracker.get_counter("translate_api_attempts"), 2)
+        self.assertEqual(tracker.get_counter("response_format_fallbacks"), 1)
+
+    def test_retry_request_timeout_is_bounded_by_remaining_total_budget(self):
+        config = _DummyConfig({
+            ("llm", "model"): "deepseek-v4-flash",
+            ("llm", "max_retries"): 1,
+            ("llm", "request_timeout"): 180,
+            ("llm", "request_timeout_step"): 15,
+            ("llm", "request_timeout_max"): 180,
+            ("llm", "retry_total_timeout"): 300,
+        })
+        client = LLMClient(config)
+        fake_client = _FakeClient([RuntimeError("temporary failure"), _Response()])
+        _install_fake_client(client, fake_client)
+
+        with (
+            patch("src.llm.client.monotonic", side_effect=[100.0, 100.0, 279.0]),
+            patch("src.llm.retry.classify_error", return_value=ErrorType.CONNECTION_ERROR),
+            patch("src.llm.retry.compute_delay", return_value=0.0),
+            patch("src.llm.retry.time.sleep"),
+        ):
+            result = client.chat_completion([{"role": "user", "content": "Translate."}])
+
+        self.assertEqual(result, '{"translation":"ok"}')
+        calls = fake_client.chat.completions.calls
+        self.assertEqual(calls[0]["timeout"], 180)
+        self.assertEqual(calls[1]["timeout"], 121)
 
 
 if __name__ == "__main__":

@@ -96,6 +96,66 @@ class ESPXMLProcessorInnerContentTests(unittest.TestCase):
         self.assertIsNotNone(traduit_node)
         self.assertEqual(0, len(list(traduit_node)))
 
+    def test_update_dest_preserves_existing_cdata_shape(self):
+        file_path = self._write_fixture(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+            "<Root><ESP>"
+            "<EDID>BookText</EDID>"
+            "<ORIGINAL><![CDATA[Source <mag>]]></ORIGINAL>"
+            "<TRADUIT><![CDATA[Old <mag>]]></TRADUIT>"
+            "</ESP></Root>"
+        )
+
+        processor = ESPXMLProcessor()
+        self.assertTrue(processor.load_file(file_path))
+        node = next(processor.get_strings())[0]
+
+        processor.update_dest(node, "新译文 <mag>", overwrite=True)
+        self.assertTrue(processor.save_file(file_path))
+
+        raw_output = Path(file_path).read_text(encoding="utf-8")
+        self.assertIn("<TRADUIT><![CDATA[新译文 <mag>]]></TRADUIT>", raw_output)
+
+        reloaded = ESPXMLProcessor()
+        self.assertTrue(reloaded.load_file(file_path))
+        self.assertEqual("新译文 <mag>", next(reloaded.get_strings())[3])
+
+    def test_rejects_doctype_entity_declarations(self):
+        file_path = self._write_fixture(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+            "<!DOCTYPE Root [<!ENTITY xxe SYSTEM \"file:///etc/passwd\">]>\n"
+            "<Root><ESP><EDID>BookText</EDID><ORIGINAL>&xxe;</ORIGINAL><TRADUIT></TRADUIT></ESP></Root>"
+        )
+
+        processor = ESPXMLProcessor()
+        self.assertFalse(processor.load_file(file_path))
+
+    def test_rejects_utf16_doctype_entity_declarations(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        file_path = Path(temp_dir.name) / "unsafe-utf16.xml"
+        file_path.write_text(
+            "<?xml version=\"1.0\" encoding=\"utf-16\"?>\n"
+            "<!DOCTYPE Root [<!ENTITY x \"X\">]>\n"
+            "<Root><ESP><EDID>Book</EDID><ORIGINAL>&x;</ORIGINAL><TRADUIT/></ESP></Root>",
+            encoding="utf-16",
+        )
+
+        processor = ESPXMLProcessor()
+        self.assertFalse(processor.load_file(str(file_path)))
+
+    def test_allows_declaration_text_inside_comment_and_cdata(self):
+        file_path = self._write_fixture(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+            "<Root><!-- <!DOCTYPE harmless> -->"
+            "<ESP><EDID>Book</EDID><ORIGINAL><![CDATA[hello <!ENTITY harmless>]]></ORIGINAL>"
+            "<TRADUIT/></ESP></Root>"
+        )
+
+        processor = ESPXMLProcessor()
+        self.assertTrue(processor.load_file(file_path))
+        self.assertEqual("hello <!ENTITY harmless>", next(processor.get_strings())[2])
+
 
 if __name__ == "__main__":
     unittest.main()
