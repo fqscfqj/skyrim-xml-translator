@@ -48,7 +48,9 @@ _DEFAULT_STRATEGIES: dict[ErrorType, RetryStrategy] = {
 
 _CONTENT_BLOCK_MARKERS = (
     "data_inspection_failed",
+    "data inspection failed",
     "output data may contain inappropriate content",
+    "input data may contain inappropriate content",
     "moderation block",
     "content_filter",
     "high risk",
@@ -60,46 +62,97 @@ def _has_any_marker(text: str, markers: tuple[str, ...]) -> bool:
     return any(marker in lowered for marker in markers)
 
 
+def extract_provider_error_details(exc: Exception) -> dict[str, Any]:
+    """Extract structured provider error fields from OpenAI-compatible errors."""
+    response = getattr(exc, "response", None)
+    status_code = getattr(exc, "status_code", None)
+    if status_code is None:
+        status_code = getattr(response, "status_code", None)
+    try:
+        status_code = int(status_code) if status_code is not None else None
+    except Exception:
+        status_code = None
+
+    body = getattr(exc, "body", None)
+    payloads: list[dict[str, Any]] = []
+    if isinstance(body, dict):
+        payloads.append(body)
+        nested_error = body.get("error")
+        if isinstance(nested_error, dict):
+            payloads.insert(0, nested_error)
+
+    def first_value(*keys: str) -> Any:
+        for payload in payloads:
+            for key in keys:
+                value = payload.get(key)
+                if value not in (None, ""):
+                    return value
+        return None
+
+    headers = getattr(response, "headers", None)
+    header_request_id = None
+    if headers:
+        try:
+            header_request_id = headers.get("x-request-id") or headers.get("request-id")
+        except Exception:
+            header_request_id = None
+
+    request_id = (
+        getattr(exc, "request_id", None)
+        or first_value("request_id")
+        or header_request_id
+    )
+    code = getattr(exc, "code", None) or first_value("code")
+    error_type = first_value("type")
+    param = first_value("param")
+    message = first_value("message")
+    if message is None:
+        message = str(exc or "")
+
+    return {
+        "status_code": status_code,
+        "request_id": str(request_id) if request_id is not None else None,
+        "code": str(code) if code is not None else None,
+        "type": str(error_type) if error_type is not None else None,
+        "param": str(param) if param is not None else None,
+        "message": " ".join(str(message).split())[:1000],
+    }
+
+
+def format_provider_error(exc: Exception) -> str:
+    """Format provider error details for logs and user-visible diagnostics."""
+    details = extract_provider_error_details(exc)
+    labels = (
+        ("status", details.get("status_code")),
+        ("code", details.get("code")),
+        ("type", details.get("type")),
+        ("request_id", details.get("request_id")),
+        ("message", details.get("message")),
+    )
+    formatted = ", ".join(f"{key}={value}" for key, value in labels if value not in (None, ""))
+    return formatted or str(exc)
+
+
 def _is_content_block_error(exc: Exception) -> bool:
     """Detect provider-side safety / content-inspection blocks."""
     status_code = getattr(exc, "status_code", None)
-    if status_code in (403, 421):
+    if status_code == 421:
         return True
-
-    if not isinstance(exc, openai.BadRequestError):
-        return False
 
     message = str(exc or "")
     if _has_any_marker(message, _CONTENT_BLOCK_MARKERS):
         return True
 
-    code = getattr(exc, "code", None)
-    if isinstance(code, str) and code.lower() in ("data_inspection_failed", "content_filter", "421"):
+    details = extract_provider_error_details(exc)
+    fields = " ".join(
+        str(details.get(key) or "")
+        for key in ("code", "type", "param", "message")
+    )
+    if _has_any_marker(fields, _CONTENT_BLOCK_MARKERS):
         return True
 
-    body = getattr(exc, "body", None)
-    if isinstance(body, dict):
-        err = body.get("error")
-        if isinstance(err, dict):
-            err_type = err.get("type")
-            if isinstance(err_type, str) and err_type.lower() == "content_filter":
-                return True
-
-            err_code = err.get("code")
-            err_message = err.get("message")
-            err_param = err.get("param")
-            if isinstance(err_code, int) and err_code == 421:
-                return True
-            if isinstance(err_code, str) and err_code.lower() == "data_inspection_failed":
-                return True
-            if isinstance(err_code, str) and err_code.strip() == "421":
-                return True
-            if isinstance(err_message, str):
-                if _has_any_marker(err_message, _CONTENT_BLOCK_MARKERS):
-                    return True
-            if isinstance(err_param, str):
-                if _has_any_marker(err_param, _CONTENT_BLOCK_MARKERS):
-                    return True
+    if status_code == 403 and _has_any_marker(fields, ("content", "moderation", "inspection", "safety")):
+        return True
     return False
 
 
@@ -107,6 +160,8 @@ def classify_error(exc: Exception) -> ErrorType:
     """Classify an OpenAI/API exception into an ErrorType."""
     if isinstance(exc, openai.RateLimitError):
         return ErrorType.RATE_LIMIT
+    if _is_content_block_error(exc):
+        return ErrorType.CONTENT_BLOCK
     if isinstance(exc, openai.InternalServerError):
         return ErrorType.SERVER_ERROR
     if isinstance(exc, openai.APIConnectionError):
@@ -115,8 +170,6 @@ def classify_error(exc: Exception) -> ErrorType:
         return ErrorType.TIMEOUT
     if isinstance(exc, openai.AuthenticationError):
         return ErrorType.AUTH_ERROR
-    if _is_content_block_error(exc):
-        return ErrorType.CONTENT_BLOCK
     if isinstance(exc, openai.BadRequestError):
         return ErrorType.INVALID_REQUEST
     if isinstance(exc, openai.APIError):
@@ -227,7 +280,11 @@ def execute_with_retry(
             if strategy.max_retries == 0:
                 is_content_block = error_type == ErrorType.CONTENT_BLOCK
                 log_level = "WARNING" if is_content_block else "ERROR"
-                message = f"{log_prefix} non-retryable content block" if is_content_block else f"{log_prefix} non-retryable error ({error_type.value}): {exc}"
+                message = (
+                    f"{log_prefix} non-retryable content block: {format_provider_error(exc)}"
+                    if is_content_block
+                    else f"{log_prefix} non-retryable error ({error_type.value}): {exc}"
+                )
                 log_emit(log_callback, config_manager, log_level,
                          message,
                          exc=None if is_content_block else exc,

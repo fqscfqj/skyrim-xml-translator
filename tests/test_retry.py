@@ -4,11 +4,39 @@ from unittest.mock import patch
 from src.llm.retry import (
     ErrorType,
     RetryTimeBudgetExceeded,
+    classify_error,
     execute_with_retry,
+    extract_provider_error_details,
+    format_provider_error,
 )
 
 
+class _ProviderInspectionError(Exception):
+    status_code = 400
+    body = {
+        "error": {
+            "code": "data_inspection_failed",
+            "type": "data_inspection_failed",
+            "message": "Input data may contain inappropriate content.",
+            "request_id": "qwen-request-123",
+        }
+    }
+
+
 class RetryTimeBudgetTests(unittest.TestCase):
+    def test_extracts_qwen_content_inspection_error_details(self):
+        error = _ProviderInspectionError("provider rejected the request")
+
+        details = extract_provider_error_details(error)
+
+        self.assertEqual(details["status_code"], 400)
+        self.assertEqual(details["code"], "data_inspection_failed")
+        self.assertEqual(details["type"], "data_inspection_failed")
+        self.assertEqual(details["request_id"], "qwen-request-123")
+        self.assertIn("inappropriate content", details["message"])
+        self.assertEqual(classify_error(error), ErrorType.CONTENT_BLOCK)
+        self.assertIn("request_id=qwen-request-123", format_provider_error(error))
+
     def test_retry_stops_before_waiting_past_total_budget(self):
         def always_fail():
             raise RuntimeError("temporary failure")

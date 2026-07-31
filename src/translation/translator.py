@@ -16,6 +16,7 @@ from src.translation.response_parser import ModelRefusalError, ResponseParser
 from src.translation.quality_checker import QualityChecker, QualityIssue, QualityIssueType
 from src.cache.translation_cache import TranslationCache
 from src.logging_helper import emit as log_emit
+from src.llm.retry import ErrorType, classify_error, format_provider_error
 
 
 class Translator:
@@ -605,14 +606,22 @@ class Translator:
                 retry_count += 1
 
             except Exception as e:
+                is_content_block = classify_error(e) == ErrorType.CONTENT_BLOCK
+                error_summary = format_provider_error(e)
                 if isinstance(attempt_info, dict):
-                    attempt_info["error"] = str(e)
+                    attempt_info["error"] = error_summary
+                    attempt_info["result_status"] = "failed"
+                    attempt_info["result_details"] = error_summary
+                    attempt_info["accepted"] = False
                 log_emit(log_callback, self.rag_engine.config, "ERROR",
-                         f"Translation failed: {e}", exc=e,
+                         f"Translation failed: {error_summary}",
+                         exc=None if is_content_block else e,
                          module="translator", func="translate_text")
                 # Clear stale issues from previous iteration - LLM call failure
                 # means no quality check was performed, so no format error info
                 issues = []
+                if is_content_block:
+                    raise
                 if retry_count >= max_retries:
                     raise
                 retry_count += 1
