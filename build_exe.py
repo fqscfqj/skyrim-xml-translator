@@ -1,7 +1,25 @@
 import PyInstaller.__main__
 import os
 import shutil
+import sys
 import argparse
+
+
+def check_environment():
+    """Abort early if the active interpreter lacks PyQt6.
+
+    PyInstaller only collects packages visible to the interpreter it runs
+    under, so building with the system Python silently produces an exe that
+    crashes with 'No module named PyQt6'.
+    """
+    try:
+        import PyQt6  # noqa: F401
+    except ImportError:
+        raise SystemExit(
+            'PyQt6 is not importable in the current Python environment '
+            f'({sys.executable}). Build with the project venv instead:\n'
+            '  .venv\\Scripts\\python.exe build_exe.py'
+        )
 
 
 def collect_data_files():
@@ -46,6 +64,7 @@ def copy_runtime_folders_to_dist(dist_root: str):
 def build(onefile=True, windowed=True, name='SkyrimXMLTranslator', icon=None,
           clean_build=True, copy_runtime_folders=True):
     print('Starting build process...')
+    check_environment()
 
     if clean_build:
         # Clean up previous build for deterministic release artifacts.

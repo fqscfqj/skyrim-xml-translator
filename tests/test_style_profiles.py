@@ -1,5 +1,6 @@
 import unittest
 
+from src.prompt.prompt_manager import PromptManager
 from src.translation.prompt_builder import PromptBuilder
 from src.translation.style_profiles import StyleProfileResolver
 
@@ -85,6 +86,18 @@ class StyleProfileResolverTests(unittest.TestCase):
 
 
 class PromptBuilderStyleProfileTests(unittest.TestCase):
+    def test_default_prompts_require_natural_percent_comparatives(self):
+        prompt_manager = PromptManager()
+
+        for prompt_style in ("default", "nsfw"):
+            with self.subTest(prompt_style=prompt_style):
+                prompt = "\n".join(prompt_manager.get(
+                    f"translator.system_prompts.{prompt_style}", []
+                ))
+                self.assertIn("英语百分比比较结构", prompt)
+                self.assertIn("让百分比修饰变化幅度", prompt)
+                self.assertIn("“价格 X% 更好”", prompt)
+
     def test_single_prompt_keeps_system_level_style_and_dynamic_glossary_last(self):
         builder = PromptBuilder(_DummyPromptManager(), _DummyConfig())
 
