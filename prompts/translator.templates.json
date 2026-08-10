@@ -1,5 +1,5 @@
 {
   "glossary_header": "术语表：",
-  "glossary_instruction_append": "\n原文直接命中的术语应优先采用，只有语义明显不符时才可忽略；背景参考条目不得直接代入，也不得据此补全原文未出现的成分。",
+  "glossary_instruction_append": "\n仅采用与当前语义匹配的命中译名，不得用参考条目补全原文。",
   "user_template": "请将以下原文翻译为{target_language}：\n{text}"
 }

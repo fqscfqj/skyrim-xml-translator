@@ -86,7 +86,7 @@ class StyleProfileResolverTests(unittest.TestCase):
 
 
 class PromptBuilderStyleProfileTests(unittest.TestCase):
-    def test_default_prompts_require_natural_percent_comparatives(self):
+    def test_default_prompts_preserve_logic_and_natural_chinese(self):
         prompt_manager = PromptManager()
 
         for prompt_style in ("default", "nsfw"):
@@ -94,11 +94,39 @@ class PromptBuilderStyleProfileTests(unittest.TestCase):
                 prompt = "\n".join(prompt_manager.get(
                     f"translator.system_prompts.{prompt_style}", []
                 ))
-                self.assertIn("英语百分比比较结构", prompt)
-                self.assertIn("让百分比修饰变化幅度", prompt)
-                self.assertIn("“价格 X% 更好”", prompt)
-                self.assertIn("仅在被动意味重要时用“被”", prompt)
-                self.assertIn("省略重复成分和多余连接词", prompt)
+                self.assertIn("语义骨架", prompt)
+                self.assertIn("否定、数量、比较方向、条件、因果、时间、模态、确定性", prompt)
+                self.assertIn("原文不明确时保留歧义", prompt)
+                self.assertIn("仅在指代唯一、逻辑不变时省略重复成分", prompt)
+                self.assertIn("比较、增减和百分比必须明确作用对象与方向", prompt)
+                self.assertIn("不留无意义的源语言残片", prompt)
+                self.assertIn("__FMT_*__", prompt)
+
+    def test_nsfw_prompt_preserves_register_consent_and_participant_roles(self):
+        prompt = "\n".join(PromptManager().get(
+            "translator.system_prompts.nsfw", []
+        ))
+
+        self.assertIn("医学、普通直述、委婉、色情俚语和侮辱性粗口", prompt)
+        self.assertIn("不得把未拒绝推断为同意", prompt)
+        self.assertIn("台词中的猜测、威胁或指控", prompt)
+        self.assertIn("施事、受事、第三人、身体所属、动作落点和使役关系", prompt)
+        self.assertIn("动作、状态、生理反应、感受和结果", prompt)
+
+    def test_prompt_resources_stay_within_character_budgets(self):
+        prompt_manager = PromptManager()
+        limits = {"default": 850, "nsfw": 1150}
+
+        for prompt_style, limit in limits.items():
+            with self.subTest(prompt_style=prompt_style):
+                prompt = "\n".join(prompt_manager.get(
+                    f"translator.system_prompts.{prompt_style}", []
+                ))
+                self.assertLessEqual(len(prompt), limit)
+
+        for retry_name, retry_prompt in prompt_manager.get("translator.retry", {}).items():
+            with self.subTest(retry_name=retry_name):
+                self.assertLessEqual(len(retry_prompt), 400)
 
     def test_default_dialogue_profile_restructures_subjective_english_grammar(self):
         builder = PromptBuilder(PromptManager(), _DummyConfig())
@@ -112,7 +140,23 @@ class PromptBuilderStyleProfileTests(unittest.TestCase):
 
         self.assertIn("主系表和缓和语", system_prompt)
         self.assertIn("话语标记按语气转写或省略", system_prompt)
-        self.assertIn("做+名词", system_prompt)
+        self.assertIn("若会混淆施事、受事、第三人、身体所属或立场", system_prompt)
+
+    def test_nsfw_dialogue_profile_localizes_address_and_bodily_sensation(self):
+        builder = PromptBuilder(PromptManager(), _DummyConfig())
+
+        system_prompt, _ = builder.build(
+            "Don't worry, daddy. I'll make you feel amazing with my mouth.",
+            {},
+            prompt_style="nsfw",
+            context_hint={"record_type": "DIAL"},
+        )
+
+        self.assertIn("证据不足时不擅自确立或否定关系", system_prompt)
+        self.assertIn("身体感受与情绪评价按语境区分", system_prompt)
+        self.assertIn("按中文动宾和结果补语重组", system_prompt)
+        self.assertIn("必要所属不得省略", system_prompt)
+        self.assertIn("不把疼痛、恐惧或喘息无依据改成快感", system_prompt)
 
     def test_default_document_profile_restructures_english_long_sentences(self):
         builder = PromptBuilder(PromptManager(), _DummyConfig())
