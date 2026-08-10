@@ -1,5 +1,5 @@
 {
   "glossary_header": "术语表：",
-  "glossary_instruction_append": "\n仅采用与当前语义匹配的命中译名，不得用参考条目补全原文。",
+  "glossary_instruction_append": "\n术语条目仅是候选约束，不得覆盖原文证据。",
   "user_template": "请将以下原文翻译为{target_language}：\n{text}"
 }

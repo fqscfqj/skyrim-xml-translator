@@ -476,10 +476,10 @@ class PromptBuilderGlossaryContextTests(unittest.TestCase):
             {"Thane": "武卫", "Housecarl": "侍卫"},
         )
 
-        self.assertIn("命中术语（优先采用；仅在语义明显不符时忽略）", context)
+        self.assertIn("候选术语（仅在指称对象和当前语义一致时采用）", context)
         self.assertIn("- Thane -> 武卫", context)
         self.assertIn("- Housecarl -> 侍卫", context)
-        self.assertNotIn("参考术语（仅背景参考，禁止直接代入）", context)
+        self.assertNotIn("背景参考", context)
 
 
 if __name__ == "__main__":

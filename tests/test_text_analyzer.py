@@ -219,7 +219,8 @@ class PromptBuilderGlossaryContextTests(unittest.TestCase):
         system_prompt, _user_prompt = builder.build("Hello", {})
 
         self.assertIn("__FMT_*__", system_prompt)
-        self.assertIn("必须原样、完整保留", system_prompt)
+        self.assertIn("参与者角色", system_prompt)
+        self.assertIn("受保护标记的数量和结构关系", system_prompt)
 
     def test_glossary_context_respects_configured_max_chars(self):
         builder = PromptBuilder(
@@ -279,8 +280,22 @@ class PromptBuilderGlossaryContextTests(unittest.TestCase):
             },
         )
 
-        self.assertIn("普通对话空白规则", user_prompt)
-        self.assertIn("__FMT_*__", user_prompt)
+        self.assertIn("普通对话空白上下文", user_prompt)
+        self.assertIn("受保护标记保持结构关系", user_prompt)
+
+    def test_mcm_prompt_uses_control_function_instead_of_fixed_word_pairs(self):
+        builder = PromptBuilder(_DummyPromptManager(), _DummyConfig())
+
+        _system_prompt, user_prompt = builder.build(
+            "Apply",
+            {},
+            mcm_ui_mode=True,
+            context_hint={"entry_type": "option"},
+        )
+
+        self.assertIn("依据控件功能选择目标语言惯用表达", user_prompt)
+        self.assertIn("动作、状态还是枚举值", user_prompt)
+        self.assertNotIn("Enable=启用", user_prompt)
 
 
 if __name__ == "__main__":

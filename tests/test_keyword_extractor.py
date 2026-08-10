@@ -1,6 +1,7 @@
 import unittest
 from typing import Any, cast
 
+from src.prompt.prompt_manager import PromptManager
 from src.rag.keyword_extractor import KeywordExtractor
 
 
@@ -111,6 +112,21 @@ class KeywordExtractorPromptStructureTests(unittest.TestCase):
             ],
             messages,
         )
+
+    def test_default_keyword_prompt_uses_entity_evidence_without_fixed_examples(self):
+        extractor = KeywordExtractor(
+            llm_client=_DummyLLMClient(),
+            prompt_manager=PromptManager(),
+            config_manager=_DummyConfig(),
+            glossary_manager=_DummyGlossaryManager(),
+        )
+
+        prompt = extractor._get_keyword_prompt_template()
+
+        self.assertIn("稳定指向术语表实体或设定概念", prompt)
+        self.assertIn("不得仅因词语显著、情绪强烈或主题相关", prompt)
+        self.assertNotIn("Give it to me", prompt)
+        self.assertNotIn("Dragonborn", prompt)
 
     def test_unstructured_prompt_without_placeholder_falls_back_to_single_user_message(self):
         extractor = self._make_extractor("请提取关键词并输出 JSON 数组。")

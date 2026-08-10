@@ -91,6 +91,10 @@ class TranslatorRuntimeTagTests(unittest.TestCase):
             "Unique batch goodbye 7f0a",
         ])
         self.assertEqual(llm.calls, 2)
+        self.assertIn(
+            "替代核心中的单条响应格式",
+            llm.messages_seen[0][0]["content"],
+        )
 
     def test_batch_circuit_bypasses_later_batch_after_high_fallback_rate(self):
         config = _DummyConfig({
@@ -177,7 +181,7 @@ class TranslatorRuntimeTagTests(unittest.TestCase):
         source = ("This is a sentence that should be translated naturally. " * 90).strip()
         self.assertGreater(len(source), 4000)
         self.assertLess(len(source), 8000)
-        llm = _DummyLLMClient('{"translation":"译文"}')
+        llm = _SequenceLLMClient(['{"translation":"译文"}'])
         translator = _make_translator(llm, _DummyRAGEngine(_DummyConfig({
             ("general", "long_text_chunking_enabled"): True,
             ("general", "long_text_chunk_threshold_chars"): 4000,
@@ -188,6 +192,9 @@ class TranslatorRuntimeTagTests(unittest.TestCase):
 
         self.assertGreater(llm.calls, 1)
         self.assertEqual("译文" * llm.calls, result)
+        second_user_prompt = llm.messages_seen[1][1]["content"]
+        self.assertIn("前文候选译文", second_user_prompt)
+        self.assertIn("不得覆盖当前原文证据", second_user_prompt)
 
     def test_long_text_quality_check_only_uses_terms_present_in_source(self):
         source = (

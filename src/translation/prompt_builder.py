@@ -87,7 +87,7 @@ class PromptBuilder:
         if glossary_context:
             glossary_append = self.prompt_manager.get(
                 "translator.glossary_instruction_append",
-                "\n以上术语仅供参考，语义不符可忽略；不得据此补全原文未出现的成分。",
+                "\n术语条目仅是候选约束，不得覆盖原文证据。",
             )
             glossary_append = self.apply_prompt_vars(glossary_append, prompt_vars)
             sections.append(f"{glossary_context}{glossary_append}")
@@ -118,8 +118,8 @@ class PromptBuilder:
 
         system_prompt = self.apply_prompt_vars(self._get_system_prompt(prompt_style), prompt_vars)
         system_prompt += (
-            "\n\n批量短文本模式：忽略单条 translation JSON 输出格式，"
-            "只输出合法 JSON：{\"translations\":[{\"id\":0,\"translation\":\"...\"}]}。"
+            "\n\n本请求使用以下批量响应格式，替代核心中的单条响应格式："
+            "{\"translations\":[{\"id\":0,\"translation\":\"...\"}]}。"
             "必须包含每个输入 id，禁止输出解释。"
         )
 
@@ -149,7 +149,7 @@ class PromptBuilder:
             if glossary_context:
                 glossary_append = self.prompt_manager.get(
                     "translator.glossary_instruction_append",
-                    "\n以上术语仅供参考，语义不符可忽略；不得据此补全原文未出现的成分。",
+                    "\n术语条目仅是候选约束，不得覆盖原文证据。",
                 )
                 glossary_append = self.apply_prompt_vars(glossary_append, prompt_vars)
                 item_parts.append(f"{glossary_context}{glossary_append}")
@@ -184,7 +184,7 @@ class PromptBuilder:
         if not profile.rules:
             return ""
         lines = "\n".join(f"- {rule}" for rule in profile.rules)
-        return f"翻译风格包（{profile.profile_id}，必须遵守）：\n{lines}"
+        return f"文本类型与文体上下文（{profile.profile_id}，不与原文证据冲突时采用）：\n{lines}"
 
     def _build_mcm_ui_rules(self, target_lang_code: str, source_text: str,
                             context_hint: Optional[dict]) -> str:
@@ -196,39 +196,33 @@ class PromptBuilder:
 
         entry_type = entry_type_hint or self._infer_mcm_entry_type(entry_id)
         base_rules = [
-            "MCM 界面模式（必须）：按游戏 UI 文案翻译，不按叙事文本。",
-            "同类条目用词保持稳定，不随意换同义词。",
-            "按钮/选项保持短促命令式，不补主语，不加多余标点。",
-            "短标签不要扩写成完整句。",
-            "占位符、标签、token、花括号和转义序列必须原样保留。",
+            "MCM 界面上下文：按游戏 UI 功能表达，不套用叙事文体。",
+            "依据控件功能选择目标语言惯用表达：动作控件突出动作，状态或枚举项突出当前值，标题概括区域，说明文本交代影响或条件。",
+            "同一界面域内同功能用语保持一致；不要因源词相同而忽略词性或控件功能。",
+            "保持原信息密度，不补主语、背景或解释，也不把短标签扩写。",
+            "完整保留受保护标记及控件 token 的结构关系。",
         ]
-
-        if target_lang_code.lower().startswith("zh"):
-            base_rules.append(
-                "中文 UI 术语固定：Enable=启用，Disable=禁用，Apply=应用，Reset=重置，"
-                "Confirm=确认，Cancel=取消，On=开，Off=关，Yes=是，No=否。"
-            )
 
         if entry_type == "tooltip":
             base_rules.append(
-                "Tooltip 用简短说明句；同类提示不要混用“是否…”和“将会…”。"
+                "说明文本简洁交代影响、条件或后果，不套用固定句式。"
             )
         elif entry_type == "title":
             base_rules.append(
-                "标题/页头使用名词短语，不加句末标点。"
+                "标题概括所在区域或功能；原文明示动态状态或问句时保留其功能。"
             )
         elif entry_type == "option":
             base_rules.append(
-                "选项标签保持紧凑设置名，不写成完整分句。"
+                "判断选项表达的是动作、状态还是枚举值，并使用紧凑的设置项表达。"
             )
         else:
             if self._looks_like_short_ui_label(source_text):
                 base_rules.append(
-                    "该文本是短标签/按钮：译文保持简短、界面化。"
+                    "上下文表明该文本是短控件文案，译文保持紧凑、可扫描。"
                 )
 
         joined = "\n".join(f"- {r}" for r in base_rules)
-        return f"\n\nMCM 界面文案规则（必须）：\n{joined}"
+        return f"\n\nMCM 界面上下文（按原文证据采用）：\n{joined}"
 
     def _build_dialogue_whitespace_rules(self, context_hint: Optional[dict]) -> str:
         if not isinstance(context_hint, dict):
@@ -241,9 +235,9 @@ class PromptBuilder:
             return ""
 
         rules = [
-            "普通对话空白规则（必须）：",
-            "- 行首/行尾以及词间多余的普通空格若无结构意义，不必刻意保留，可按中文自然表达处理。",
-            "- 但换行、制表符、标签、占位符、token、花括号、转义序列以及任何 __FMT_*__ 哨兵必须原样保留。",
+            "普通对话空白上下文：",
+            "- 可规范化无结构意义的首尾或词间普通空格。",
+            "- 换行、制表、显式布局和受保护标记保持结构关系。",
         ]
         return "\n".join(rules)
 
@@ -310,13 +304,13 @@ class PromptBuilder:
             sections: list[str] = []
             if in_source_lines:
                 sections.append(
-                    "命中术语（优先采用；仅在语义明显不符时忽略）\n"
+                    "候选术语（仅在指称对象和当前语义一致时采用）\n"
                     + "\n".join(in_source_lines)
                 )
             if reference_lines:
                 sections.append(
-                    "注意：以下条目未在原文直接出现，只能辅助理解背景，不得用于补全或改写原文表层词形。\n"
-                    "参考术语（仅背景参考，禁止直接代入）\n"
+                    "以下条目仅提供可能相关的设定背景，不构成当前文本中的实体或译名证据；不得据此新增、替换或消歧原文未支持的信息。\n"
+                    "背景参考\n"
                     + "\n".join(reference_lines)
                 )
             return glossary_header + "\n\n" + "\n\n".join(sections)
@@ -383,12 +377,10 @@ class PromptBuilder:
             system_prompt = (
                 "将输入翻译为{target_language}。"
                 '只输出 JSON：{"translation":"..."}。'
-                "先理解全句含义再用自然地道的{target_language}重新表达，禁止逐词硬译；"
-                "口语称呼和习语按语境真实含义翻译，不取字面义。"
-                "保留所有 XML/HTML 标签、占位符、数字和结构性空白。"
-                "任何 __FMT_*__ 哨兵都是不可修改的格式占位符，必须原样、完整保留。"
-                "术语表仅作候选参考，语义匹配时采用；"
-                "简称不得扩写为全名/头衔，短词不得扩写为整句。"
+                "先确定命题、参与者角色、修饰和指代归属，以及否定、比较、条件、时间和模态的作用域，"
+                "再按{target_language}自然表达；保持原文语气和歧义，不加入上下文未支持的信息。"
+                "完整保留受保护标记的数量和结构关系；__FMT_*__ 和有序占位符保持必要顺序。"
+                "术语仅在指称对象和当前语义一致时采用。"
             )
         return self._normalize_prompt_text(system_prompt)
 

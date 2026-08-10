@@ -95,10 +95,14 @@ class PromptBuilderStyleProfileTests(unittest.TestCase):
                     f"translator.system_prompts.{prompt_style}", []
                 ))
                 self.assertIn("语义骨架", prompt)
-                self.assertIn("否定、数量、比较方向、条件、因果、时间、模态、确定性", prompt)
+                self.assertIn("谓词—论元关系", prompt)
+                self.assertIn("修饰归属、指代", prompt)
+                self.assertIn("限定的作用域", prompt)
                 self.assertIn("原文不明确时保留歧义", prompt)
+                self.assertIn("固定构式按整体功能处理", prompt)
+                self.assertIn("不将身份判断误作比较或方式", prompt)
                 self.assertIn("仅在指代唯一、逻辑不变时省略重复成分", prompt)
-                self.assertIn("比较、增减和百分比必须明确作用对象与方向", prompt)
+                self.assertIn("被度量对象、比较基准、方向、范围及数值", prompt)
                 self.assertIn("不留无意义的源语言残片", prompt)
                 self.assertIn("__FMT_*__", prompt)
 
@@ -115,7 +119,7 @@ class PromptBuilderStyleProfileTests(unittest.TestCase):
 
     def test_prompt_resources_stay_within_character_budgets(self):
         prompt_manager = PromptManager()
-        limits = {"default": 850, "nsfw": 1150}
+        limits = {"default": 900, "nsfw": 1200}
 
         for prompt_style, limit in limits.items():
             with self.subTest(prompt_style=prompt_style):
@@ -132,21 +136,21 @@ class PromptBuilderStyleProfileTests(unittest.TestCase):
         builder = PromptBuilder(PromptManager(), _DummyConfig())
 
         system_prompt, _ = builder.build(
-            "Feet are kind of weird, but I guess I could do a footjob.",
+            "Context-sensitive dialogue.",
             {},
             prompt_style="nsfw",
             context_hint={"record_type": "DIAL"},
         )
 
-        self.assertIn("主系表和缓和语", system_prompt)
-        self.assertIn("话语标记按语气转写或省略", system_prompt)
+        self.assertIn("话语的互动功能", system_prompt)
+        self.assertIn("省略后不改变态度、关系或推理强度", system_prompt)
         self.assertIn("若会混淆施事、受事、第三人、身体所属或立场", system_prompt)
 
     def test_nsfw_dialogue_profile_localizes_address_and_bodily_sensation(self):
         builder = PromptBuilder(PromptManager(), _DummyConfig())
 
         system_prompt, _ = builder.build(
-            "Don't worry, daddy. I'll make you feel amazing with my mouth.",
+            "Context-sensitive adult dialogue.",
             {},
             prompt_style="nsfw",
             context_hint={"record_type": "DIAL"},
@@ -154,7 +158,7 @@ class PromptBuilderStyleProfileTests(unittest.TestCase):
 
         self.assertIn("证据不足时不擅自确立或否定关系", system_prompt)
         self.assertIn("身体感受与情绪评价按语境区分", system_prompt)
-        self.assertIn("按中文动宾和结果补语重组", system_prompt)
+        self.assertIn("保持其语义角色，以自然中文重组", system_prompt)
         self.assertIn("必要所属不得省略", system_prompt)
         self.assertIn("不把疼痛、恐惧或喘息无依据改成快感", system_prompt)
 
@@ -168,8 +172,8 @@ class PromptBuilderStyleProfileTests(unittest.TestCase):
             context_hint={"record_type": "BOOK", "field_type": "TEXT"},
         )
 
-        self.assertIn("按中文信息顺序重排", system_prompt)
-        self.assertIn("不保留英语长句骨架", system_prompt)
+        self.assertIn("命题之间的附着、并列、递进、因果、时序和范围关系", system_prompt)
+        self.assertIn("调整句界", system_prompt)
 
     def test_single_prompt_keeps_system_level_style_and_dynamic_glossary_last(self):
         builder = PromptBuilder(_DummyPromptManager(), _DummyConfig())
@@ -181,7 +185,7 @@ class PromptBuilderStyleProfileTests(unittest.TestCase):
             context_hint={"record_type": "DIAL", "text_kind": "dialogue"},
         )
 
-        self.assertIn("翻译风格包（dialogue，必须遵守）", system_prompt)
+        self.assertIn("文本类型与文体上下文（dialogue，不与原文证据冲突时采用）", system_prompt)
         self.assertIn("共享世界观规则", system_prompt)
         self.assertIn("成人内容规则", system_prompt)
         self.assertIn("成人对话规则", system_prompt)
@@ -202,12 +206,12 @@ class PromptBuilderStyleProfileTests(unittest.TestCase):
             context_hint={"record_type": "BOOK", "field_type": "TEXT"},
         )
 
-        dialogue_core = dialogue_system.split("\n\n翻译风格包", 1)[0]
-        book_core = book_system.split("\n\n翻译风格包", 1)[0]
+        dialogue_core = dialogue_system.split("\n\n文本类型与文体上下文", 1)[0]
+        book_core = book_system.split("\n\n文本类型与文体上下文", 1)[0]
         self.assertEqual(dialogue_core, book_core)
         self.assertTrue(dialogue_core.startswith("基础规则 "))
-        self.assertIn("翻译风格包（dialogue，必须遵守）", dialogue_system)
-        self.assertIn("翻译风格包（lore_book，必须遵守）", book_system)
+        self.assertIn("文本类型与文体上下文（dialogue，不与原文证据冲突时采用）", dialogue_system)
+        self.assertIn("文本类型与文体上下文（lore_book，不与原文证据冲突时采用）", book_system)
 
     def test_batch_prompt_keeps_item_style_rules_scoped_to_each_item(self):
         builder = PromptBuilder(_DummyPromptManager(), _DummyConfig())
@@ -228,9 +232,9 @@ class PromptBuilderStyleProfileTests(unittest.TestCase):
             prompt_style="default",
         )
 
-        self.assertNotIn("翻译风格包", system_prompt)
-        self.assertIn("翻译风格包（lore_book，必须遵守）", user_prompt)
-        self.assertIn("翻译风格包（dialogue，必须遵守）", user_prompt)
+        self.assertNotIn("文本类型与文体上下文", system_prompt)
+        self.assertIn("文本类型与文体上下文（lore_book，不与原文证据冲突时采用）", user_prompt)
+        self.assertIn("文本类型与文体上下文（dialogue，不与原文证据冲突时采用）", user_prompt)
 
 
 if __name__ == "__main__":

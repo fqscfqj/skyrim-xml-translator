@@ -1023,7 +1023,8 @@ class Translator:
             if previous_translation:
                 context_snippet = previous_translation[-1000:]
                 user_content = (
-                    "前文译文（仅用于保持语气、称谓和上下文衔接，禁止重复输出）：\n"
+                    "前文候选译文（仅用于解析当前片段的指代、称谓、时间和衔接；"
+                    "不得复制，也不得覆盖当前原文证据）：\n"
                     f"{context_snippet}\n\n"
                     f"{user_content}"
                 )
@@ -1454,9 +1455,9 @@ class Translator:
 
         default_retry = (
             "上次结果存在质量问题，请重新翻译为{target_language}。"
-            "确保：完整翻译不残留源语言词；保留所有标签、[pagebreak]、占位符和结构性空白；"
-            "不得新增、删除、重排或修复任何标签/标记；若原文中出现形如 __FMT_*__ 的哨兵，必须原样保留；"
-            "术语表仅作参考；忠实原文形式不扩写；仅输出 JSON。"
+            "修正已报告问题，同时保持原文命题、参与者关系、作用域、语气、歧义和受保护结构；"
+            "除语义或约定要求保留的形式外，不输出未处理的源语言残片，也不加入原文未支持的信息。"
+            "仅输出 JSON：{\"translation\":\"...\"}。"
         )
         retry_template = self.prompt_manager.get(template_key, default_retry)
         prompt = PromptBuilder.apply_prompt_vars(retry_template, prompt_vars)

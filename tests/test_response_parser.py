@@ -10,6 +10,17 @@ class _DummyConfig:
         return default
 
 
+class _FollowupLLMClient:
+    def __init__(self, response):
+        self.response = response
+        self.messages = None
+
+    def chat_completion(self, messages, log_callback=None):
+        _ = log_callback
+        self.messages = messages
+        return self.response
+
+
 class ResponseParserTests(unittest.TestCase):
     def setUp(self):
         self.parser = ResponseParser(_DummyConfig())
@@ -143,6 +154,22 @@ class ResponseParserTests(unittest.TestCase):
 
         self.assertEqual(result, "Hello")
         self.assertTrue(any("Discarding broken JSON fragment" in message for message in logs), logs)
+
+    def test_followup_reformat_only_receives_candidate_response(self):
+        client = _FollowupLLMClient('{"translation":"候选译文"}')
+
+        result = self.parser._try_followup_reformat(
+            "候选译文",
+            [{"role": "user", "content": "完整原任务提示不得转发"}],
+            client,
+            None,
+        )
+
+        self.assertEqual(result, "候选译文")
+        combined = "\n".join(message["content"] for message in client.messages)
+        self.assertIn("候选响应", combined)
+        self.assertIn("不得翻译、润色、补全、总结", combined)
+        self.assertNotIn("完整原任务提示不得转发", combined)
 
     def test_batch_standard(self):
         result = self.parser.parse_batch(
