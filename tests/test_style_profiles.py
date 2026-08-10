@@ -97,6 +97,35 @@ class PromptBuilderStyleProfileTests(unittest.TestCase):
                 self.assertIn("英语百分比比较结构", prompt)
                 self.assertIn("让百分比修饰变化幅度", prompt)
                 self.assertIn("“价格 X% 更好”", prompt)
+                self.assertIn("仅在被动意味重要时用“被”", prompt)
+                self.assertIn("省略重复成分和多余连接词", prompt)
+
+    def test_default_dialogue_profile_restructures_subjective_english_grammar(self):
+        builder = PromptBuilder(PromptManager(), _DummyConfig())
+
+        system_prompt, _ = builder.build(
+            "Feet are kind of weird, but I guess I could do a footjob.",
+            {},
+            prompt_style="nsfw",
+            context_hint={"record_type": "DIAL"},
+        )
+
+        self.assertIn("主系表和缓和语", system_prompt)
+        self.assertIn("话语标记按语气转写或省略", system_prompt)
+        self.assertIn("做+名词", system_prompt)
+
+    def test_default_document_profile_restructures_english_long_sentences(self):
+        builder = PromptBuilder(PromptManager(), _DummyConfig())
+
+        system_prompt, _ = builder.build(
+            "A chronicle with several nested clauses.",
+            {},
+            prompt_style="default",
+            context_hint={"record_type": "BOOK", "field_type": "TEXT"},
+        )
+
+        self.assertIn("按中文信息顺序重排", system_prompt)
+        self.assertIn("不保留英语长句骨架", system_prompt)
 
     def test_single_prompt_keeps_system_level_style_and_dynamic_glossary_last(self):
         builder = PromptBuilder(_DummyPromptManager(), _DummyConfig())
