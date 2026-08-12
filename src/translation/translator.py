@@ -1456,7 +1456,9 @@ class Translator:
         default_retry = (
             "上次结果存在质量问题，请重新翻译为{target_language}。"
             "修正已报告问题，同时保持原文命题、参与者关系、作用域、语气、歧义和受保护结构；"
-            "除语义或约定要求保留的形式外，不输出未处理的源语言残片，也不加入原文未支持的信息。"
+            "可见自然语言均应译出，引号、括注、大小写或专名身份不构成保护；"
+            "仅格式标记、内部标识符、约定缩写或语义明确要求展示原拼写时保留源文形式，"
+            "也不加入原文未支持的信息。"
             "仅输出 JSON：{\"translation\":\"...\"}。"
         )
         retry_template = self.prompt_manager.get(template_key, default_retry)

@@ -3,6 +3,8 @@ import unittest
 from src.prompt.prompt_manager import PromptManager
 from src.translation.prompt_builder import PromptBuilder
 from src.translation.style_profiles import StyleProfileResolver
+from src.translation.text_analyzer import TextAnalyzer
+from src.translation.translator import Translator
 
 
 class _DummyConfig:
@@ -103,8 +105,25 @@ class PromptBuilderStyleProfileTests(unittest.TestCase):
                 self.assertIn("不将身份判断误作比较或方式", prompt)
                 self.assertIn("仅在指代唯一、逻辑不变时省略重复成分", prompt)
                 self.assertIn("被度量对象、比较基准、方向、范围及数值", prompt)
-                self.assertIn("不留无意义的源语言残片", prompt)
+                self.assertIn("可见自然语言默认译出", prompt)
+                self.assertIn("引号、括注、大小写或专名身份本身不构成保护", prompt)
+                self.assertIn("被命名、定义、评价或讨论的词语按句中功能翻译", prompt)
+                self.assertIn("语义明确要求展示原拼写时保留源文形式", prompt)
                 self.assertIn("__FMT_*__", prompt)
+
+    def test_official_fantasy_profile_localizes_proper_names_without_fixed_examples(self):
+        builder = PromptBuilder(PromptManager(), _DummyConfig())
+
+        system_prompt, _ = builder.build(
+            "A display name.",
+            {},
+            prompt_style="default",
+            context_hint={"record_type": "NPC_", "field_type": "FULL"},
+        )
+
+        self.assertIn("专名优先采用语义匹配的可靠术语", system_prompt)
+        self.assertIn("目标语言音译或约定转写", system_prompt)
+        self.assertIn("不得仅因名称外形保留源文拼写", system_prompt)
 
     def test_nsfw_prompt_preserves_register_consent_and_participant_roles(self):
         prompt = "\n".join(PromptManager().get(
@@ -131,6 +150,30 @@ class PromptBuilderStyleProfileTests(unittest.TestCase):
         for retry_name, retry_prompt in prompt_manager.get("translator.retry", {}).items():
             with self.subTest(retry_name=retry_name):
                 self.assertLessEqual(len(retry_prompt), 400)
+
+    def test_untranslated_retry_does_not_treat_names_or_quotation_as_protected(self):
+        retry_prompts = PromptManager().get("translator.retry", {})
+        untranslated = retry_prompts["untranslated"]
+        fragment_retention = retry_prompts["fragment_retention"]
+
+        self.assertIn("可见自然语言均应译出", untranslated)
+        self.assertIn("引号、括注、大小写或专名身份不构成保护", untranslated)
+        self.assertNotIn("保留专名", untranslated)
+        self.assertIn("引号、括注和大小写不使自然语言成为格式标记", fragment_retention)
+
+    def test_retry_fallback_uses_same_visible_language_rule(self):
+        translator = object.__new__(Translator)
+        translator._text_analyzer = TextAnalyzer()
+        translator.prompt_manager = _DummyPromptManager()
+
+        prompt = translator._build_retry_prompt(
+            "zh",
+            retry_context={"issue_types": ["untranslated"]},
+        )
+
+        self.assertIn("可见自然语言均应译出", prompt)
+        self.assertIn("引号、括注、大小写或专名身份不构成保护", prompt)
+        self.assertIn("语义明确要求展示原拼写时保留源文形式", prompt)
 
     def test_default_dialogue_profile_restructures_subjective_english_grammar(self):
         builder = PromptBuilder(PromptManager(), _DummyConfig())

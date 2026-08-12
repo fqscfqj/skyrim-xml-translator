@@ -221,6 +221,10 @@ class PromptBuilderGlossaryContextTests(unittest.TestCase):
         self.assertIn("__FMT_*__", system_prompt)
         self.assertIn("参与者角色", system_prompt)
         self.assertIn("受保护标记的数量和结构关系", system_prompt)
+        self.assertIn("可见自然语言默认译出", system_prompt)
+        self.assertIn("被命名、定义、评价或讨论的词语按句中功能翻译", system_prompt)
+        self.assertIn("专名优先采用可靠术语", system_prompt)
+        self.assertIn("目标语言音译或约定转写", system_prompt)
 
     def test_glossary_context_respects_configured_max_chars(self):
         builder = PromptBuilder(
