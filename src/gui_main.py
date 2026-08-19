@@ -3638,7 +3638,8 @@ class MainWindow(QMainWindow):
         effort_combo.addItem(i18n.t("option_effort_low"), "low")
         effort_combo.addItem(i18n.t("option_effort_medium"), "medium")
         effort_combo.addItem(i18n.t("option_effort_high"), "high")
-        effort_combo.addItem(i18n.t("option_effort_max"), "xhigh")
+        effort_combo.addItem(i18n.t("option_effort_xhigh"), "xhigh")
+        effort_combo.addItem(i18n.t("option_effort_max"), "max")
         add_param_control("reasoning_effort", i18n.t("param_reasoning_effort"), effort_combo)
         form_layout.addWidget(llm_group)
 
@@ -3714,7 +3715,8 @@ class MainWindow(QMainWindow):
         s_effort_combo.addItem(i18n.t("option_effort_low"), "low")
         s_effort_combo.addItem(i18n.t("option_effort_medium"), "medium")
         s_effort_combo.addItem(i18n.t("option_effort_high"), "high")
-        s_effort_combo.addItem(i18n.t("option_effort_max"), "xhigh")
+        s_effort_combo.addItem(i18n.t("option_effort_xhigh"), "xhigh")
+        s_effort_combo.addItem(i18n.t("option_effort_max"), "max")
         add_search_param_control("reasoning_effort", i18n.t("param_reasoning_effort"), s_effort_combo)
         form_layout.addWidget(search_group)
 
@@ -3789,7 +3791,8 @@ class MainWindow(QMainWindow):
         sf_effort_combo.addItem(i18n.t("option_effort_low"), "low")
         sf_effort_combo.addItem(i18n.t("option_effort_medium"), "medium")
         sf_effort_combo.addItem(i18n.t("option_effort_high"), "high")
-        sf_effort_combo.addItem(i18n.t("option_effort_max"), "xhigh")
+        sf_effort_combo.addItem(i18n.t("option_effort_xhigh"), "xhigh")
+        sf_effort_combo.addItem(i18n.t("option_effort_max"), "max")
         add_search_fallback_param_control("reasoning_effort", i18n.t("param_reasoning_effort"), sf_effort_combo)
         form_layout.addWidget(search_fallback_group)
         # ---------------------------
