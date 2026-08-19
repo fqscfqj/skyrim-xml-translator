@@ -79,7 +79,6 @@
         "long_term_max_results": 2,
         "short_term_max_chars": 32,
         "keyword_max_queries": 128,
-        "keyword_llm_max_tokens": 256,
         "keyword_task_decompose_enabled": true,
         "keyword_task_keep_original": false,
         "min_vector_score": 0.45,
@@ -119,8 +118,7 @@
         "short_text_batch_max_chars": 50,
         "short_text_batch_size": 8,
         "short_text_batch_circuit_min_items": 16,
-        "short_text_batch_circuit_fallback_ratio": 0.5,
-        "long_text_disable_thinking": true
+        "short_text_batch_circuit_fallback_ratio": 0.5
     },
     "cache": {
         "translation_cache_size": 50000,

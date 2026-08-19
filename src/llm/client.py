@@ -238,7 +238,7 @@ class LLMClient:
             raise
 
     def _call(self, client: Optional[OpenAI], config_section: str, messages: list,
-              overrides: dict, log_callback: Optional[Callable],
+              log_callback: Optional[Callable],
               operation: str = "translate") -> str:
         """Unified LLM call with retry logic and cost tracking.
 
@@ -278,12 +278,9 @@ class LLMClient:
             if value is not None:
                 final_params[key] = value
 
-        for key in (
-            "temperature", "top_p", "frequency_penalty", "presence_penalty",
-            "max_tokens", "enable_thinking", "reasoning_effort"):
-            value = overrides.get(key)
-            if value is not None:
-                final_params[key] = value
+        # Output length is governed by the prompt and provider/model defaults.
+        # Consume stale configuration instead of forwarding a hard cutoff.
+        final_params.pop("max_tokens", None)
 
         json_response_format_enabled = self._coerce_bool(
             self.config.get(config_section, "json_response_format_enabled", False),
@@ -309,7 +306,7 @@ class LLMClient:
         # anything else is routed through `extra_body` to avoid TypeError.
         _STANDARD_KWARGS = frozenset({
             "model", "messages", "temperature", "top_p", "frequency_penalty",
-            "presence_penalty", "max_tokens", "stream", "stop", "n",
+            "presence_penalty", "stream", "stop", "n",
             "logprobs", "top_logprobs", "logit_bias", "user", "seed",
             "response_format", "tools", "tool_choice", "functions",
             "function_call", "parallel_tool_calls", "reasoning_effort",
@@ -457,32 +454,17 @@ class LLMClient:
             max_total_seconds=retry_total_timeout,
         )
 
-    def chat_completion(self, messages, temperature=None, top_p=None,
-                        frequency_penalty=None, presence_penalty=None,
-                        max_tokens=None, log_callback=None,
-                        enable_thinking=None, reasoning_effort=None) -> str:
+    def chat_completion(self, messages, log_callback=None) -> str:
         """LLM 对话补全"""
         return self._call(
             client=self.llm_client,
             config_section="llm",
             messages=messages,
-            overrides={
-                "temperature": temperature,
-                "top_p": top_p,
-                "frequency_penalty": frequency_penalty,
-                "presence_penalty": presence_penalty,
-                "max_tokens": max_tokens,
-                "enable_thinking": enable_thinking,
-                "reasoning_effort": reasoning_effort,
-            },
             log_callback=log_callback,
             operation="translate",
         )
 
-    def chat_completion_search(self, messages, temperature=None, top_p=None,
-                               frequency_penalty=None, presence_penalty=None,
-                               max_tokens=None, log_callback=None,
-                               enable_thinking=None, reasoning_effort=None,
+    def chat_completion_search(self, messages, log_callback=None,
                                operation: str = "search",
                                force_search_fallback: bool = False) -> str:
         """LLM 对话补全 (用于搜索/关键词提取)"""
@@ -498,15 +480,6 @@ class LLMClient:
             client=client,
             config_section=config_section,
             messages=messages,
-            overrides={
-                "temperature": temperature,
-                "top_p": top_p,
-                "frequency_penalty": frequency_penalty,
-                "presence_penalty": presence_penalty,
-                "max_tokens": max_tokens,
-                "enable_thinking": enable_thinking,
-                "reasoning_effort": reasoning_effort,
-            },
             log_callback=log_callback,
             operation=operation,
         )

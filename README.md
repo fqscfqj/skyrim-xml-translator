@@ -17,7 +17,6 @@
 |---|---|---|---|
 | `cache.cache_ttl_hours` | float | 0 | 翻译缓存 TTL（小时），0=永不过期 |
 | `general.prompt_cache_warmup_enabled` | bool | true | 串行完成前两个真实工作单元，再放开并发，使 DeepSeek V4 能识别并落盘公共前缀；不增加 API 请求 |
-| `rag.keyword_llm_max_tokens` | int | 256 | 关键词 JSON 的最大输出 token；关键词调用固定关闭思考模式 |
 | `rag.format_extra_retries` | int | 2 | 格式错误时的额外重试次数 |
 | `rag.latin_ratio_threshold` | float | 2.0 | 拉丁字符比例阈值（α > CJK × 阈值时触发未翻译告警），值越大容忍度越高 |
 
@@ -147,7 +146,7 @@ python build_exe.py --onedir --console
 - **输出与推理解耦**：最终响应只允许约定 JSON，不要求模型展示逐步推理、列出备选或复述规则。思考模式仍可在 API 的 `reasoning_content` 中工作，但不会污染可解析结果。
 - **动态上下文后置**：稳定规则位于前缀，文体、术语和原文按稳定到动态的顺序排列；原文被明确标成待处理数据，避免其中的对话或伪指令改变任务轨迹。
 - **局部修正重试**：质量重试只重做错误涉及的判断，保留已正确的语义与格式，不再笼统要求从头完整推演。
-- **低复杂度任务短路**：关键词提取只做一次实体候选判定，去重后立即返回；调用会自动关闭思考模式，并使用 `rag.keyword_llm_max_tokens` 限制输出。纯 JSON 重封装同样关闭思考模式并使用小输出预算。
+- **低复杂度任务短路**：关键词提取只做一次实体候选判定，去重后立即返回；关键词与纯 JSON 重封装均完全遵循用户配置的模型参数，不在运行时覆盖思考、深度、采样或输出长度。
 
 这些策略参考了社区项目 [dsh-anchored-standard](https://github.com/xiaobright/dsh-anchored-standard) 的“最小首轮条件、延迟动态上下文”实验。该项目也明确指出，`We need` 等词法轨迹不等同于能力提升，独立复现的能力收益仍不确定；因此本项目以 JSON 合规率、格式/语义检查、重试率、延迟和 token 用量作为实际验收指标，而不检测或诱导固定思维链措辞。实验边界可参阅其[工具面剂量研究](https://github.com/0liveiraaa/DeepseekCotexplorations/tree/main/contributions/xiaobright-v4-tool-surface-dose-response)。
 

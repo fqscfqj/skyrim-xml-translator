@@ -41,7 +41,6 @@ class RAGConfig:
     long_term_max_results: int = 2
     short_term_max_chars: int = 32
     keyword_max_queries: int = 128
-    keyword_llm_max_tokens: int = 256
     keyword_task_decompose_enabled: bool = True
     keyword_task_keep_original: bool = False
     min_vector_score: float = 0.45
@@ -78,7 +77,6 @@ class GeneralConfig:
     long_text_chunking_enabled: bool = True
     long_text_chunk_threshold_chars: int = 4000
     long_text_chunk_target_chars: int = 1800
-    long_text_disable_thinking: bool = True
     prompt_cache_warmup_enabled: bool = True
     short_text_batch_enabled: bool = False
     short_text_batch_max_chars: int = 50

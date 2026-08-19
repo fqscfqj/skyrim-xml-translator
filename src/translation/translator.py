@@ -993,18 +993,6 @@ class Translator:
         previous_translation = ""
         first_system_prompt = ""
         first_user_prompt = ""
-        long_text_disable_thinking = self._config_bool(
-            "general", "long_text_disable_thinking", True)
-        llm_parameters = self.rag_engine.config.get("llm", "parameters", {}) or {}
-        override_chunk_thinking = None
-        if (
-                long_text_disable_thinking
-                and isinstance(llm_parameters, dict)
-                and llm_parameters.get("enable_thinking") is not None):
-            override_chunk_thinking = False
-            log_emit(log_callback, self.rag_engine.config, "DEBUG",
-                     "Long-text chunk translation disables LLM thinking mode for lower latency",
-                     module="translator", func="_translate_long_text")
 
         for idx, chunk in enumerate(chunks, start=1):
             format_shell = self._text_analyzer.build_protected_format_shell(
@@ -1050,7 +1038,6 @@ class Translator:
                     response = self.llm_client.chat_completion(
                         messages,
                         log_callback=log_callback,
-                        enable_thinking=override_chunk_thinking,
                     )
                     chunk_attempt = None
                     if isinstance(debug_info, dict):
@@ -1368,7 +1355,7 @@ class Translator:
             payload["rag"] = section_values("rag", (
                 "similarity_threshold", "short_term_max_results",
                 "long_term_max_results", "short_term_max_chars",
-                "keyword_max_queries", "keyword_llm_max_tokens",
+                "keyword_max_queries",
                 "keyword_task_decompose_enabled",
                 "keyword_task_keep_original", "min_vector_score",
                 "keyword_weight_enabled", "keyword_weight_candidate_pool_size",

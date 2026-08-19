@@ -78,6 +78,20 @@ def _install_fake_client(client: LLMClient, fake_client: _FakeClient):
 
 
 class LLMClientParameterOverrideTests(unittest.TestCase):
+    def test_removed_max_tokens_configuration_is_not_sent(self):
+        config = _DummyConfig({
+            ("llm", "model"): "muse-spark-1.2",
+            ("llm", "max_retries"): 0,
+            ("llm", "parameters"): {"max_tokens": 1},
+        })
+        client = LLMClient(config)
+        fake_client = _FakeClient()
+        _install_fake_client(client, fake_client)
+
+        client.chat_completion([{"role": "user", "content": "Translate."}])
+
+        self.assertNotIn("max_tokens", fake_client.chat.completions.calls[0])
+
     def test_extract_usage_stats_supports_native_deepseek_cache_fields(self):
         class _DeepSeekUsage:
             def model_dump(self):
@@ -133,7 +147,7 @@ class LLMClientParameterOverrideTests(unittest.TestCase):
             "init",
         ])
 
-    def test_chat_completion_can_disable_configured_thinking(self):
+    def test_chat_completion_preserves_configured_thinking(self):
         config = _DummyConfig({
             ("llm", "model"): "deepseek-v4-pro",
             ("llm", "max_retries"): 0,
@@ -151,23 +165,22 @@ class LLMClientParameterOverrideTests(unittest.TestCase):
 
         result = client.chat_completion(
             [{"role": "user", "content": "Translate."}],
-            enable_thinking=False,
         )
 
         self.assertEqual(result, '{"translation":"ok"}')
         call = fake_client.chat.completions.calls[0]
-        self.assertEqual(call["extra_body"], {"thinking": {"type": "disabled"}})
-        self.assertNotIn("reasoning_effort", call)
+        self.assertEqual(call["extra_body"], {"thinking": {"type": "enabled"}})
+        self.assertEqual(call["reasoning_effort"], "high")
 
-    def test_runtime_disable_uses_standard_none_for_meta_models(self):
+    def test_unset_meta_reasoning_controls_send_no_reasoning_parameters(self):
         config = _DummyConfig({
             ("llm", "base_url"): "https://api.meta.ai/v1",
             ("llm", "model"): "muse-spark-1.2",
             ("llm", "max_retries"): 0,
             ("llm", "parameters"): {
                 "reasoning_protocol": "auto",
-                "enable_thinking": True,
-                "reasoning_effort": "minimal",
+                "enable_thinking": None,
+                "reasoning_effort": None,
             },
         })
         client = LLMClient(config)
@@ -176,11 +189,10 @@ class LLMClientParameterOverrideTests(unittest.TestCase):
 
         client.chat_completion(
             [{"role": "user", "content": "Extract keywords."}],
-            enable_thinking=False,
         )
 
         call = fake_client.chat.completions.calls[0]
-        self.assertEqual(call["reasoning_effort"], "none")
+        self.assertNotIn("reasoning_effort", call)
         self.assertNotIn("extra_body", call)
 
     def test_deepseek_v4_thinking_keeps_effort_and_drops_sampling(self):

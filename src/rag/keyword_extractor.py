@@ -21,7 +21,7 @@ class KeywordExtractor:
     _WHITESPACE_RE = re.compile(r"\s+")
     _WORD_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9'\-]*")
     _STRIP_PUNCT_RE = re.compile(r"^[^\w\u4e00-\u9fff]+|[^\w\u4e00-\u9fff]+$")
-    _KW_CACHE_VERSION = "kw_v17"
+    _KW_CACHE_VERSION = "kw_v18"
     _LOW_SIGNAL_SINGLE_TOKENS = frozenset({
         "honestly", "kinda", "kindof", "sorta", "sortof",
         "really", "actually", "basically", "seriously", "literally",
@@ -214,21 +214,9 @@ class KeywordExtractor:
         payload = {
             "prompt": prompt_config,
             "model": model_config,
-            "keyword_overrides": {
-                "temperature": 0.1,
-                "max_tokens": self._keyword_llm_max_tokens(),
-                "enable_thinking": False,
-            },
         }
         raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
-
-    def _keyword_llm_max_tokens(self) -> int:
-        try:
-            value = int(self.config.get("rag", "keyword_llm_max_tokens", 256))
-        except Exception:
-            value = 256
-        return max(64, min(value, 4096))
 
     # --- Internal ---
 
@@ -527,7 +515,6 @@ class KeywordExtractor:
     def _extract_via_llm(self, text: str, log_callback, debug_info: Optional[dict] = None) -> list[str]:
         """Use LLM to extract fine-grained glossary lookup keywords."""
         prompt, system_prompt, user_prompt, messages = self._build_keyword_messages(text)
-        keyword_max_tokens = self._keyword_llm_max_tokens()
         if isinstance(debug_info, dict):
             debug_info["prompt"] = prompt
             debug_info["system_prompt"] = system_prompt
@@ -550,10 +537,7 @@ class KeywordExtractor:
         try:
             primary_response = self.llm_client.chat_completion_search(
                 messages,
-                temperature=0.1,
-                max_tokens=keyword_max_tokens,
                 log_callback=log_callback,
-                enable_thinking=False,
                 operation="keyword_extract",
                 force_search_fallback=False,
             )
@@ -635,10 +619,7 @@ class KeywordExtractor:
         try:
             fallback_response = self.llm_client.chat_completion_search(
                 messages,
-                temperature=0.1,
-                max_tokens=keyword_max_tokens,
                 log_callback=log_callback,
-                enable_thinking=False,
                 operation="keyword_extract_fallback",
                 force_search_fallback=True,
             )

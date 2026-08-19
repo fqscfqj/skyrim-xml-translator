@@ -311,7 +311,7 @@ class TranslatorRuntimeTagTests(unittest.TestCase):
             translator._translation_policy_fingerprint(use_rag=False),
         )
 
-    def test_cache_policy_changes_for_keyword_output_budget(self):
+    def test_cache_policy_ignores_removed_keyword_output_budget(self):
         config = _DummyConfig({
             ("rag", "keyword_llm_max_tokens"): 256,
         })
@@ -323,7 +323,7 @@ class TranslatorRuntimeTagTests(unittest.TestCase):
         original = translator._translation_policy_fingerprint(use_rag=True)
         config._values[("rag", "keyword_llm_max_tokens")] = 512
 
-        self.assertNotEqual(
+        self.assertEqual(
             original,
             translator._translation_policy_fingerprint(use_rag=True),
         )

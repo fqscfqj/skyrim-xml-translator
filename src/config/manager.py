@@ -16,6 +16,7 @@ class ConfigManager:
     # They are no longer read by runtime code and can be safely removed from config.json.
     _DEPRECATED_KEYS: tuple[tuple[str, str], ...] = (
         ("general", "crash_log_file"),
+        ("general", "long_text_disable_thinking"),
         ("rag", "reference_max_tokens"),
         ("rag", "keyword_skip_llm_for_simple_text"),
         ("rag", "keyword_simple_text_max_chars"),

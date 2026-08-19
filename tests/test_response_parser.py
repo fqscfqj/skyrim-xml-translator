@@ -15,12 +15,10 @@ class _FollowupLLMClient:
         self.response = response
         self.messages = None
 
-    def chat_completion(self, messages, max_tokens=None, log_callback=None,
-                        enable_thinking=None):
+    def chat_completion(self, messages, log_callback=None, **kwargs):
         _ = log_callback
         self.messages = messages
-        self.max_tokens = max_tokens
-        self.enable_thinking = enable_thinking
+        self.extra_kwargs = kwargs
         return self.response
 
 
@@ -173,8 +171,9 @@ class ResponseParserTests(unittest.TestCase):
         self.assertIn("候选响应", combined)
         self.assertIn("不得翻译、润色、补全、总结", combined)
         self.assertNotIn("完整原任务提示不得转发", combined)
-        self.assertEqual(client.max_tokens, 512)
-        self.assertFalse(client.enable_thinking)
+        self.assertNotIn("max_tokens", client.extra_kwargs)
+        self.assertNotIn("enable_thinking", client.extra_kwargs)
+        self.assertNotIn("reasoning_effort", client.extra_kwargs)
 
     def test_batch_standard(self):
         result = self.parser.parse_batch(

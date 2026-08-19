@@ -134,14 +134,16 @@ class KeywordExtractorPromptStructureTests(unittest.TestCase):
         self.assertNotIn("Give it to me", prompt)
         self.assertNotIn("Dragonborn", prompt)
 
-    def test_keyword_llm_uses_non_thinking_bounded_request(self):
+    def test_keyword_llm_does_not_override_user_model_parameters(self):
         extractor = self._make_extracting_extractor('["Thane"]')
 
         extractor.extract("Thane")
 
         _args, kwargs = extractor.llm_client.calls[0]
-        self.assertFalse(kwargs["enable_thinking"])
-        self.assertEqual(kwargs["max_tokens"], 256)
+        self.assertNotIn("enable_thinking", kwargs)
+        self.assertNotIn("reasoning_effort", kwargs)
+        self.assertNotIn("temperature", kwargs)
+        self.assertNotIn("max_tokens", kwargs)
         self.assertEqual(kwargs["operation"], "keyword_extract")
 
     def test_unstructured_prompt_without_placeholder_falls_back_to_single_user_message(self):
@@ -280,7 +282,7 @@ class KeywordExtractorPromptStructureTests(unittest.TestCase):
 
         self.assertNotEqual(base._keyword_cache_fingerprint(), changed_parameter._keyword_cache_fingerprint())
         self.assertNotEqual(base._keyword_cache_fingerprint(), changed_fallback._keyword_cache_fingerprint())
-        self.assertNotEqual(base._keyword_cache_fingerprint(), changed_budget._keyword_cache_fingerprint())
+        self.assertEqual(base._keyword_cache_fingerprint(), changed_budget._keyword_cache_fingerprint())
 
 
 if __name__ == "__main__":

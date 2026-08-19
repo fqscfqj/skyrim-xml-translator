@@ -357,9 +357,7 @@ class ResponseParser:
             try:
                 followup_response = llm_client.chat_completion(
                     followup_msg,
-                    max_tokens=512,
                     log_callback=log_callback,
-                    enable_thinking=False,
                 )
                 clean_followup = self._MARKDOWN_CODE_RE.sub(
                     "", followup_response).strip()
