@@ -152,6 +152,29 @@ class LLMClientParameterOverrideTests(unittest.TestCase):
         self.assertEqual(call["extra_body"], {"thinking": {"type": "disabled"}})
         self.assertNotIn("reasoning_effort", call)
 
+    def test_deepseek_v4_thinking_keeps_effort_and_drops_sampling(self):
+        config = _DummyConfig({
+            ("llm", "model"): "deepseek-v4-pro",
+            ("llm", "max_retries"): 0,
+            ("llm", "parameters"): {
+                "enable_thinking": True,
+                "reasoning_effort": "high",
+                "temperature": 0.2,
+                "top_p": 0.8,
+            },
+        })
+        client = LLMClient(config)
+        fake_client = _FakeClient()
+        _install_fake_client(client, fake_client)
+
+        client.chat_completion([{"role": "user", "content": "Translate."}])
+
+        call = fake_client.chat.completions.calls[0]
+        self.assertEqual(call["extra_body"], {"thinking": {"type": "enabled"}})
+        self.assertEqual(call["reasoning_effort"], "high")
+        self.assertNotIn("temperature", call)
+        self.assertNotIn("top_p", call)
+
     def test_translate_request_enables_json_response_format_by_default(self):
         config = _DummyConfig({
             ("llm", "model"): "deepseek-v4-flash",

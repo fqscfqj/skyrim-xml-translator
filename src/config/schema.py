@@ -40,6 +40,7 @@ class RAGConfig:
     long_term_max_results: int = 2
     short_term_max_chars: int = 32
     keyword_max_queries: int = 128
+    keyword_llm_max_tokens: int = 256
     keyword_task_decompose_enabled: bool = True
     keyword_task_keep_original: bool = False
     min_vector_score: float = 0.45

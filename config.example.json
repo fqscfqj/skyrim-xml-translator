@@ -14,7 +14,8 @@
         "parameters": {
             "temperature": null,
             "top_p": null,
-            "enable_thinking": null
+            "enable_thinking": null,
+            "reasoning_effort": null
         }
     },
     "llm_search": {
@@ -32,7 +33,8 @@
         "parameters": {
             "temperature": null,
             "top_p": null,
-            "enable_thinking": null
+            "enable_thinking": null,
+            "reasoning_effort": null
         }
     },
     "llm_search_fallback": {
@@ -50,7 +52,8 @@
         "parameters": {
             "temperature": null,
             "top_p": null,
-            "enable_thinking": null
+            "enable_thinking": null,
+            "reasoning_effort": null
         }
     },
     "embedding": {
@@ -73,6 +76,7 @@
         "long_term_max_results": 2,
         "short_term_max_chars": 32,
         "keyword_max_queries": 128,
+        "keyword_llm_max_tokens": 256,
         "keyword_task_decompose_enabled": true,
         "keyword_task_keep_original": false,
         "min_vector_score": 0.45,

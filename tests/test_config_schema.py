@@ -83,6 +83,16 @@ class TaskCompletionSoundConfigTests(unittest.TestCase):
 
         self.assertTrue(config_example["general"]["prompt_cache_warmup_enabled"])
 
+    def test_llm_examples_expose_deepseek_reasoning_effort(self):
+        repo_root = os.path.dirname(os.path.dirname(__file__))
+        config_example_path = os.path.join(repo_root, "config.example.json")
+        with open(config_example_path, "r", encoding="utf-8-sig") as handle:
+            config_example = json.load(handle)
+
+        for section in ("llm", "llm_search", "llm_search_fallback"):
+            with self.subTest(section=section):
+                self.assertIn("reasoning_effort", config_example[section]["parameters"])
+
 
 if __name__ == "__main__":
     unittest.main()

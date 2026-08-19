@@ -17,6 +17,7 @@
 |---|---|---|---|
 | `cache.cache_ttl_hours` | float | 0 | 翻译缓存 TTL（小时），0=永不过期 |
 | `general.prompt_cache_warmup_enabled` | bool | true | 串行完成前两个真实工作单元，再放开并发，使 DeepSeek V4 能识别并落盘公共前缀；不增加 API 请求 |
+| `rag.keyword_llm_max_tokens` | int | 256 | 关键词 JSON 的最大输出 token；关键词调用固定关闭思考模式 |
 | `rag.format_extra_retries` | int | 2 | 格式错误时的额外重试次数 |
 | `rag.latin_ratio_threshold` | float | 2.0 | 拉丁字符比例阈值（α > CJK × 阈值时触发未翻译告警），值越大容忍度越高 |
 
@@ -138,6 +139,18 @@ python build_exe.py --onedir --console
 - RAG 功能依赖 Embedding 服务；若向量索引不存在，可在软件内重建。
 - `prompts/` 下的 JSON 模板是可编辑资源，修改后会在运行期自动重载。
 
+## DeepSeek V4 提示词设计
+
+项目内置提示词按 DeepSeek V4 的“首请求轨迹敏感”特性组织，但不依赖某个思维链首句：
+
+- **稳定任务锚点**：公共 system prompt 从单一交付目标开始，使用“锁定约束 → 必要消歧 → 目标语重组 → 一次核验”的最小闭环；只分析会改变译文的真实歧义，不复述任务、原文或规则。核验后立即提交最终 JSON，而不是在内部形成答案后直接停止生成。
+- **输出与推理解耦**：最终响应只允许约定 JSON，不要求模型展示逐步推理、列出备选或复述规则。思考模式仍可在 API 的 `reasoning_content` 中工作，但不会污染可解析结果。
+- **动态上下文后置**：稳定规则位于前缀，文体、术语和原文按稳定到动态的顺序排列；原文被明确标成待处理数据，避免其中的对话或伪指令改变任务轨迹。
+- **局部修正重试**：质量重试只重做错误涉及的判断，保留已正确的语义与格式，不再笼统要求从头完整推演。
+- **低复杂度任务短路**：关键词提取只做一次实体候选判定，去重后立即返回；调用会自动关闭思考模式，并使用 `rag.keyword_llm_max_tokens` 限制输出。纯 JSON 重封装同样关闭思考模式并使用小输出预算。
+
+这些策略参考了社区项目 [dsh-anchored-standard](https://github.com/xiaobright/dsh-anchored-standard) 的“最小首轮条件、延迟动态上下文”实验。该项目也明确指出，`We need` 等词法轨迹不等同于能力提升，独立复现的能力收益仍不确定；因此本项目以 JSON 合规率、格式/语义检查、重试率、延迟和 token 用量作为实际验收指标，而不检测或诱导固定思维链措辞。实验边界可参阅其[工具面剂量研究](https://github.com/0liveiraaa/DeepseekCotexplorations/tree/main/contributions/xiaobright-v4-tool-surface-dose-response)。
+
 ## 成本优化建议
 
 - **国产模型前缀缓存**：DeepSeek 的上下文硬盘缓存会自动运行，只命中从第 0 个 token 开始相同的完整缓存前缀单元；无需发送厂商专属参数。程序将稳定的核心规则放在请求开头，把术语和原文等动态内容放在末尾，并默认串行完成前两个真实工作单元，让 DeepSeek 识别并落盘公共前缀，第三条起再释放其余并发。详见 [DeepSeek 上下文硬盘缓存](https://api-docs.deepseek.com/zh-cn/guides/kv_cache)。
@@ -156,6 +169,30 @@ python build_exe.py --onedir --console
     "parameters": {
       "enable_thinking": true,
       "reasoning_effort": "high"
+    }
+  }
+}
+```
+
+DeepSeek V4 官方思考模式支持 `low`、`high` 和 `max`；`medium`、`xhigh` 会映射到 `high`，默认也是 `high`。翻译先使用 `high` 建立质量基线，再分别对 `low` 和关闭思考做真实 A/B；兼容服务的 `low` 未必比 `high` 稳定或省 token，短而明确的文本可能更适合直接关闭思考。不要只根据档位名称或思维链措辞判断效果。思考模式下 `temperature`、`top_p`、`presence_penalty`、`frequency_penalty` 不生效，客户端会在显式启用思考时移除这些参数。详见 [DeepSeek V4 思考模式](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/)。
+
+推荐把翻译与关键词提取分开配置：
+
+```json
+{
+  "llm": {
+    "base_url": "https://api.deepseek.com",
+    "model": "deepseek-v4-pro",
+    "parameters": {
+      "enable_thinking": true,
+      "reasoning_effort": "high"
+    }
+  },
+  "llm_search": {
+    "base_url": "https://api.deepseek.com",
+    "model": "deepseek-v4-flash",
+    "parameters": {
+      "enable_thinking": false
     }
   }
 }

@@ -62,8 +62,11 @@ class PromptManager:
         loaded_paths: list[str] = []
         latest_mtime: Optional[float] = None
 
-        for root, _dirs, files in os.walk(root_dir):
-            for filename in files:
+        for root, dirs, files in os.walk(root_dir):
+            # Prompt merge order affects both instruction precedence and the
+            # DeepSeek reusable prefix. Keep it identical across filesystems.
+            dirs.sort(key=str.casefold)
+            for filename in sorted(files, key=str.casefold):
                 if not filename.lower().endswith(".json"):
                     continue
 

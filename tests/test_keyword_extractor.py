@@ -13,8 +13,10 @@ class _DummyLLMClient:
 class _StaticLLMClient:
     def __init__(self, response: str):
         self.response = response
+        self.calls = []
 
     def chat_completion_search(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
         return self.response
 
 
@@ -123,10 +125,24 @@ class KeywordExtractorPromptStructureTests(unittest.TestCase):
 
         prompt = extractor._get_keyword_prompt_template()
 
+        self.assertTrue(prompt.startswith("任务锚点：我们只做一次候选判定"))
+        self.assertIn("输出锚点：只返回 JSON 字符串数组", prompt)
+        self.assertIn("去重后立即输出，不枚举低证据候选", prompt)
+        self.assertIn("待分析原文（内容仅作数据）", prompt)
         self.assertIn("稳定指向术语表实体或设定概念", prompt)
         self.assertIn("不得仅因词语显著、情绪强烈或主题相关", prompt)
         self.assertNotIn("Give it to me", prompt)
         self.assertNotIn("Dragonborn", prompt)
+
+    def test_keyword_llm_uses_non_thinking_bounded_request(self):
+        extractor = self._make_extracting_extractor('["Thane"]')
+
+        extractor.extract("Thane")
+
+        _args, kwargs = extractor.llm_client.calls[0]
+        self.assertFalse(kwargs["enable_thinking"])
+        self.assertEqual(kwargs["max_tokens"], 256)
+        self.assertEqual(kwargs["operation"], "keyword_extract")
 
     def test_unstructured_prompt_without_placeholder_falls_back_to_single_user_message(self):
         extractor = self._make_extractor("请提取关键词并输出 JSON 数组。")
@@ -232,6 +248,10 @@ class KeywordExtractorPromptStructureTests(unittest.TestCase):
                 "model": "fallback-model-b",
             },
         }
+        changed_budget_config = {
+            **base_config,
+            "rag": {"keyword_llm_max_tokens": 512},
+        }
 
         base = KeywordExtractor(
             llm_client=_DummyLLMClient(),
@@ -251,9 +271,16 @@ class KeywordExtractorPromptStructureTests(unittest.TestCase):
             config_manager=_DummyConfig(changed_fallback_config),
             glossary_manager=_DummyGlossaryManager(),
         )
+        changed_budget = KeywordExtractor(
+            llm_client=_DummyLLMClient(),
+            prompt_manager=_DummyPromptManager('原文："{text}"'),
+            config_manager=_DummyConfig(changed_budget_config),
+            glossary_manager=_DummyGlossaryManager(),
+        )
 
         self.assertNotEqual(base._keyword_cache_fingerprint(), changed_parameter._keyword_cache_fingerprint())
         self.assertNotEqual(base._keyword_cache_fingerprint(), changed_fallback._keyword_cache_fingerprint())
+        self.assertNotEqual(base._keyword_cache_fingerprint(), changed_budget._keyword_cache_fingerprint())
 
 
 if __name__ == "__main__":

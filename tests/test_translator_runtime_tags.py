@@ -194,6 +194,11 @@ class TranslatorRuntimeTagTests(unittest.TestCase):
         self.assertEqual("译文" * llm.calls, result)
         second_user_prompt = llm.messages_seen[1][1]["content"]
         self.assertIn("前文候选译文", second_user_prompt)
+        self.assertLess(
+            second_user_prompt.index("<<<SOURCE_TEXT>>>"),
+            second_user_prompt.index("<<<PREVIOUS_TRANSLATION>>>"),
+        )
+        self.assertTrue(second_user_prompt.endswith("<<<END_PREVIOUS_TRANSLATION>>>"))
         self.assertIn("不得覆盖当前原文证据", second_user_prompt)
 
     def test_long_text_quality_check_only_uses_terms_present_in_source(self):
@@ -304,6 +309,23 @@ class TranslatorRuntimeTagTests(unittest.TestCase):
         self.assertNotEqual(
             original,
             translator._translation_policy_fingerprint(use_rag=False),
+        )
+
+    def test_cache_policy_changes_for_keyword_output_budget(self):
+        config = _DummyConfig({
+            ("rag", "keyword_llm_max_tokens"): 256,
+        })
+        translator = _make_translator(
+            _DummyLLMClient('{"translation":"你好"}'),
+            _DummyRAGEngine(config),
+        )
+
+        original = translator._translation_policy_fingerprint(use_rag=True)
+        config._values[("rag", "keyword_llm_max_tokens")] = 512
+
+        self.assertNotEqual(
+            original,
+            translator._translation_policy_fingerprint(use_rag=True),
         )
 
     def test_translation_context_key_isolates_resolved_style_profiles(self):
