@@ -159,14 +159,28 @@ python build_exe.py --onedir --console
 - **统一关键词提取链路**：所有启用 RAG 的原文都会先经过关键词提取，再进入术语检索；若关键词提取结果为空或服务暂时不可用，仍会回退到本地规则兜底，避免完全失去术语召回。
 - **短文本批处理保持可选**：批处理能进一步减少请求数，但可能改变模型处理单条文本时的注意力分配，因此默认仍关闭；质量优先场景无需启用。
 
-## 非标准 LLM 参数
+## 多供应商思考深度控制
 
-部分 OpenAI 兼容服务商支持非标准参数（如 `enable_thinking`、`reasoning_effort` 等）。这些参数可在对应配置节的 `parameters` 字段中设置，程序会自动将其路由到 API 请求的 `extra_body`，避免因未知顶级参数导致 SDK 报错：
+设置页为翻译、关键词和兜底模型分别提供三个统一控件：思考控制协议、思考模式和思考深度。协议默认根据 Base URL 与模型名自动识别，也可手动锁定。客户端会转换成供应商实际使用的请求结构：
+
+| GUI 协议 | 请求映射 |
+|---|---|
+| OpenAI / Meta / 标准兼容 | 顶层 `reasoning_effort` |
+| DeepSeek | `thinking.type` + 顶层 `reasoning_effort` |
+| DashScope / Qwen | `enable_thinking` + `reasoning_effort` |
+| OpenRouter | 统一 `reasoning.effort` |
+| Claude 深度 / 自适应 | `output_config.effort`；显式开启时使用 `thinking.type=adaptive` |
+| Gemini OpenAI 兼容层 | 顶层 `reasoning_effort` |
+
+项目不设置思考 Token 预算，也不会把统一深度暗中转换为固定 Token 上限；模型按提示词约束完成任务。对于不能关闭思考的 Gemini/Claude 型号，“关闭”会映射为该模型支持的最低档。若 API 以 400/422 明确拒绝思考参数，程序会记录警告并仅重试一次供应商默认设置，避免因为可选参数导致整条翻译失败。
+
+配置文件仍保留旧的 `enable_thinking` / `reasoning_effort`，现有配置无需迁移：
 
 ```json
 {
   "llm": {
     "parameters": {
+      "reasoning_protocol": "auto",
       "enable_thinking": true,
       "reasoning_effort": "high"
     }
@@ -174,7 +188,9 @@ python build_exe.py --onedir --console
 }
 ```
 
-DeepSeek V4 官方思考模式支持 `low`、`high` 和 `max`；`medium`、`xhigh` 会映射到 `high`，默认也是 `high`。翻译先使用 `high` 建立质量基线，再分别对 `low` 和关闭思考做真实 A/B；兼容服务的 `low` 未必比 `high` 稳定或省 token，短而明确的文本可能更适合直接关闭思考。不要只根据档位名称或思维链措辞判断效果。思考模式下 `temperature`、`top_p`、`presence_penalty`、`frequency_penalty` 不生效，客户端会在显式启用思考时移除这些参数。详见 [DeepSeek V4 思考模式](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/)。
+供应商支持的档位并不相同。DeepSeek V4 原生使用 `high/max`，兼容值会映射到这两档，且思考模式下采样参数不生效；Muse Spark 的有效最高档是 `high`，`xhigh` 与其等效；Gemini 的 OpenAI 兼容层直接接受 `reasoning_effort`，但部分模型不能关闭思考；Claude 新模型已从固定 `budget_tokens` 迁移到 effort / 自适应思考。参阅 [DeepSeek 思考模式](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/)、[OpenAI API 参数](https://platform.openai.com/docs/api-reference)、[Meta Muse Spark reasoning cookbook](https://github.com/meta-models/meta-model-cookbook/blob/main/01_api_fundamentals/06_reasoning_tokens.ipynb)、[Gemini OpenAI 兼容说明](https://ai.google.dev/gemini-api/docs/openai)、[Claude effort 说明](https://platform.claude.com/docs/en/build-with-claude/effort)、[DashScope 参数参考](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions)及 [OpenRouter reasoning 统一参数](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens)。
+
+Claude 协议选项用于能传递 Anthropic 原生思考字段的 OpenAI 兼容网关；本项目使用 OpenAI SDK，不会把 Anthropic 的原生 Messages API 自动转换成 Chat Completions API。
 
 推荐把翻译与关键词提取分开配置：
 
@@ -184,6 +200,7 @@ DeepSeek V4 官方思考模式支持 `low`、`high` 和 `max`；`medium`、`xhig
     "base_url": "https://api.deepseek.com",
     "model": "deepseek-v4-pro",
     "parameters": {
+      "reasoning_protocol": "auto",
       "enable_thinking": true,
       "reasoning_effort": "high"
     }
@@ -192,6 +209,7 @@ DeepSeek V4 官方思考模式支持 `low`、`high` 和 `max`；`medium`、`xhig
     "base_url": "https://api.deepseek.com",
     "model": "deepseek-v4-flash",
     "parameters": {
+      "reasoning_protocol": "auto",
       "enable_thinking": false
     }
   }

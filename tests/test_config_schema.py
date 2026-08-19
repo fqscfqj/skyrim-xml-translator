@@ -83,7 +83,7 @@ class TaskCompletionSoundConfigTests(unittest.TestCase):
 
         self.assertTrue(config_example["general"]["prompt_cache_warmup_enabled"])
 
-    def test_llm_examples_expose_deepseek_reasoning_effort(self):
+    def test_llm_examples_expose_provider_aware_reasoning_controls(self):
         repo_root = os.path.dirname(os.path.dirname(__file__))
         config_example_path = os.path.join(repo_root, "config.example.json")
         with open(config_example_path, "r", encoding="utf-8-sig") as handle:
@@ -91,7 +91,11 @@ class TaskCompletionSoundConfigTests(unittest.TestCase):
 
         for section in ("llm", "llm_search", "llm_search_fallback"):
             with self.subTest(section=section):
-                self.assertIn("reasoning_effort", config_example[section]["parameters"])
+                parameters = config_example[section]["parameters"]
+                self.assertEqual(parameters["reasoning_protocol"], "auto")
+                self.assertIn("enable_thinking", parameters)
+                self.assertIn("reasoning_effort", parameters)
+                self.assertNotIn("reasoning_budget_tokens", parameters)
 
 
 if __name__ == "__main__":

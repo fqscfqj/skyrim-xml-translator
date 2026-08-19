@@ -7,6 +7,7 @@ from typing import Any, Callable, Optional
 from src.logging_helper import emit as log_emit
 from src.llm.retry import RetryTimeBudgetExceeded, execute_with_retry
 from src.llm.cost_tracker import CostTracker
+from src.llm.reasoning import apply_reasoning_controls, strip_reasoning_controls
 
 
 class LLMClient:
@@ -93,6 +94,31 @@ class LLMClient:
             "json_object",
             "json mode",
             "json output",
+        ))
+
+    @staticmethod
+    def _is_reasoning_control_rejection(exc: Exception) -> bool:
+        status_code = getattr(exc, "status_code", None)
+        try:
+            if status_code is not None and int(status_code) not in (400, 422):
+                return False
+        except Exception:
+            pass
+
+        parts = [str(exc or "")]
+        body = getattr(exc, "body", None)
+        if body is not None:
+            parts.append(str(body))
+        message = "\n".join(parts).lower()
+        return any(marker in message for marker in (
+            "reasoning_effort",
+            "reasoning effort",
+            "enable_thinking",
+            "output_config",
+            "thinking.type",
+            "unknown field: thinking",
+            "unknown parameter: thinking",
+            "reasoning parameter",
         ))
 
     @staticmethod
@@ -270,6 +296,14 @@ class LLMClient:
             final_params["response_format"] = {"type": "json_object"}
 
         request_args = {"model": model, "messages": messages}
+        extra_body: dict[str, Any] = {}
+        reasoning_application = apply_reasoning_controls(
+            final_params,
+            extra_body,
+            base_url=str(self.config.get(config_section, "base_url", "") or ""),
+            model=str(model or ""),
+        )
+
         # Some OpenAI-compatible providers support non-standard fields.
         # Known standard kwargs accepted by the OpenAI SDK at top level;
         # anything else is routed through `extra_body` to avoid TypeError.
@@ -281,40 +315,22 @@ class LLMClient:
             "function_call", "parallel_tool_calls", "reasoning_effort",
             "timeout", "extra_headers", "extra_query", "extra_body",
         })
-        extra_body: dict[str, Any] = {}
         for key in list(final_params.keys()):
             if key not in _STANDARD_KWARGS:
                 extra_body[key] = final_params.pop(key)
-
-        # --- DeepSeek thinking mode control ---
-        # Transform the custom enable_thinking parameter into the official
-        # DeepSeek thinking format: {"thinking": {"type": "enabled"/"disabled"}}
-        # Ref: https://api-docs.deepseek.com/zh-cn/guides/thinking_mode
-        if "enable_thinking" in extra_body:
-            thinking_val = extra_body.pop("enable_thinking")
-            if thinking_val is not None:
-                thinking_enabled = bool(thinking_val)
-                extra_body["thinking"] = {"type": "enabled" if thinking_enabled else "disabled"}
-                # DeepSeek thinking mode does NOT support temperature, top_p,
-                # frequency_penalty, or presence_penalty. Strip them when thinking is on.
-                if thinking_enabled:
-                    for unsupported in ("temperature", "top_p",
-                                        "frequency_penalty", "presence_penalty"):
-                        final_params.pop(unsupported, None)
-                else:
-                    # thinking disabled → reasoning_effort is meaningless, drop it
-                    final_params.pop("reasoning_effort", None)
 
         request_args.update(final_params)
         if extra_body:
             request_args["extra_body"] = extra_body
 
         log_emit(callback, self.config, "DEBUG",
-                 f"{operation} LLM call: model={model} messages_len={len(messages)}",
+                 f"{operation} LLM call: model={model} messages_len={len(messages)} "
+                 f"reasoning_protocol={reasoning_application.protocol}",
                  module="llm_client", func="_call")
 
         attempt_counter = {"count": 0}
         response_format_fallback = {"used": False}
+        reasoning_control_fallback = {"used": False}
         request_deadline = (
             monotonic() + retry_total_timeout
             if retry_total_timeout > 0
@@ -364,6 +380,25 @@ class LLMClient:
                     if self.cost_tracker:
                         self.cost_tracker.increment_counter(f"{operation}_api_attempts")
                         self.cost_tracker.increment_counter("response_format_fallbacks")
+                    call_args["timeout"] = bounded_request_timeout(call_timeout)
+                    response = client.chat.completions.create(**call_args)
+                elif (reasoning_application.applied
+                        and not reasoning_control_fallback["used"]
+                        and self._is_reasoning_control_rejection(exc)):
+                    reasoning_control_fallback["used"] = True
+                    strip_reasoning_controls(request_args)
+                    strip_reasoning_controls(call_args)
+                    log_emit(
+                        callback,
+                        self.config,
+                        "WARNING",
+                        "Provider rejected reasoning controls; retrying with provider defaults",
+                        module="llm_client",
+                        func="_call",
+                    )
+                    if self.cost_tracker:
+                        self.cost_tracker.increment_counter("reasoning_control_fallbacks")
+                        self.cost_tracker.increment_counter(f"{operation}_api_attempts")
                     call_args["timeout"] = bounded_request_timeout(call_timeout)
                     response = client.chat.completions.create(**call_args)
                 else:

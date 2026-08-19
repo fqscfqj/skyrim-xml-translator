@@ -20,6 +20,7 @@ class LLMConfig:
     parameters: dict = field(default_factory=lambda: {
         "temperature": None,
         "top_p": None,
+        "reasoning_protocol": "auto",
         "enable_thinking": None,
         "reasoning_effort": None,
     })

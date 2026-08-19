@@ -57,6 +57,13 @@ class _ResponseFormatRejected(Exception):
     status_code = 400
 
 
+class _ReasoningControlRejected(Exception):
+    status_code = 400
+
+    def __str__(self):
+        return "Unknown parameter: thinking"
+
+
 class _ClosableClient:
     def __init__(self, name, events):
         self.name = name
@@ -152,6 +159,30 @@ class LLMClientParameterOverrideTests(unittest.TestCase):
         self.assertEqual(call["extra_body"], {"thinking": {"type": "disabled"}})
         self.assertNotIn("reasoning_effort", call)
 
+    def test_runtime_disable_uses_standard_none_for_meta_models(self):
+        config = _DummyConfig({
+            ("llm", "base_url"): "https://api.meta.ai/v1",
+            ("llm", "model"): "muse-spark-1.2",
+            ("llm", "max_retries"): 0,
+            ("llm", "parameters"): {
+                "reasoning_protocol": "auto",
+                "enable_thinking": True,
+                "reasoning_effort": "minimal",
+            },
+        })
+        client = LLMClient(config)
+        fake_client = _FakeClient()
+        _install_fake_client(client, fake_client)
+
+        client.chat_completion(
+            [{"role": "user", "content": "Extract keywords."}],
+            enable_thinking=False,
+        )
+
+        call = fake_client.chat.completions.calls[0]
+        self.assertEqual(call["reasoning_effort"], "none")
+        self.assertNotIn("extra_body", call)
+
     def test_deepseek_v4_thinking_keeps_effort_and_drops_sampling(self):
         config = _DummyConfig({
             ("llm", "model"): "deepseek-v4-pro",
@@ -174,6 +205,33 @@ class LLMClientParameterOverrideTests(unittest.TestCase):
         self.assertEqual(call["reasoning_effort"], "high")
         self.assertNotIn("temperature", call)
         self.assertNotIn("top_p", call)
+
+    def test_rejected_reasoning_controls_retry_once_with_provider_defaults(self):
+        config = _DummyConfig({
+            ("llm", "model"): "deepseek-v4-pro",
+            ("llm", "max_retries"): 0,
+            ("llm", "parameters"): {
+                "reasoning_protocol": "deepseek",
+                "enable_thinking": True,
+                "reasoning_effort": "high",
+            },
+        })
+        client = LLMClient(config)
+        fake_client = _FakeClient([_ReasoningControlRejected(), _Response()])
+        _install_fake_client(client, fake_client)
+
+        result = client.chat_completion([{"role": "user", "content": "Translate."}])
+
+        self.assertEqual(result, '{"translation":"ok"}')
+        self.assertEqual(len(fake_client.chat.completions.calls), 2)
+        first, second = fake_client.chat.completions.calls
+        self.assertEqual(first["reasoning_effort"], "high")
+        self.assertEqual(first["extra_body"], {"thinking": {"type": "enabled"}})
+        self.assertNotIn("reasoning_effort", second)
+        self.assertNotIn("extra_body", second)
+        self.assertEqual(
+            client.cost_tracker.get_counter("reasoning_control_fallbacks"), 1
+        )
 
     def test_translate_request_enables_json_response_format_by_default(self):
         config = _DummyConfig({
