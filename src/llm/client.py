@@ -30,7 +30,7 @@ class LLMClient:
             base_url = self.config.get(section, "base_url")
             if not api_key:
                 return None
-            timeout = int(self.config.get(section, "request_timeout", 30))
+            timeout = int(self.config.get(section, "request_timeout", 120))
             # Use one retry strategy path only (src.llm.retry) to avoid retry amplification.
             return OpenAI(api_key=api_key, base_url=base_url, timeout=timeout, max_retries=0)
 
@@ -91,6 +91,7 @@ class LLMClient:
         message = "\n".join(parts).lower()
         return any(marker in message for marker in (
             "response_format",
+            "text.format",
             "json_object",
             "json mode",
             "json output",
@@ -158,8 +159,16 @@ class LLMClient:
     @classmethod
     def _extract_usage_stats(cls, response: Any) -> dict[str, Optional[int]]:
         usage = cls._usage_to_dict(getattr(response, "usage", None))
-        prompt_details = usage.get("prompt_tokens_details") or {}
-        completion_details = usage.get("completion_tokens_details") or {}
+        prompt_details = (
+            usage.get("prompt_tokens_details")
+            or usage.get("input_tokens_details")
+            or {}
+        )
+        completion_details = (
+            usage.get("completion_tokens_details")
+            or usage.get("output_tokens_details")
+            or {}
+        )
         if not isinstance(prompt_details, dict):
             prompt_details = {}
         if not isinstance(completion_details, dict):
@@ -180,7 +189,9 @@ class LLMClient:
                     return parsed
             return None
 
-        prompt_tokens = _safe_int(usage.get("prompt_tokens"))
+        prompt_tokens = _first_int(
+            usage.get("prompt_tokens"), usage.get("input_tokens")
+        )
         cached_tokens = _first_int(
             # OpenAI and OpenAI-compatible Model Studio / SiliconFlow shape.
             prompt_details.get("cached_tokens"),
@@ -198,7 +209,9 @@ class LLMClient:
 
         return {
             "prompt_tokens": prompt_tokens,
-            "completion_tokens": _safe_int(usage.get("completion_tokens")),
+            "completion_tokens": _first_int(
+                usage.get("completion_tokens"), usage.get("output_tokens")
+            ),
             "total_tokens": _safe_int(usage.get("total_tokens")),
             "cached_tokens": cached_tokens,
             "cache_miss_tokens": cache_miss_tokens,
@@ -250,12 +263,16 @@ class LLMClient:
 
         callback = log_callback if log_callback else self.log_callback
         model = self.config.get(config_section, "model", "gpt-3.5-turbo")
+        api_mode = str(
+            self.config.get(config_section, "api_mode", "chat_completions") or ""
+        ).strip().lower()
+        use_responses_api = api_mode == "responses"
         max_retries = int(self.config.get(config_section, "max_retries",
                           self.config.get("llm", "max_retries", 3)))
         backoff_base = float(self.config.get(config_section, "backoff_base",
                              self.config.get("llm", "backoff_base", 0.5)))
         timeout_base = float(self.config.get(config_section, "request_timeout",
-                             self.config.get("llm", "request_timeout", 30)))
+                             self.config.get("llm", "request_timeout", 120)))
         timeout_step = float(self.config.get(config_section, "request_timeout_step",
                              self.config.get("llm", "request_timeout_step", 15)))
         timeout_max = float(self.config.get(config_section, "request_timeout_max",
@@ -263,7 +280,7 @@ class LLMClient:
         retry_total_timeout = float(self.config.get(config_section, "retry_total_timeout",
                         self.config.get("llm", "retry_total_timeout", 300)))
         if timeout_base <= 0:
-            timeout_base = 30.0
+            timeout_base = 120.0
         if timeout_step < 0:
             timeout_step = 0.0
         if timeout_max < timeout_base:
@@ -292,7 +309,10 @@ class LLMClient:
                 and "response_format" not in final_params):
             final_params["response_format"] = {"type": "json_object"}
 
-        request_args = {"model": model, "messages": messages}
+        request_args = {
+            "model": model,
+            "input" if use_responses_api else "messages": messages,
+        }
         extra_body: dict[str, Any] = {}
         reasoning_application = apply_reasoning_controls(
             final_params,
@@ -301,19 +321,37 @@ class LLMClient:
             model=str(model or ""),
         )
 
+        if use_responses_api:
+            response_format = final_params.pop("response_format", None)
+            if response_format is not None:
+                final_params["text"] = {"format": response_format}
+            reasoning_effort = final_params.pop("reasoning_effort", None)
+            if reasoning_effort is not None:
+                final_params["reasoning"] = {"effort": reasoning_effort}
+
         # Some OpenAI-compatible providers support non-standard fields.
         # Known standard kwargs accepted by the OpenAI SDK at top level;
         # anything else is routed through `extra_body` to avoid TypeError.
-        _STANDARD_KWARGS = frozenset({
-            "model", "messages", "temperature", "top_p", "frequency_penalty",
-            "presence_penalty", "stream", "stop", "n",
-            "logprobs", "top_logprobs", "logit_bias", "user", "seed",
-            "response_format", "tools", "tool_choice", "functions",
-            "function_call", "parallel_tool_calls", "reasoning_effort",
-            "timeout", "extra_headers", "extra_query", "extra_body",
-        })
+        if use_responses_api:
+            standard_kwargs = frozenset({
+                "model", "input", "instructions", "temperature", "top_p",
+                "stream", "top_logprobs", "user", "text", "tools",
+                "tool_choice", "parallel_tool_calls", "reasoning", "store",
+                "truncation", "metadata", "include", "service_tier",
+                "max_output_tokens", "previous_response_id", "timeout",
+                "extra_headers", "extra_query", "extra_body",
+            })
+        else:
+            standard_kwargs = frozenset({
+                "model", "messages", "temperature", "top_p", "frequency_penalty",
+                "presence_penalty", "stream", "stop", "n",
+                "logprobs", "top_logprobs", "logit_bias", "user", "seed",
+                "response_format", "tools", "tool_choice", "functions",
+                "function_call", "parallel_tool_calls", "reasoning_effort",
+                "timeout", "extra_headers", "extra_query", "extra_body",
+            })
         for key in list(final_params.keys()):
-            if key not in _STANDARD_KWARGS:
+            if key not in standard_kwargs:
                 extra_body[key] = final_params.pop(key)
 
         request_args.update(final_params)
@@ -322,6 +360,7 @@ class LLMClient:
 
         log_emit(callback, self.config, "DEBUG",
                  f"{operation} LLM call: model={model} messages_len={len(messages)} "
+                 f"api_mode={'responses' if use_responses_api else 'chat_completions'} "
                  f"reasoning_protocol={reasoning_application.protocol}",
                  module="llm_client", func="_call")
 
@@ -363,14 +402,25 @@ class LLMClient:
             call_args = dict(request_args)
             call_args["timeout"] = call_timeout
             try:
-                response = client.chat.completions.create(**call_args)
+                response = (
+                    client.responses.create(**call_args)
+                    if use_responses_api
+                    else client.chat.completions.create(**call_args)
+                )
             except Exception as exc:
-                if (call_args.get("response_format") is not None
+                has_response_format = (
+                    call_args.get("response_format") is not None
+                    or isinstance(call_args.get("text"), dict)
+                    and call_args["text"].get("format") is not None
+                )
+                if (has_response_format
                         and not response_format_fallback["used"]
                         and self._is_response_format_rejection(exc)):
                     response_format_fallback["used"] = True
                     request_args.pop("response_format", None)
+                    request_args.pop("text", None)
                     call_args.pop("response_format", None)
+                    call_args.pop("text", None)
                     log_emit(callback, self.config, "WARNING",
                              "Provider rejected response_format; retrying without JSON response format",
                              module="llm_client", func="_call")
@@ -378,7 +428,11 @@ class LLMClient:
                         self.cost_tracker.increment_counter(f"{operation}_api_attempts")
                         self.cost_tracker.increment_counter("response_format_fallbacks")
                     call_args["timeout"] = bounded_request_timeout(call_timeout)
-                    response = client.chat.completions.create(**call_args)
+                    response = (
+                        client.responses.create(**call_args)
+                        if use_responses_api
+                        else client.chat.completions.create(**call_args)
+                    )
                 elif (reasoning_application.applied
                         and not reasoning_control_fallback["used"]
                         and self._is_reasoning_control_rejection(exc)):
@@ -397,7 +451,11 @@ class LLMClient:
                         self.cost_tracker.increment_counter("reasoning_control_fallbacks")
                         self.cost_tracker.increment_counter(f"{operation}_api_attempts")
                     call_args["timeout"] = bounded_request_timeout(call_timeout)
-                    response = client.chat.completions.create(**call_args)
+                    response = (
+                        client.responses.create(**call_args)
+                        if use_responses_api
+                        else client.chat.completions.create(**call_args)
+                    )
                 else:
                     raise
             usage_stats = self._extract_usage_stats(response)
@@ -434,6 +492,14 @@ class LLMClient:
                     operation,
                     cached_prompt_tokens=cached_tokens or 0,
                 )
+            if use_responses_api:
+                content = getattr(response, "output_text", None)
+                if content is None:
+                    raise ValueError(
+                        f"Responses API returned no output_text. Model: {model}, "
+                        f"Response: {response}"
+                    )
+                return content if isinstance(content, str) else str(content)
             if not response.choices:
                 raise ValueError(
                     f"API returned empty choices list (possible content filter). "

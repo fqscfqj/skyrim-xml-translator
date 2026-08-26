@@ -8,6 +8,20 @@ from src.config.schema import AppConfig, dataclass_to_dict
 
 
 class TaskCompletionSoundConfigTests(unittest.TestCase):
+    def test_llm_api_mode_defaults_to_chat_completions_and_is_in_example(self):
+        config = dataclass_to_dict(AppConfig())
+        repo_root = os.path.dirname(os.path.dirname(__file__))
+        config_example_path = os.path.join(repo_root, "config.example.json")
+        with open(config_example_path, "r", encoding="utf-8-sig") as handle:
+            config_example = json.load(handle)
+
+        for section in ("llm", "llm_search", "llm_search_fallback"):
+            with self.subTest(section=section):
+                self.assertEqual(config[section]["api_mode"], "chat_completions")
+                self.assertEqual(
+                    config_example[section]["api_mode"], "chat_completions"
+                )
+
     def test_default_config_disables_task_completion_sound(self):
         config = dataclass_to_dict(AppConfig())
 

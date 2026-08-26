@@ -48,9 +48,30 @@ class _FakeChat:
         self.completions = _FakeCompletions(side_effects)
 
 
+class _ResponsesResponse:
+    output_text = '{"translation":"responses-ok"}'
+    usage = None
+
+
+class _FakeResponses:
+    def __init__(self, side_effects=None):
+        self.calls = []
+        self.side_effects = list(side_effects or [])
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.side_effects:
+            effect = self.side_effects.pop(0)
+            if isinstance(effect, Exception):
+                raise effect
+            return effect
+        return _ResponsesResponse()
+
+
 class _FakeClient:
     def __init__(self, side_effects=None):
         self.chat = _FakeChat(side_effects)
+        self.responses = _FakeResponses(side_effects)
 
 
 class _ResponseFormatRejected(Exception):
@@ -78,6 +99,79 @@ def _install_fake_client(client: LLMClient, fake_client: _FakeClient):
 
 
 class LLMClientParameterOverrideTests(unittest.TestCase):
+    def test_responses_api_maps_input_reasoning_and_json_format(self):
+        config = _DummyConfig({
+            ("llm", "model"): "gpt-5",
+            ("llm", "api_mode"): "responses",
+            ("llm", "max_retries"): 0,
+            ("llm", "json_response_format_enabled"): True,
+            ("llm", "parameters"): {
+                "reasoning_protocol": "standard",
+                "reasoning_effort": "high",
+            },
+        })
+        client = LLMClient(config)
+        fake_client = _FakeClient()
+        _install_fake_client(client, fake_client)
+        messages = [{"role": "user", "content": "Translate."}]
+
+        result = client.chat_completion(messages)
+
+        self.assertEqual(result, '{"translation":"responses-ok"}')
+        call = fake_client.responses.calls[0]
+        self.assertEqual(call["input"], messages)
+        self.assertNotIn("messages", call)
+        self.assertEqual(call["reasoning"], {"effort": "high"})
+        self.assertEqual(call["text"], {"format": {"type": "json_object"}})
+
+    def test_responses_usage_fields_are_normalized(self):
+        class _ResponsesUsage:
+            def model_dump(self):
+                return {
+                    "input_tokens": 100,
+                    "output_tokens": 25,
+                    "total_tokens": 125,
+                    "input_tokens_details": {"cached_tokens": 60},
+                    "output_tokens_details": {"reasoning_tokens": 10},
+                }
+
+        class _UsageResponse:
+            usage = _ResponsesUsage()
+
+        stats = LLMClient._extract_usage_stats(_UsageResponse())
+
+        self.assertEqual(stats["prompt_tokens"], 100)
+        self.assertEqual(stats["completion_tokens"], 25)
+        self.assertEqual(stats["cached_tokens"], 60)
+        self.assertEqual(stats["cache_miss_tokens"], 40)
+        self.assertEqual(stats["reasoning_tokens"], 10)
+
+    def test_responses_json_format_rejection_retries_without_text_format(self):
+        config = _DummyConfig({
+            ("llm", "model"): "gpt-5",
+            ("llm", "api_mode"): "responses",
+            ("llm", "max_retries"): 0,
+            ("llm", "json_response_format_enabled"): True,
+        })
+        tracker = CostTracker()
+        client = LLMClient(config, cost_tracker=tracker)
+        fake_client = _FakeClient([
+            _ResponseFormatRejected("Unknown parameter: text.format"),
+            _ResponsesResponse(),
+        ])
+        _install_fake_client(client, fake_client)
+
+        result = client.chat_completion([
+            {"role": "user", "content": "Return JSON."},
+        ])
+
+        self.assertEqual(result, '{"translation":"responses-ok"}')
+        calls = fake_client.responses.calls
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]["text"], {"format": {"type": "json_object"}})
+        self.assertNotIn("text", calls[1])
+        self.assertEqual(tracker.get_counter("response_format_fallbacks"), 1)
+
     def test_removed_max_tokens_configuration_is_not_sent(self):
         config = _DummyConfig({
             ("llm", "model"): "muse-spark-1.2",

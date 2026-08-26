@@ -270,6 +270,7 @@ def apply_reasoning_controls(
 def strip_reasoning_controls(request_args: dict[str, Any]) -> None:
     """Remove generated reasoning controls for a one-time compatibility retry."""
     request_args.pop("reasoning_effort", None)
+    request_args.pop("reasoning", None)
     extra_body = request_args.get("extra_body")
     if not isinstance(extra_body, dict):
         return

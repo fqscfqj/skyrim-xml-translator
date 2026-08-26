@@ -9,11 +9,12 @@ class LLMConfig:
     api_key: str = ""
     base_url: str = "https://api.openai.com/v1"
     model: str = "gpt-3.5-turbo"
+    api_mode: str = "chat_completions"
     max_retries: int = 3
     backoff_base: float = 0.5
     stream: bool = False
     json_response_format_enabled: bool = True
-    request_timeout: int = 30
+    request_timeout: int = 120
     request_timeout_step: int = 15
     request_timeout_max: int = 180
     retry_total_timeout: int = 300

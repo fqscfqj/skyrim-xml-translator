@@ -3549,6 +3549,16 @@ class MainWindow(QMainWindow):
             combo.addItem(i18n.t(key, fallback), value)
         return combo
 
+    @staticmethod
+    def _build_api_mode_combo(value):
+        combo = NoWheelComboBox()
+        combo.addItem(i18n.t("option_api_mode_chat_completions"), "chat_completions")
+        combo.addItem(i18n.t("option_api_mode_responses"), "responses")
+        index = combo.findData(str(value or "chat_completions").strip().lower())
+        combo.setCurrentIndex(index if index >= 0 else 0)
+        combo.setToolTip(i18n.t("tooltip_api_mode"))
+        return combo
+
     def create_config_tab(self):
         container = QWidget()
         self.config_tab_container = container
@@ -3601,10 +3611,14 @@ class MainWindow(QMainWindow):
         self.llm_key = QLineEdit(self.config_manager.get("llm", "api_key"))
         self.llm_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.llm_model = QLineEdit(self.config_manager.get("llm", "model"))
+        self.llm_api_mode = self._build_api_mode_combo(
+            self.config_manager.get("llm", "api_mode", "chat_completions")
+        )
         
         llm_layout.addRow(i18n.t("label_base_url"), self.llm_base)
         llm_layout.addRow(i18n.t("label_api_key"), self.llm_key)
         llm_layout.addRow(i18n.t("label_model_name"), self.llm_model)
+        llm_layout.addRow(i18n.t("label_api_mode"), self.llm_api_mode)
 
         llm_param_title = QLabel(f"<b>{i18n.t('group_llm_params')}</b>")
         llm_layout.addRow(llm_param_title)
@@ -3684,10 +3698,14 @@ class MainWindow(QMainWindow):
         self.search_key = QLineEdit(self.config_manager.get("llm_search", "api_key"))
         self.search_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.search_model = QLineEdit(self.config_manager.get("llm_search", "model"))
+        self.search_api_mode = self._build_api_mode_combo(
+            self.config_manager.get("llm_search", "api_mode", "chat_completions")
+        )
         
         search_layout.addRow(i18n.t("label_search_base_url"), self.search_base)
         search_layout.addRow(i18n.t("label_search_api_key"), self.search_key)
         search_layout.addRow(i18n.t("label_search_model"), self.search_model)
+        search_layout.addRow(i18n.t("label_api_mode"), self.search_api_mode)
 
         search_param_title = QLabel(f"<b>{i18n.t('group_search_llm_params')}</b>")
         search_layout.addRow(search_param_title)
@@ -3767,10 +3785,16 @@ class MainWindow(QMainWindow):
         self.search_fallback_key = QLineEdit(self.config_manager.get("llm_search_fallback", "api_key"))
         self.search_fallback_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.search_fallback_model = QLineEdit(self.config_manager.get("llm_search_fallback", "model"))
+        self.search_fallback_api_mode = self._build_api_mode_combo(
+            self.config_manager.get(
+                "llm_search_fallback", "api_mode", "chat_completions"
+            )
+        )
 
         search_fallback_layout.addRow(i18n.t("label_search_fallback_base_url"), self.search_fallback_base)
         search_fallback_layout.addRow(i18n.t("label_search_fallback_api_key"), self.search_fallback_key)
         search_fallback_layout.addRow(i18n.t("label_search_fallback_model"), self.search_fallback_model)
+        search_fallback_layout.addRow(i18n.t("label_api_mode"), self.search_fallback_api_mode)
 
         search_fallback_param_title = QLabel(f"<b>{i18n.t('group_search_fallback_llm_params')}</b>")
         search_fallback_layout.addRow(search_fallback_param_title)
@@ -5282,16 +5306,19 @@ class MainWindow(QMainWindow):
                 "base_url": self.llm_base.text().strip(),
                 "api_key": self.llm_key.text().strip(),
                 "model": self.llm_model.text().strip(),
+                "api_mode": self.llm_api_mode.currentData(),
             },
             "llm_search": {
                 "base_url": self.search_base.text().strip(),
                 "api_key": self.search_key.text().strip(),
                 "model": self.search_model.text().strip(),
+                "api_mode": self.search_api_mode.currentData(),
             },
             "llm_search_fallback": {
                 "base_url": self.search_fallback_base.text().strip(),
                 "api_key": self.search_fallback_key.text().strip(),
                 "model": self.search_fallback_model.text().strip(),
+                "api_mode": self.search_fallback_api_mode.currentData(),
             },
             "embedding": {
                 "base_url": self.embed_base.text().strip(),

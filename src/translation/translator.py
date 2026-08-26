@@ -1322,7 +1322,8 @@ class Translator:
             return {key: config.get(section, key, None) for key in keys}
 
         llm_policy = section_values("llm", (
-            "base_url", "model", "parameters", "json_response_format_enabled",
+            "base_url", "model", "api_mode", "parameters",
+            "json_response_format_enabled",
         ))
         payload = {
             "version": self._CACHE_POLICY_VERSION,
@@ -1348,7 +1349,8 @@ class Translator:
             payload["search_llm"] = {
                 section: section_values(
                     section,
-                    ("base_url", "model", "parameters", "json_response_format_enabled"),
+                    ("base_url", "model", "api_mode", "parameters",
+                     "json_response_format_enabled"),
                 )
                 for section in ("llm_search", "llm_search_fallback")
             }
