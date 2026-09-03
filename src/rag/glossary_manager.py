@@ -4,7 +4,9 @@ import json
 import hashlib
 import os
 import re
-from typing import Dict, Optional
+import shutil
+import time
+from typing import Any, Dict, Optional
 
 from src.logging_helper import emit as log_emit
 
@@ -70,14 +72,28 @@ class GlossaryManager:
     def __init__(self, glossary_path: str, config_manager):
         self.config = config_manager
         self.glossary_path = glossary_path
+        self.sidecar_path = self._derive_sidecar_path(glossary_path)
         self.glossary: dict[str, str] = {}
         self._glossary_lookup: dict[str, str] = {}
         self._term_token_index: Dict[str, list[str]] = {}
         self._token_df: Dict[str, int] = {}
         self._token_df_dirty = True
         self._content_fingerprint = ""
+        # Rich per-term metadata (domain/pos/priority/forbidden/examples/...).
+        # Keyed by normalized term; v1 is store-only (retrieval ignores it).
+        self.rich_meta: Dict[str, Dict[str, Any]] = {}
+        self._last_backup_path: Optional[str] = None
 
         self.load()
+
+    # --- Sidecar derived path ---
+
+    @staticmethod
+    def _derive_sidecar_path(glossary_path: str) -> str:
+        root, _ext = os.path.splitext(glossary_path or "")
+        if not root:
+            return "glossary.rich.json"
+        return f"{root}.rich.json"
 
     # --- Normalization ---
 
@@ -190,32 +206,144 @@ class GlossaryManager:
 
     # --- Load / Save ---
 
+    def _atomic_write_json(self, path: str, payload: Any) -> Optional[str]:
+        """Write JSON atomically (tmp + fsync + replace). Returns backup path."""
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        backup_path: Optional[str] = None
+        if os.path.exists(path):
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            backup_path = f"{path}.bak.{stamp}"
+            try:
+                shutil.copy2(path, backup_path)
+                self._last_backup_path = backup_path
+            except Exception as exc:
+                log_emit(None, self.config, "WARNING",
+                         f"Failed to backup {path}: {exc}", exc=exc,
+                         module="glossary_manager", func="_atomic_write_json")
+                backup_path = None
+        tmp_path = f"{path}.tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=4, ensure_ascii=False)
+                handle.flush()
+                try:
+                    os.fsync(handle.fileno())
+                except Exception:
+                    pass
+            os.replace(tmp_path, path)
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+        return backup_path
+
+    def _load_sidecar(self) -> None:
+        self.rich_meta = {}
+        if not os.path.exists(self.sidecar_path):
+            return
+        try:
+            with open(self.sidecar_path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            if isinstance(data, dict):
+                cleaned: Dict[str, Dict[str, Any]] = {}
+                for key, value in data.items():
+                    if isinstance(value, dict):
+                        normalized = self.normalize_term_key(str(key))
+                        if normalized:
+                            cleaned[normalized] = dict(value)
+                self.rich_meta = cleaned
+        except Exception as exc:
+            log_emit(None, self.config, "WARNING",
+                     f"Failed to load glossary rich metadata: {exc}", exc=exc,
+                     module="glossary_manager", func="_load_sidecar")
+
+    def _save_sidecar(self) -> None:
+        self._atomic_write_json(self.sidecar_path, self.rich_meta)
+
+    def get_rich_meta(self, term: str) -> Dict[str, Any]:
+        """Return stored rich metadata for a term (empty dict if none)."""
+        normalized = self.normalize_term_key(term or "")
+        if not normalized:
+            return {}
+        stored = self.rich_meta.get(normalized)
+        return dict(stored) if isinstance(stored, dict) else {}
+
+    def set_rich_meta_batch(self, rich_meta: Dict[str, Dict[str, Any]]) -> int:
+        """Upsert rich metadata keyed by any term spelling. Returns stored count."""
+        stored = 0
+        for term, meta in (rich_meta or {}).items():
+            if not isinstance(meta, dict) or not meta:
+                continue
+            normalized = self.normalize_term_key(str(term or ""))
+            if not normalized:
+                continue
+            self.rich_meta[normalized] = dict(meta)
+            stored += 1
+        if stored:
+            self._save_sidecar()
+        return stored
+
+    def prune_rich_meta(self, valid_terms: Optional[set] = None) -> int:
+        """Drop sidecar entries whose normalized term no longer exists."""
+        if valid_terms is None:
+            valid_terms = {self.normalize_term_key(term) for term in self.glossary.keys()}
+        stale = [key for key in self.rich_meta.keys() if key not in valid_terms]
+        for key in stale:
+            self.rich_meta.pop(key, None)
+        if stale:
+            self._save_sidecar()
+        return len(stale)
+
+    def last_backup_path(self) -> Optional[str]:
+        return self._last_backup_path
+
     def load(self) -> None:
         """Load glossary from disk."""
         if os.path.exists(self.glossary_path):
             try:
                 with open(self.glossary_path, "r", encoding="utf-8") as f:
-                    self.glossary = json.load(f)
+                    loaded = json.load(f)
+                # Tolerate both the canonical dict and a JSONv2 envelope on disk.
+                if isinstance(loaded, dict) and isinstance(loaded.get("terms"), (dict, list)) and "glossary" not in loaded:
+                    from src.rag.glossary_import import parse_json_text
+                    parsed = parse_json_text(json.dumps(loaded, ensure_ascii=False))
+                    self.glossary = dict(parsed.terms)
+                    if parsed.rich_meta:
+                        self.rich_meta = {
+                            self.normalize_term_key(term): dict(meta)
+                            for term, meta in parsed.rich_meta.items()
+                            if self.normalize_term_key(term) and isinstance(meta, dict)
+                        }
+                elif isinstance(loaded, dict):
+                    self.glossary = {str(k): str(v) for k, v in loaded.items()}
+                else:
+                    self.glossary = {}
             except Exception as e:
                 log_emit(None, self.config, "ERROR",
                          f"Error loading glossary: {e}", exc=e,
                          module="glossary_manager", func="load")
                 self.glossary = {}
+        self._load_sidecar()
         self.rebuild_lookup()
 
     def save(self) -> None:
-        """Save glossary to disk."""
-        parent = os.path.dirname(self.glossary_path)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-        with open(self.glossary_path, "w", encoding="utf-8") as f:
-            json.dump(self.glossary, f, indent=4, ensure_ascii=False)
+        """Save glossary to disk (atomic + timestamped backup)."""
+        self._atomic_write_json(self.glossary_path, self.glossary)
 
     # --- CRUD ---
 
-    def add_term(self, term: str, translation: str) -> None:
+    def add_term(self, term: str, translation: str, rich_meta: Optional[Dict[str, Any]] = None) -> None:
         """Add a term to the glossary (glossary-only, no vector)."""
         self.glossary[term] = translation
+        if isinstance(rich_meta, dict) and rich_meta:
+            normalized = self.normalize_term_key(term)
+            if normalized:
+                self.rich_meta[normalized] = dict(rich_meta)
+                self._save_sidecar()
         self.save()
         self.rebuild_lookup()
 
@@ -223,14 +351,24 @@ class GlossaryManager:
         """Delete a term from the glossary. Returns True if found."""
         if term in self.glossary:
             del self.glossary[term]
+            self.rich_meta.pop(self.normalize_term_key(term), None)
             self.save()
+            self._save_sidecar()
             self.rebuild_lookup()
             return True
         return False
 
-    def add_terms_batch(self, terms_dict: dict[str, str]) -> None:
+    def add_terms_batch(self, terms_dict: dict[str, str], rich_meta: Optional[Dict[str, Dict[str, Any]]] = None) -> None:
         """Batch add terms to glossary (glossary-only, no vectors)."""
         self.glossary.update(terms_dict)
+        if isinstance(rich_meta, dict) and rich_meta:
+            for term, meta in rich_meta.items():
+                if not isinstance(meta, dict) or not meta:
+                    continue
+                normalized = self.normalize_term_key(str(term or ""))
+                if normalized:
+                    self.rich_meta[normalized] = dict(meta)
+            self._save_sidecar()
         self.save()
         self.rebuild_lookup()
 
@@ -240,8 +378,10 @@ class GlossaryManager:
         for term in terms_list:
             if term in self.glossary:
                 del self.glossary[term]
+                self.rich_meta.pop(self.normalize_term_key(term), None)
                 deleted += 1
         if deleted > 0:
             self.save()
+            self._save_sidecar()
             self.rebuild_lookup()
         return deleted

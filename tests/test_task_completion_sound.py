@@ -102,11 +102,9 @@ class TaskCompletionSoundStateTests(unittest.TestCase):
             worker.run()
 
         self.assertEqual(worker.completion_state, TASK_COMPLETION_STATE_WARNING)
-        self.assertEqual(worker.task_result, {
-            "imported_terms": 1,
-            "invalid_rows": 1,
-            "limited_rows": 0,
-        })
+        self.assertEqual(worker.task_result["imported_terms"], 1)
+        self.assertEqual(worker.task_result["invalid_rows"], 1)
+        self.assertEqual(worker.task_result["limited_rows"], 0)
         self.assertEqual(rag_engine.imported_terms, {"Term": "Translation"})
 
 

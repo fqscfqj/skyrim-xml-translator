@@ -184,9 +184,9 @@ class RAGEngine:
             self.clear_embedding_cache()
         return self._vector_store.get_index_status()
 
-    def add_term(self, term, translation):
+    def add_term(self, term, translation, rich_meta=None):
         """添加新术语并更新索引"""
-        self._glossary_mgr.add_term(term, translation)
+        self._glossary_mgr.add_term(term, translation, rich_meta=rich_meta)
         try:
             vec = self.llm_client.get_embedding(term)
             self._vector_store.add_vector(term, vec)
@@ -200,10 +200,35 @@ class RAGEngine:
         self._vector_store.delete_vector(term)
 
     def add_terms_batch(self, terms_dict, num_threads=1,
-                        progress_callback=None, log_callback=None):
-        """批量添加术语并更新索引"""
+                        progress_callback=None, log_callback=None,
+                        rich_meta=None, import_source=None, deletes=None):
+        """批量添加术语并更新索引
+
+        Semantics: default upsert. Existing indexed terms only get their
+        translation/sidecar updated (no re-embedding). ``deletes`` is an
+        explicit opt-in list (JSON op=delete only); GUI v1 gates it behind
+        a confirmation dialog.
+        """
         self._sync_stop_flags()
-        self._glossary_mgr.add_terms_batch(terms_dict)
+        self._glossary_mgr.add_terms_batch(terms_dict, rich_meta=rich_meta)
+
+        applied_deletes = 0
+        if deletes:
+            for term in list(deletes):
+                if term in terms_dict:
+                    continue
+                if term in self._glossary_mgr.glossary or term in set(self._vector_store.terms):
+                    self._glossary_mgr.delete_term(term)
+                    self._vector_store.delete_vector(term)
+                    applied_deletes += 1
+            if applied_deletes and log_callback:
+                log_emit(log_callback, self.config, "INFO",
+                         f"Applied {applied_deletes} explicit delete operations from import.",
+                         module="rag_engine", func="add_terms_batch")
+            elif applied_deletes:
+                log_emit(None, self.config, "INFO",
+                         f"Applied {applied_deletes} explicit delete operations from import.",
+                         module="rag_engine", func="add_terms_batch")
 
         # Identify new terms needing embedding
         new_terms = [t for t in terms_dict if t not in set(self._vector_store.terms)]
@@ -225,6 +250,7 @@ class RAGEngine:
             num_threads=num_threads,
             progress_callback=progress_callback,
             log_callback=log_callback,
+            index_extra={"source": dict(import_source) if isinstance(import_source, dict) else {}},
         )
 
     def delete_terms_batch(self, terms_list):

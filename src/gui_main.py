@@ -100,34 +100,48 @@ def read_glossary_csv(
     max_rows: int = 0,
     max_field_chars: int = 0,
 ) -> tuple[dict[str, str], int, int]:
-    terms: dict[str, str] = {}
-    invalid_rows = 0
-    limited_rows = 0
-    max_rows = max(0, int(max_rows or 0))
-    max_field_chars = max(0, int(max_field_chars or 0))
+    """Legacy CSV reader kept for backward compatibility.
 
-    with open(file_path, "r", encoding="utf-8") as handle:
-        reader = csv.reader(handle)
-        for row_number, row in enumerate(reader, start=1):
-            if max_rows and row_number > max_rows:
-                limited_rows += 1
-                continue
-            if len(row) < 2:
-                invalid_rows += 1
-                continue
-            term = row[0].strip()
-            translation = row[1].strip()
-            if not term or not translation:
-                invalid_rows += 1
-                continue
-            if max_field_chars and (
-                len(term) > max_field_chars or len(translation) > max_field_chars
-            ):
-                limited_rows += 1
-                continue
-            terms[term] = translation
+    New code should use :func:`parse_glossary_file` from
+    ``src.rag.glossary_import`` which supports JSONv2 / header-aware
+    CSV/TSV plus richer diagnostics. This wrapper preserves the exact
+    historical ``(terms, invalid, limited)`` contract relied on by tests.
+    """
+    from src.rag.glossary_import import parse_glossary_file
 
-    return terms, invalid_rows, limited_rows
+    try:
+        parsed = parse_glossary_file(
+            file_path, max_rows=max_rows, max_field_chars=max_field_chars
+        )
+    except Exception:
+        # Absolute fallback: preserve the legacy strict utf-8 behavior.
+        terms: dict[str, str] = {}
+        invalid_rows = 0
+        limited_rows = 0
+        max_rows = max(0, int(max_rows or 0))
+        max_field_chars = max(0, int(max_field_chars or 0))
+        with open(file_path, "r", encoding="utf-8") as handle:
+            reader = csv.reader(handle)
+            for row_number, row in enumerate(reader, start=1):
+                if max_rows and row_number > max_rows:
+                    limited_rows += 1
+                    continue
+                if len(row) < 2:
+                    invalid_rows += 1
+                    continue
+                term = row[0].strip()
+                translation = row[1].strip()
+                if not term or not translation:
+                    invalid_rows += 1
+                    continue
+                if max_field_chars and (
+                    len(term) > max_field_chars or len(translation) > max_field_chars
+                ):
+                    limited_rows += 1
+                    continue
+                terms[term] = translation
+        return terms, invalid_rows, limited_rows
+    return parsed.terms, parsed.invalid_rows, parsed.limited_rows
 
 
 class StatusSegmentedProgressBar(QProgressBar):
@@ -245,12 +259,17 @@ class GlossaryWorker(QThread):
     log = pyqtSignal(str)
     finished = pyqtSignal()
 
-    def __init__(self, rag_engine: RAGEngine, mode: str, data: Optional[str] = None, num_threads: int = 1):
+    def __init__(self, rag_engine: RAGEngine, mode: str, data: Optional[str] = None, num_threads: int = 1,
+                 confirm_deletes: bool = False, dry_run: bool = False):
         super().__init__()
         self.rag_engine = rag_engine
         self.mode = mode # 'rebuild' or 'import'
         self.data: Optional[str] = data # file path for import
         self.num_threads = num_threads
+        # JSON op=delete only applies when the GUI explicitly confirmed it.
+        self.confirm_deletes = bool(confirm_deletes)
+        # dry_run parses + reports without touching glossary/vectors.
+        self.dry_run = bool(dry_run)
         self.completion_state = TASK_COMPLETION_STATE_SUCCESS
         self.task_result = None
         self.completion_message = ""
@@ -304,37 +323,106 @@ class GlossaryWorker(QThread):
                         self.finished.emit()
                         return
 
+                    from src.rag.glossary_import import (
+                        GlossaryImportError,
+                        parse_glossary_file,
+                        summarize_import,
+                    )
+
                     max_rows = self.rag_engine.config.get(
                         "rag", "glossary_import_max_rows", 0)
                     max_field_chars = self.rag_engine.config.get(
                         "rag", "glossary_import_max_field_chars", 0)
-                    terms, invalid_rows, limited_rows = read_glossary_csv(
-                        self.data,
-                        max_rows=max_rows,
-                        max_field_chars=max_field_chars,
-                    )
+                    try:
+                        parsed = parse_glossary_file(
+                            self.data,
+                            max_rows=max_rows,
+                            max_field_chars=max_field_chars,
+                            progress_callback=self.progress.emit,
+                            should_stop=lambda: bool(getattr(self.rag_engine, "stop_flag", False)),
+                        )
+                    except GlossaryImportError as parse_error:
+                        self.completion_state = TASK_COMPLETION_STATE_FAILURE
+                        self.completion_message = i18n.t("msg_error_importing").format(error=parse_error)
+                        self.task_result = {"error": str(parse_error)}
+                        log_emit(self.log.emit, self.rag_engine.config, 'ERROR', self.completion_message, exc=parse_error, module='gui_main', func='GlossaryWorker.run')
+                        self.finished.emit()
+                        return
+                    terms, invalid_rows, limited_rows = parsed.terms, parsed.invalid_rows, parsed.limited_rows
                     skipped_rows = invalid_rows + limited_rows
                     self.task_result = {
                         "imported_terms": len(terms),
                         "invalid_rows": invalid_rows,
                         "limited_rows": limited_rows,
+                        "duplicate_overwrites": int(parsed.duplicate_overwrites),
+                        "unknown_fields": int(parsed.unknown_fields),
+                        "delete_operations": len(parsed.deletes),
+                        "format_kind": parsed.format_kind,
+                        "dry_run": bool(self.dry_run),
                     }
+                    log_emit(self.log.emit, self.rag_engine.config, 'INFO', summarize_import(parsed),
+                             module='gui_main', func='GlossaryWorker.run')
+                    for sample in list(getattr(parsed, "samples_invalid", []) or [])[:5]:
+                        log_emit(self.log.emit, self.rag_engine.config, 'WARNING', f"Import skipped: {sample}",
+                                 module='gui_main', func='GlossaryWorker.run')
                     if skipped_rows:
                         log_emit(
                             self.log.emit,
                             self.rag_engine.config,
                             'WARNING',
                             (
-                                f"Glossary CSV skipped {invalid_rows} invalid rows and "
-                                f"{limited_rows} rows excluded by configured limits."
+                                f"Glossary import ({parsed.format_kind}) skipped {invalid_rows} invalid rows and "
+                                f"{limited_rows} rows excluded by configured limits; "
+                                f"{parsed.duplicate_overwrites} in-file overwrites, "
+                                f"{parsed.unknown_fields} unknown fields ignored."
                             ),
                             module='gui_main',
                             func='GlossaryWorker.run',
                         )
-                    
-                    if terms:
+
+                    if self.dry_run:
+                        # Preview only: never touch glossary or vectors.
+                        if terms or parsed.deletes:
+                            self.completion_state = TASK_COMPLETION_STATE_WARNING if skipped_rows else TASK_COMPLETION_STATE_SUCCESS
+                            self.completion_message = i18n.t("msg_import_preview").format(
+                                imported=len(terms),
+                                deletes=len(parsed.deletes),
+                                invalid=invalid_rows,
+                                limited=limited_rows,
+                            )
+                            log_emit(self.log.emit, self.rag_engine.config, 'INFO', self.completion_message, module='gui_main', func='GlossaryWorker.run')
+                        else:
+                            self.completion_state = TASK_COMPLETION_STATE_WARNING
+                            self.completion_message = i18n.t("msg_no_valid_terms")
+                            log_emit(self.log.emit, self.rag_engine.config, 'WARNING', i18n.t("msg_no_valid_terms"), module='gui_main', func='GlossaryWorker.run')
+                        self.finished.emit()
+                        return
+
+                    deletes = list(parsed.deletes) if self.confirm_deletes else []
+                    if parsed.deletes and not self.confirm_deletes:
+                        log_emit(self.log.emit, self.rag_engine.config, 'WARNING',
+                                 f"Ignored {len(parsed.deletes)} delete operations (not confirmed in GUI).",
+                                 module='gui_main', func='GlossaryWorker.run')
+
+                    if terms or deletes:
                         log_emit(self.log.emit, self.rag_engine.config, 'INFO', i18n.t("msg_found_terms").format(count=len(terms), threads=self.num_threads), module='gui_main', func='GlossaryWorker.run')
-                        self.rag_engine.add_terms_batch(terms, num_threads=self.num_threads, progress_callback=self.progress.emit, log_callback=self.log.emit)
+                        import os as _os
+                        try:
+                            mtime = _os.path.getmtime(self.data)
+                        except Exception:
+                            mtime = 0
+                        self.rag_engine.add_terms_batch(
+                            terms, num_threads=self.num_threads,
+                            progress_callback=self.progress.emit, log_callback=self.log.emit,
+                            rich_meta=dict(parsed.rich_meta) if parsed.rich_meta else None,
+                            import_source={
+                                "file": str(self.data),
+                                "mtime": mtime,
+                                "format": parsed.format_kind,
+                                "term_count": len(terms),
+                            },
+                            deletes=deletes or None,
+                        )
                         if skipped_rows:
                             self.completion_state = TASK_COMPLETION_STATE_WARNING
                             self.completion_message = i18n.t("msg_import_completed_with_warning").format(
@@ -3299,7 +3387,7 @@ class MainWindow(QMainWindow):
         delete_btn.clicked.connect(self.delete_selected_terms)
         action_layout.addWidget(delete_btn)
         
-        import_btn = QPushButton(i18n.t("btn_import_csv"))
+        import_btn = QPushButton(i18n.t("btn_import_glossary"))
         import_btn.clicked.connect(self.import_csv)
         action_layout.addWidget(import_btn)
         layout.addLayout(action_layout)
@@ -3308,18 +3396,23 @@ class MainWindow(QMainWindow):
         rebuild_layout = QHBoxLayout()
         rebuild_btn = QPushButton(i18n.t("btn_rebuild_index"))
         rebuild_btn.clicked.connect(self.rebuild_index)
-        
+
         self.pause_btn = QPushButton(i18n.t("btn_pause"))
         self.pause_btn.clicked.connect(self.pause_glossary_task)
         self.pause_btn.setEnabled(False)
-        
+
         self.resume_btn = QPushButton(i18n.t("btn_resume"))
         self.resume_btn.clicked.connect(self.resume_glossary_task)
         self.resume_btn.setEnabled(False)
 
+        self.cancel_btn = QPushButton(i18n.t("btn_cancel"))
+        self.cancel_btn.clicked.connect(self.cancel_glossary_task)
+        self.cancel_btn.setEnabled(False)
+
         rebuild_layout.addWidget(rebuild_btn)
         rebuild_layout.addWidget(self.pause_btn)
         rebuild_layout.addWidget(self.resume_btn)
+        rebuild_layout.addWidget(self.cancel_btn)
         layout.addLayout(rebuild_layout)
         
         # Progress Bar for Glossary Operations
@@ -5105,9 +5198,11 @@ class MainWindow(QMainWindow):
         self.log(i18n.t("msg_rebuild_started"))
         self.glossary_progress.setVisible(True)
         self.glossary_progress.setValue(0)
-        
+
         self.pause_btn.setEnabled(True)
         self.resume_btn.setEnabled(False)
+        if hasattr(self, "cancel_btn"):
+            self.cancel_btn.setEnabled(True)
         
         num_threads = self.config_manager.get("threads", "vectorization", 8)
         self.glossary_worker = GlossaryWorker(self.rag_engine, 'rebuild', num_threads=num_threads)
@@ -5118,19 +5213,62 @@ class MainWindow(QMainWindow):
         self.glossary_worker.start()
 
     def import_csv(self):
-        fname, _ = QFileDialog.getOpenFileName(self, i18n.t("title_import_csv"), '', i18n.t("filter_csv_files"))
+        fname, _ = QFileDialog.getOpenFileName(self, i18n.t("title_import_glossary"), '', i18n.t("filter_glossary_files"))
         if not fname:
             return
-            
+
+        # Dry-run preview first: parse + report without touching data.
+        try:
+            from src.rag.glossary_import import parse_glossary_file, summarize_import
+            max_rows = self.config_manager.get("rag", "glossary_import_max_rows", 0)
+            max_field_chars = self.config_manager.get("rag", "glossary_import_max_field_chars", 0)
+            preview = parse_glossary_file(fname, max_rows=max_rows, max_field_chars=max_field_chars)
+            preview_text = summarize_import(preview)
+        except Exception as parse_error:
+            QMessageBox.critical(
+                self, i18n.t("title_error"),
+                i18n.t("msg_error_importing").format(error=parse_error),
+            )
+            return
+
+        confirm_text = i18n.t("msg_import_preview").format(
+            imported=len(preview.terms),
+            deletes=len(preview.deletes),
+            invalid=preview.invalid_rows,
+            limited=preview.limited_rows,
+        ) + "\n" + preview_text
+        if preview.deletes:
+            confirm_text += "\n" + i18n.t("msg_import_contains_deletes").format(count=len(preview.deletes))
+        confirm = QMessageBox.question(
+            self, i18n.t("title_import_glossary"), confirm_text,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        confirm_deletes = bool(preview.deletes)
+        if preview.deletes:
+            second = QMessageBox.question(
+                self, i18n.t("title_confirm_delete"),
+                i18n.t("msg_confirm_import_deletes").format(count=len(preview.deletes)),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if second != QMessageBox.StandardButton.Yes:
+                return
+
         self.log(i18n.t("msg_importing").format(path=fname))
         self.glossary_progress.setVisible(True)
         self.glossary_progress.setValue(0)
-        
+
         self.pause_btn.setEnabled(True)
         self.resume_btn.setEnabled(False)
-        
+        if hasattr(self, "cancel_btn"):
+            self.cancel_btn.setEnabled(True)
+
         num_threads = self.config_manager.get("threads", "vectorization", 8)
-        self.glossary_worker = GlossaryWorker(self.rag_engine, 'import', data=fname, num_threads=num_threads)
+        self.glossary_worker = GlossaryWorker(
+            self.rag_engine, 'import', data=fname, num_threads=num_threads,
+            confirm_deletes=confirm_deletes,
+        )
         self.glossary_worker.log.connect(self.log)
         self.glossary_worker.progress.connect(self.glossary_progress.setValue)
         self.glossary_worker.finished.connect(self.on_glossary_task_finished)
@@ -5150,6 +5288,8 @@ class MainWindow(QMainWindow):
         self.glossary_progress.setVisible(False)
         self.pause_btn.setEnabled(False)
         self.resume_btn.setEnabled(False)
+        if hasattr(self, "cancel_btn"):
+            self.cancel_btn.setEnabled(False)
         self.refresh_term_list()
         if glossary_task_was_active:
             self._play_task_completion_sound(completion_state)
@@ -5407,6 +5547,15 @@ class MainWindow(QMainWindow):
             self.glossary_worker.resume()
             self.pause_btn.setEnabled(True)
             self.resume_btn.setEnabled(False)
+
+    def cancel_glossary_task(self):
+        if self.glossary_worker and self.glossary_worker.isRunning():
+            self.glossary_worker.stop()
+            log_emit(self.log, self.config_manager, 'INFO',
+                     i18n.t("msg_task_cancelled"),
+                     module='gui_main', func='cancel_glossary_task')
+            if hasattr(self, "cancel_btn"):
+                self.cancel_btn.setEnabled(False)
 
     def translate_selected(self):
         # Bug #5: Prevent concurrent translation tasks

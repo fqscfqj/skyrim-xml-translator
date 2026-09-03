@@ -23,6 +23,7 @@ class Translator:
     _CACHE_POLICY_VERSION = "translation_policy_v2"
     _FORMAT_SHELL_VERSION = "format_shell_v1"
     _QUALITY_RULES_VERSION = "quality_rules_v2"
+    _GLOSSARY_IMPORT_FORMAT_VERSION = "glossary_import_v1"
     _DEFAULT_FORMAT_EXTRA_RETRIES = 2
     _BLOCKING_UNTRANSLATED_RULES = {
         "empty",
@@ -1329,6 +1330,7 @@ class Translator:
             "version": self._CACHE_POLICY_VERSION,
             "format_shell": self._FORMAT_SHELL_VERSION,
             "quality_rules": self._QUALITY_RULES_VERSION,
+            "glossary_import_format": self._GLOSSARY_IMPORT_FORMAT_VERSION,
             "prompt": (
                 self.prompt_manager.get_fingerprint()
                 if hasattr(self.prompt_manager, "get_fingerprint") else ""

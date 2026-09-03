@@ -174,13 +174,33 @@ class VectorStore:
                 pass
         self._index_metadata = {}
 
-    def _save_index_metadata(self, embedding_fingerprint: Optional[dict[str, Any]] = None) -> None:
+    def _save_index_metadata(self, embedding_fingerprint: Optional[dict[str, Any]] = None,
+                               extra: Optional[dict[str, Any]] = None) -> None:
         parent = os.path.dirname(self.meta_path)
         if parent:
             os.makedirs(parent, exist_ok=True)
         fingerprint = self._normalize_embedding_fingerprint(
             embedding_fingerprint or self.current_embedding_fingerprint()
         )
+        try:
+            from src.rag.glossary_import import IMPORT_FORMAT_VERSION, IMPORT_FORMAT_VERSION_STR
+        except Exception:
+            IMPORT_FORMAT_VERSION, IMPORT_FORMAT_VERSION_STR = 1, "glossary_import_v1"
+        glossary_hash = ""
+        try:
+            get_fp = getattr(self.config, "get_glossary_fingerprint", None) if self.config is not None else None
+            if callable(get_fp):
+                glossary_hash = str(get_fp() or "")
+        except Exception:
+            glossary_hash = ""
+        if not glossary_hash:
+            # Fall back to the manager when engine exposes it via config bridge.
+            try:
+                manager = getattr(self.config, "_glossary_mgr", None)
+                if manager is not None and hasattr(manager, "get_content_fingerprint"):
+                    glossary_hash = str(manager.get_content_fingerprint() or "")
+            except Exception:
+                glossary_hash = ""
         metadata = {
             "embedding": fingerprint,
             "built_at": int(time.time()),
@@ -191,7 +211,21 @@ class VectorStore:
                 "version": self._NORMALIZATION_VERSION,
                 "unit_l2": bool(self._vectors_are_normalized),
             },
+            # Additive import-format provenance (v1). Old readers ignore it;
+            # status-machine reason strings are unchanged.
+            "import_format": {
+                "version": IMPORT_FORMAT_VERSION,
+                "version_str": IMPORT_FORMAT_VERSION_STR,
+            },
+            "glossary_hash": glossary_hash,
+            "source": dict(extra.get("source", {})) if isinstance(extra, dict) else {},
         }
+        if isinstance(extra, dict):
+            for key, value in extra.items():
+                if key in ("source",):
+                    continue
+                if key not in metadata:
+                    metadata[key] = value
         self._write_metadata_atomic(metadata)
         self._index_metadata = metadata
 
@@ -519,13 +553,14 @@ class VectorStore:
         with open(self.terms_path, "w", encoding="utf-8") as f:
             json.dump(self.terms, f, indent=4, ensure_ascii=False)
 
-    def save_index_state(self, embedding_fingerprint: Optional[dict[str, Any]] = None) -> None:
+    def save_index_state(self, embedding_fingerprint: Optional[dict[str, Any]] = None,
+                           extra: Optional[dict[str, Any]] = None) -> None:
         if self.vectors is None or len(self.terms) == 0:
             self.clear_index(delete_files=True)
             return
         self.save_vectors()
         self.save_terms_index()
-        self._save_index_metadata(embedding_fingerprint=embedding_fingerprint)
+        self._save_index_metadata(embedding_fingerprint=embedding_fingerprint, extra=extra)
         self._refresh_index_status()
 
     def clear_index(self, delete_files: bool = True) -> None:
@@ -625,7 +660,8 @@ class VectorStore:
     def add_vectors_batch(self, new_terms: list[str], embed_fn: Callable,
                           num_threads: int = 1,
                           progress_callback: Optional[Callable[[int], None]] = None,
-                          log_callback: Optional[Callable] = None) -> None:
+                          log_callback: Optional[Callable] = None,
+                          index_extra: Optional[dict[str, Any]] = None) -> None:
         """Batch embed and add new terms to the vector index."""
         self.stop_flag = False
         self.pause_flag = False
@@ -717,7 +753,8 @@ class VectorStore:
                 self.vectors = combined_vectors
             self.terms.extend(new_terms_added)
             self._append_terms_to_lexical_index(new_terms_added)
-            self.save_index_state(embedding_fingerprint=self.current_embedding_fingerprint())
+            self.save_index_state(embedding_fingerprint=self.current_embedding_fingerprint(),
+                                  extra=index_extra)
 
     def build_index(self, glossary_keys: list[str], embed_fn: Callable,
                     num_threads: int = 1,

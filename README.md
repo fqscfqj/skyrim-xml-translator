@@ -37,7 +37,7 @@
 
 - 图形用户界面：提供翻译任务、术语管理、配置管理和 RAG 调试可视化。
 - 智能翻译：接入 OpenAI 兼容接口，支持主翻译模型、搜索模型和后备搜索模型；内含多层质量检查（未翻译检测、格式保护、占位符校验）和智能重试。
-- RAG 术语库：支持 CSV 导入、手动维护术语、向量索引重建和术语一致性检索。
+- RAG 术语库：支持 CSV / TSV / JSON 结构化导入、手动维护术语、向量索引重建和术语一致性检索。
 - 文件处理：支持 Skyrim XML 文件和 MCM 文本文件。
 - 多线程：翻译和向量化均支持并发执行。
 - 可配置：支持模型参数、Embedding 参数、提示词风格、语言选项、缓存 TTL、质量检查阈值和重试策略。
@@ -97,9 +97,32 @@ python main.py
 运行期默认使用以下文件路径：
 
 - `config.json`：用户配置文件，首次运行时自动生成。
-- `glossary/glossary.json`：术语表。
-- `glossary/vector_index.npy` 和 `glossary/terms_index.json`：向量索引。
+- `glossary/glossary.json`：术语表主文件（保持 `{"原文": "译文"}` 兼容形态）。
+- `glossary/glossary.rich.json`：术语富元数据 sidecar（领域/词性/优先级/禁用译法/例句/多译法等，可选）。
+- `glossary/vector_index.npy`、`glossary/terms_index.json` 和 `glossary/vector_index.meta.json`：向量索引（含 `import_format` / `glossary_hash` / `source` 增量元数据）。
 - `cache/`：翻译缓存和向量缓存。
+
+## 术语导入格式（JSONv2 + 兼容旧 CSV）
+
+- **旧 CSV 零改动兼容**：无表头两列 `term,translation` 仍按原语义导入；编码请用 UTF-8（含/不含 BOM 均可），GBK/ANSI 会显式报错而不是乱码入库。
+- **带表头 CSV/TSV**：首行为表头时支持多列富字段，未知列自动忽略并计数。常用表头（含中文别名）：`term/原文`、`translation/译文`、`domain/领域`、`pos/词性`、`priority/优先级`、`forbidden/禁用译法`（`;`/`|`分隔）、`examples/例句`、`variants/多译法`、`source/来源`、`confidence/置信度`、`updated_at/更新时间`、`note/备注`、`op/操作`。分隔符按扩展名与内容自动识别逗号/制表符/分号。
+- **JSONv2（推荐）**：信封含 `format_version/source/created_at/terms`，条目必填 `term/translation`，可选上述富字段；`terms` 也可直接是对象/数组以兼容旧形态。仅 `op=delete` 的条目表示显式删除，GUI 会先预览再二次确认。
+- **导入语义**：默认 upsert（同文件后者覆盖前者并计数）；已索引词只更新译文与 sidecar，不重复向量化；向量化输入仍仅为词面，富字段只存不用（为后续排序/分组/禁用升级预留）。
+- **安全与可观测**：主文件与 sidecar 采用原子写 + 时间戳 `.bak` 备份；解析阶段即显示进度；导入前有 dry-run 预览计数；限流沿用 `rag.glossary_import_max_rows` / `rag.glossary_import_max_field_chars`。
+
+最小 JSONv2 示例：
+
+```json
+{
+  "format_version": 1,
+  "source": "my-mod-glossary",
+  "created_at": "2026-09-03",
+  "terms": [
+    {"term": "Dragonborn", "translation": "龙裔", "domain": "lore", "priority": 5},
+    {"term": "Old Term", "op": "delete"}
+  ]
+}
+```
 
 ## 打包为 Windows 可执行文件
 
