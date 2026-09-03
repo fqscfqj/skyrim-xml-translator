@@ -81,6 +81,33 @@ class JsonImportTests(unittest.TestCase):
         self.assertEqual(result.rich_meta["Dragonborn"]["source"], "unit-test")
         self.assertGreaterEqual(result.unknown_fields, 1)
 
+    def test_json_v2_envelope_goes_to_envelope_not_sidecar(self):
+        payload = {
+            "format_version": 1,
+            "source": "unit-test",
+            "created_at": "2026-01-01",
+            "terms": [{"term": "Dragonborn", "translation": "龙裔"}],
+        }
+        result = parse_json_text(json.dumps(payload, ensure_ascii=False))
+        self.assertEqual(result.envelope.get("source"), "unit-test")
+        self.assertEqual(result.envelope.get("created_at"), "2026-01-01")
+        self.assertEqual(result.envelope.get("format_version"), 1)
+        self.assertNotIn("__envelope__", result.terms)
+        self.assertNotIn("__envelope__", result.rich_meta)
+        self.assertEqual(len(result.rich_meta), len(result.terms))
+
+    def test_json_reserved_pseudo_terms_are_filtered(self):
+        payload = {
+            "format_version": 1,
+            "terms": [
+                {"term": "__envelope__", "translation": "不应入库"},
+                {"term": "Dragonborn", "translation": "龙裔"},
+            ],
+        }
+        result = parse_json_text(json.dumps(payload, ensure_ascii=False))
+        self.assertEqual(result.terms, {"Dragonborn": "龙裔"})
+        self.assertNotIn("__envelope__", result.rich_meta)
+
     def test_json_legacy_dict_shape(self):
         result = parse_json_text(json.dumps({"A": "甲", "B": "乙"}, ensure_ascii=False))
         self.assertEqual(result.format_kind, "json_legacy")

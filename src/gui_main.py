@@ -411,16 +411,28 @@ class GlossaryWorker(QThread):
                             mtime = _os.path.getmtime(self.data)
                         except Exception:
                             mtime = 0
+                        import_source = {
+                            "file": str(self.data),
+                            "mtime": mtime,
+                            "format": parsed.format_kind,
+                            "term_count": len(terms),
+                        }
+                        # Envelope provenance (JSONv2 source/created_at/version)
+                        # goes to vector meta, never to per-term sidecar.
+                        envelope = dict(getattr(parsed, "envelope", {}) or {})
+                        if envelope:
+                            import_source["envelope"] = envelope
+                        # Defensive: drop reserved "__...__" pseudo-terms even
+                        # if a future parser lets one through.
+                        safe_rich = {
+                            term: meta for term, meta in (parsed.rich_meta or {}).items()
+                            if not (term.startswith("__") and term.endswith("__"))
+                        }
                         self.rag_engine.add_terms_batch(
                             terms, num_threads=self.num_threads,
                             progress_callback=self.progress.emit, log_callback=self.log.emit,
-                            rich_meta=dict(parsed.rich_meta) if parsed.rich_meta else None,
-                            import_source={
-                                "file": str(self.data),
-                                "mtime": mtime,
-                                "format": parsed.format_kind,
-                                "term_count": len(terms),
-                            },
+                            rich_meta=dict(safe_rich) if safe_rich else None,
+                            import_source=import_source,
                             deletes=deletes or None,
                         )
                         if skipped_rows:

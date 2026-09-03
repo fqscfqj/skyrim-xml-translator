@@ -52,6 +52,9 @@ class ParsedGlossaryImport:
     delimiter: str = ","
     source_file: str = ""
     samples_invalid: list[str] = field(default_factory=list)
+    # Envelope-level provenance (JSONv2 only: source/created_at/format_version).
+    # Never stored per-term; callers merge it into vector meta import_source.
+    envelope: dict[str, Any] = field(default_factory=dict)
 
     @property
     def imported_terms(self) -> int:
@@ -483,8 +486,19 @@ def parse_json_text(
         terms_raw = payload.get("terms")
         envelope_source = str(payload.get("source") or "").strip()
         created_at = payload.get("created_at")
+        format_version = payload.get("format_version")
+        envelope: dict[str, Any] = {}
+        if envelope_source:
+            envelope["source"] = envelope_source
         if created_at not in (None, ""):
-            result.rich_meta.setdefault("__envelope__", {})["created_at"] = str(created_at)
+            envelope["created_at"] = str(created_at)
+        if format_version not in (None, ""):
+            try:
+                envelope["format_version"] = int(format_version)  # type: ignore[arg-type]
+            except Exception:
+                envelope["format_version"] = format_version
+        if envelope:
+            result.envelope = envelope
     elif isinstance(payload, dict) and "format_version" in payload and "terms" not in payload:
         raise GlossaryImportError("导入 JSON 包含 format_version 但缺少 terms 数组/对象")
     else:
@@ -536,7 +550,13 @@ def parse_json_text(
                 progress_callback(int(data_index / total * 100))
             except Exception:
                 pass
-    result.rich_meta.pop("__envelope__", None) if result.format_kind == "json_legacy" else None
+    # Defensive: never leak reserved "__...__" pseudo-terms into sidecar/vectors,
+    # even if a source file literally contains such a key.
+    for reserved in [key for key in result.terms if key.startswith("__") and key.endswith("__")]:
+        result.terms.pop(reserved, None)
+        result.rich_meta.pop(reserved, None)
+    for reserved in [key for key in result.rich_meta if key.startswith("__") and key.endswith("__")]:
+        result.rich_meta.pop(reserved, None)
     return result
 
 

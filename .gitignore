@@ -2,6 +2,10 @@
 config.json
 SkyrimXMLTranslator.spec
 *.xml
+*.sst
+glossary_xtranslator.json
+sst*_out.txt
+tools_debug_*.py
 logs/
 build/
 dist/
