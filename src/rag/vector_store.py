@@ -89,9 +89,24 @@ class VectorStore:
     @staticmethod
     def _coerce_dimension(value: Any) -> int:
         try:
-            return max(0, int(value))
+            iv = int(value)
         except Exception:
-            return 0
+            return 1536
+        if iv < 1:
+            return 1536
+        return iv
+
+    @staticmethod
+    def _clamp_threads(value: Any) -> int:
+        try:
+            iv = int(value)
+        except Exception:
+            return 1
+        if iv < 1:
+            return 1
+        if iv > 32:
+            return 32
+        return iv
 
     @staticmethod
     def _embed_task(term: str, embed_fn: Callable) -> tuple[str, Optional[list[float]], Optional[str]]:
@@ -175,7 +190,8 @@ class VectorStore:
         self._index_metadata = {}
 
     def _save_index_metadata(self, embedding_fingerprint: Optional[dict[str, Any]] = None,
-                               extra: Optional[dict[str, Any]] = None) -> None:
+                               extra: Optional[dict[str, Any]] = None,
+                               glossary_hash: Optional[str] = None) -> None:
         parent = os.path.dirname(self.meta_path)
         if parent:
             os.makedirs(parent, exist_ok=True)
@@ -186,21 +202,24 @@ class VectorStore:
             from src.rag.glossary_import import IMPORT_FORMAT_VERSION, IMPORT_FORMAT_VERSION_STR
         except Exception:
             IMPORT_FORMAT_VERSION, IMPORT_FORMAT_VERSION_STR = 1, "glossary_import_v1"
-        glossary_hash = ""
-        try:
-            get_fp = getattr(self.config, "get_glossary_fingerprint", None) if self.config is not None else None
-            if callable(get_fp):
-                glossary_hash = str(get_fp() or "")
-        except Exception:
-            glossary_hash = ""
-        if not glossary_hash:
+        # glossary_hash is caller-provided (engine passes glossary fingerprint).
+        resolved_hash = str(glossary_hash or "").strip()
+        if not resolved_hash:
+            try:
+                get_fp = getattr(self.config, "get_glossary_fingerprint", None) if self.config is not None else None
+                if callable(get_fp):
+                    resolved_hash = str(get_fp() or "")
+            except Exception:
+                resolved_hash = ""
+        if not resolved_hash:
             # Fall back to the manager when engine exposes it via config bridge.
             try:
                 manager = getattr(self.config, "_glossary_mgr", None)
                 if manager is not None and hasattr(manager, "get_content_fingerprint"):
-                    glossary_hash = str(manager.get_content_fingerprint() or "")
+                    resolved_hash = str(manager.get_content_fingerprint() or "")
             except Exception:
-                glossary_hash = ""
+                resolved_hash = ""
+        glossary_hash = resolved_hash
         metadata = {
             "embedding": fingerprint,
             "built_at": int(time.time()),
@@ -230,12 +249,15 @@ class VectorStore:
         self._index_metadata = metadata
 
     def _write_metadata_atomic(self, metadata: dict[str, Any]) -> None:
-        tmp_path = self.meta_path + ".tmp"
+        tmp_path = f"{self.meta_path}.tmp.{os.getpid()}"
         try:
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(metadata, f, indent=4, ensure_ascii=False)
                 f.flush()
-                os.fsync(f.fileno())
+                try:
+                    os.fsync(f.fileno())
+                except Exception:
+                    pass
             os.replace(tmp_path, self.meta_path)
         finally:
             if os.path.exists(tmp_path):
@@ -453,7 +475,10 @@ class VectorStore:
                 with open(self.terms_path, "r", encoding="utf-8") as f:
                     loaded_terms = json.load(f)
                 if isinstance(loaded_terms, list):
-                    self.terms = loaded_terms
+                    # Filter element types: keep only non-empty strings.
+                    self.terms = [t for t in loaded_terms if isinstance(t, str) and t.strip()]
+                else:
+                    self.terms = []
             except Exception:
                 self.terms = []
 
@@ -465,16 +490,32 @@ class VectorStore:
             try:
                 self.vectors = np.load(self.vector_path, mmap_mode="r")
             except Exception as e:
+                # npy failure: keep terms and metadata, mark stale only.
                 self.vectors = None
-                self._reset_terms_without_vectors()
                 log_emit(None, self.config, "WARNING",
-                         f"Failed to load vector index: {e}",
+                         f"Failed to load vector index (marked stale, files preserved): {e}",
                          exc=e, module="vector_store", func="load")
 
         self._index_status = self._evaluate_index_status()
         if self._index_status.is_stale:
             if self.vectors is not None:
                 self._close_mmap()
+                # Keep terms for diagnostics; vectors unloaded due to staleness.
+                if self._index_status.reason in ("invalid_vector_shape", "dimension_mismatch"):
+                    log_emit(None, self.config, "WARNING",
+                             (
+                                 f"Vector index dimension/shape mismatch "
+                                 f"({self._index_status.reason}). {self._index_status.detail}"
+                             ),
+                             module="vector_store", func="load")
+            else:
+                if self._index_status.reason == "dimension_mismatch":
+                    log_emit(None, self.config, "WARNING",
+                             (
+                                 f"Vector index dimension mismatch. "
+                                 f"{self._index_status.detail}"
+                             ),
+                             module="vector_store", func="load")
             log_emit(None, self.config, "WARNING",
                      (
                          f"Vector index marked stale ({self._index_status.reason}). "
@@ -540,27 +581,63 @@ class VectorStore:
         self._index_status = self._evaluate_index_status()
 
     def save_vectors(self) -> None:
-        if self.vectors is not None:
-            parent = os.path.dirname(self.vector_path)
-            if parent:
-                os.makedirs(parent, exist_ok=True)
-            np.save(self.vector_path, self.vectors)
+        if self.vectors is None:
+            return
+        if len(self.terms) == 0:
+            return
+        parent = os.path.dirname(self.vector_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        tmp_path = f"{self.vector_path}.tmp.{os.getpid()}.npy"
+        # np.save appends .npy when given a plain path; use file handle for exact tmp name.
+        try:
+            with open(tmp_path, "wb") as handle:
+                np.save(handle, np.asarray(self.vectors))
+                try:
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                except Exception:
+                    pass
+            os.replace(tmp_path, self.vector_path)
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
 
     def save_terms_index(self) -> None:
         parent = os.path.dirname(self.terms_path)
         if parent:
             os.makedirs(parent, exist_ok=True)
-        with open(self.terms_path, "w", encoding="utf-8") as f:
-            json.dump(self.terms, f, indent=4, ensure_ascii=False)
+        tmp_path = f"{self.terms_path}.tmp.{os.getpid()}"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(self.terms, f, indent=4, ensure_ascii=False)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except Exception:
+                    pass
+            os.replace(tmp_path, self.terms_path)
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
 
     def save_index_state(self, embedding_fingerprint: Optional[dict[str, Any]] = None,
-                           extra: Optional[dict[str, Any]] = None) -> None:
+                           extra: Optional[dict[str, Any]] = None,
+                           glossary_hash: Optional[str] = None) -> None:
         if self.vectors is None or len(self.terms) == 0:
-            self.clear_index(delete_files=True)
+            # Empty state preserves files; only refresh in-memory status.
+            self._refresh_index_status()
             return
         self.save_vectors()
         self.save_terms_index()
-        self._save_index_metadata(embedding_fingerprint=embedding_fingerprint, extra=extra)
+        self._save_index_metadata(embedding_fingerprint=embedding_fingerprint, extra=extra,
+                                  glossary_hash=glossary_hash)
         self._refresh_index_status()
 
     def clear_index(self, delete_files: bool = True) -> None:
@@ -596,24 +673,60 @@ class VectorStore:
 
     # --- Single term operations ---
 
-    def add_vector(self, term: str, vector: list[float]) -> None:
-        if self.vectors is None and self.terms:
-            self._reset_terms_without_vectors()
+    def _check_vector_dimension(self, vec_np: np.ndarray, term: str = "") -> bool:
+        # Validate入库 dimension against configured embed_dim.
+        try:
+            dim = int(vec_np.shape[-1]) if hasattr(vec_np, "shape") else len(vec_np)  # type: ignore[arg-type]
+        except Exception:
+            return False
+        if dim != int(self.embed_dim):
+            log_emit(None, self.config, "WARNING",
+                     f"Embedding dimension mismatch for term '{term}': got {dim}, expected {self.embed_dim}. Skipped.",
+                     module="vector_store", func="_check_vector_dimension")
+            return False
+        return True
+
+    def add_vector(self, term: str, vector: list[float],
+                   embedding_fingerprint: Optional[dict[str, Any]] = None,
+                   glossary_hash: Optional[str] = None) -> None:
         """Add a single term's vector to the index."""
         if self.vectors is not None:
             self._ensure_normalization_state()
-        vec_np = self._normalize_vector(vector).reshape(1, -1)
+            # Refuse incremental add when existing index dimension mismatches config.
+            try:
+                if int(self.vectors.shape[1]) != int(self.embed_dim):
+                    log_emit(None, self.config, "WARNING",
+                             f"Refusing incremental add_vector: index dim {self.vectors.shape[1]} != config dim {self.embed_dim}. Rebuild required.",
+                             module="vector_store", func="add_vector")
+                    return
+            except Exception:
+                pass
+        try:
+            vec_np = self._normalize_vector(vector).reshape(1, -1)
+        except ValueError as e:
+            log_emit(None, self.config, "WARNING",
+                     f"Skipping term '{term}': {e}",
+                     module="vector_store", func="add_vector")
+            return
+        if not self._check_vector_dimension(vec_np, term):
+            return
+        if self.vectors is None and self.terms:
+            # Stale terms without vectors: keep files, rebuild from scratch in memory.
+            self.terms = []
+            self._rebuild_lexical_index()
+            self._refresh_index_status()
         if self.vectors is None:
             self.vectors = vec_np
             self.terms = [term]
             self._vectors_are_normalized = True
         else:
-            new_vectors = np.vstack([self.vectors, vec_np])
+            new_vectors = np.vstack([np.asarray(self.vectors), vec_np])
             self._close_mmap()
             self.vectors = new_vectors
             self.terms.append(term)
         self._append_terms_to_lexical_index([term])
-        self.save_index_state(embedding_fingerprint=self.current_embedding_fingerprint())
+        self.save_index_state(embedding_fingerprint=embedding_fingerprint or self.current_embedding_fingerprint(),
+                              glossary_hash=glossary_hash)
 
     def delete_vector(self, term: str) -> bool:
         """Delete a single term's vector. Returns True if found."""
@@ -621,12 +734,17 @@ class VectorStore:
             idx = self.terms.index(term)
             self.terms.pop(idx)
             if self.vectors is not None:
-                new_vectors = np.delete(self.vectors, idx, axis=0)
+                new_vectors = np.delete(np.asarray(self.vectors), idx, axis=0)
                 self._close_mmap()
                 self.vectors = new_vectors if new_vectors.size > 0 else None
-            self._mark_lexical_index_dirty()
+            # Rebuild lexical index at write time.
+            self._rebuild_lexical_index()
             if not self.terms or self.vectors is None:
-                self.clear_index(delete_files=True)
+                # Empty state preserves files.
+                self._close_mmap() if self.vectors is None else None
+                self._refresh_index_status()
+                if not self.terms:
+                    self._vectors_are_normalized = None
             else:
                 self.save_index_state(embedding_fingerprint=self.current_embedding_fingerprint())
             return True
@@ -643,17 +761,63 @@ class VectorStore:
 
         if indices_to_delete and self.vectors is not None:
             delete_set = set(indices_to_delete)
-            new_vectors = np.delete(self.vectors, indices_to_delete, axis=0)
+            new_vectors = np.delete(np.asarray(self.vectors), indices_to_delete, axis=0)
             self._close_mmap()
             self.vectors = new_vectors if new_vectors.size > 0 else None
             self.terms = [t for i, t in enumerate(self.terms) if i not in delete_set]
-            self._mark_lexical_index_dirty()
+            self._rebuild_lexical_index()
             if not self.terms or self.vectors is None:
-                self.clear_index(delete_files=True)
+                self._refresh_index_status()
+                if not self.terms:
+                    self._vectors_are_normalized = None
             else:
                 self.save_index_state(embedding_fingerprint=self.current_embedding_fingerprint())
 
+        elif indices_to_delete:
+            # No vectors but terms exist: drop terms and rebuild index.
+            delete_set = set(indices_to_delete)
+            self.terms = [t for i, t in enumerate(self.terms) if i not in delete_set]
+            self._rebuild_lexical_index()
+            self._refresh_index_status()
+
         return indices_to_delete
+
+    def _embed_terms_ordered(self, batch_terms: list[str], embed_fn: Callable,
+                               num_threads: int) -> dict[str, Any]:
+        """Embed a batch preserving input order. Tries list-batch first."""
+        ordered: dict[str, Any] = {}
+        errors: dict[str, str] = {}
+        if not batch_terms:
+            return ordered
+        # Fast path: list-batch API (LLM client supports list input).
+        try:
+            maybe_batch = embed_fn(list(batch_terms))  # type: ignore[arg-type]
+            if (isinstance(maybe_batch, (list, tuple))
+                    and len(maybe_batch) == len(batch_terms)
+                    and all(isinstance(v, (list, tuple, np.ndarray)) for v in maybe_batch)):
+                for term, vec in zip(batch_terms, maybe_batch):
+                    ordered[term] = vec
+                return ordered
+        except Exception:
+            pass
+        # Fallback: per-term threaded embedding.
+        workers = self._clamp_threads(num_threads)
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(self._embed_task, term, embed_fn): term for term in batch_terms}
+            for future in as_completed(futures):
+                if self.stop_flag:
+                    break
+                term, vec, error = future.result()
+                if vec is not None:
+                    ordered[term] = vec
+                else:
+                    errors[term] = error or "unknown"
+        for term, err in errors.items():
+            if term not in ordered:
+                ordered[term] = None
+        # Attach errors via attribute for caller logging.
+        ordered["_errors"] = errors  # type: ignore[assignment]
+        return ordered
 
     # --- Batch build ---
 
@@ -661,12 +825,31 @@ class VectorStore:
                           num_threads: int = 1,
                           progress_callback: Optional[Callable[[int], None]] = None,
                           log_callback: Optional[Callable] = None,
-                          index_extra: Optional[dict[str, Any]] = None) -> None:
+                          index_extra: Optional[dict[str, Any]] = None,
+                          embedding_fingerprint: Optional[dict[str, Any]] = None,
+                          glossary_hash: Optional[str] = None) -> None:
         """Batch embed and add new terms to the vector index."""
-        self.stop_flag = False
-        self.pause_flag = False
-        self._reset_terms_without_vectors()
+        # Respect GUI stop/pause flags; do not reset them here.
+        num_threads = self._clamp_threads(num_threads)
+        status = self.get_index_status()
+        if status.is_stale and status.reason in ("invalid_vector_shape", "dimension_mismatch"):
+            log_emit(None, self.config, "WARNING",
+                     f"Refusing incremental vectorization (reason={status.reason}). Rebuild required.",
+                     module="vector_store", func="add_vectors_batch")
+            if log_callback:
+                log_emit(log_callback, self.config, "WARNING",
+                         f"Refusing incremental vectorization (reason={status.reason}). Rebuild required.",
+                         module="vector_store", func="add_vectors_batch")
+            return
         if self.vectors is not None:
+            try:
+                if int(self.vectors.shape[1]) != int(self.embed_dim):
+                    log_emit(None, self.config, "WARNING",
+                             f"Vector dimension {self.vectors.shape[1]} != config {self.embed_dim}. Rebuild required.",
+                             module="vector_store", func="add_vectors_batch")
+                    return
+            except Exception:
+                pass
             self._ensure_normalization_state()
 
         if not new_terms:
@@ -686,61 +869,66 @@ class VectorStore:
         batch_size = 50
         new_vectors_batches = []
         new_terms_added = []
+        fingerprint = self._normalize_embedding_fingerprint(
+            embedding_fingerprint or self.current_embedding_fingerprint()
+        )
 
-        with ThreadPoolExecutor(max_workers=num_threads) as executor:
-            for i in range(0, total, batch_size):
+        for i in range(0, total, batch_size):
+            if self.stop_flag:
+                if log_callback:
+                    log_emit(log_callback, self.config, "WARNING",
+                             "Vectorization stopped by user.",
+                             module="vector_store", func="add_vectors_batch")
+                break
+
+            while self.pause_flag:
+                time.sleep(0.1)
                 if self.stop_flag:
-                    if log_callback:
-                        log_emit(log_callback, self.config, "WARNING",
-                                 "Vectorization stopped by user.",
-                                 module="vector_store", func="add_vectors_batch")
                     break
 
-                while self.pause_flag:
-                    time.sleep(0.1)
-                    if self.stop_flag:
-                        break
+            batch_terms_input = new_terms[i:i + batch_size]
+            ordered = self._embed_terms_ordered(batch_terms_input, embed_fn, num_threads)
+            errors = ordered.pop("_errors", {}) if isinstance(ordered.get("_errors"), dict) else {}
 
-                batch_terms_input = new_terms[i:i + batch_size]
-                futures = {executor.submit(self._embed_task, term, embed_fn): term for term in batch_terms_input}
+            batch_results = []
+            batch_terms_confirmed = []
 
-                batch_results = []
-                batch_terms_confirmed = []
+            for term in batch_terms_input:
+                if self.stop_flag:
+                    break
+                vec = ordered.get(term)
+                error = errors.get(term) if isinstance(errors, dict) else None
+                processed_count += 1
 
-                for future in as_completed(futures):
-                    if self.stop_flag:
-                        break
-                    term, vec, error = future.result()
-                    processed_count += 1
+                normalized_vec = None
+                if vec is not None:
+                    try:
+                        normalized_vec = self._normalize_vector(vec)
+                    except ValueError as normalize_error:
+                        error = str(normalize_error)
 
-                    normalized_vec = None
-                    if vec is not None:
-                        try:
-                            normalized_vec = self._normalize_vector(vec)
-                        except ValueError as normalize_error:
-                            error = str(normalize_error)
-
-                    if normalized_vec is not None:
-                        batch_results.append(normalized_vec)
-                        batch_terms_confirmed.append(term)
-                        if log_callback and processed_count % 10 == 0:
-                            log_emit(log_callback, self.config, "DEBUG",
-                                     f"Vectorized [{processed_count}/{total}]: {term}",
-                                     module="vector_store", func="add_vectors_batch")
-                    else:
-                        msg = f"Failed to embed term '{term}': {error}"
-                        log_emit(None, self.config, "ERROR", msg,
+                if normalized_vec is not None and self._check_vector_dimension(
+                        normalized_vec.reshape(1, -1), term):
+                    batch_results.append(normalized_vec)
+                    batch_terms_confirmed.append(term)
+                    if log_callback and processed_count % 10 == 0:
+                        log_emit(log_callback, self.config, "DEBUG",
+                                 f"Vectorized [{processed_count}/{total}]: {term}",
                                  module="vector_store", func="add_vectors_batch")
-                        if log_callback:
-                            log_emit(log_callback, self.config, "ERROR", msg,
-                                     module="vector_store", func="add_vectors_batch")
+                else:
+                    msg = f"Failed to embed term '{term}': {error}"
+                    log_emit(None, self.config, "ERROR", msg,
+                             module="vector_store", func="add_vectors_batch")
+                    if log_callback:
+                        log_emit(log_callback, self.config, "ERROR", msg,
+                                 module="vector_store", func="add_vectors_batch")
 
-                    if progress_callback:
-                        progress_callback(int(processed_count / total * 100))
+                if progress_callback:
+                    progress_callback(int(processed_count / total * 100))
 
-                if batch_results:
-                    new_vectors_batches.append(np.vstack(batch_results))
-                    new_terms_added.extend(batch_terms_confirmed)
+            if batch_results:
+                new_vectors_batches.append(np.vstack(batch_results))
+                new_terms_added.extend(batch_terms_confirmed)
 
         if new_vectors_batches:
             new_vectors_np = np.vstack(new_vectors_batches)
@@ -748,27 +936,28 @@ class VectorStore:
                 self.vectors = new_vectors_np
                 self._vectors_are_normalized = True
             else:
-                combined_vectors = np.vstack([self.vectors, new_vectors_np])
+                combined_vectors = np.vstack([np.asarray(self.vectors), new_vectors_np])
                 self._close_mmap()
                 self.vectors = combined_vectors
             self.terms.extend(new_terms_added)
             self._append_terms_to_lexical_index(new_terms_added)
-            self.save_index_state(embedding_fingerprint=self.current_embedding_fingerprint(),
-                                  extra=index_extra)
+            self.save_index_state(embedding_fingerprint=fingerprint,
+                                  extra=index_extra, glossary_hash=glossary_hash)
 
     def build_index(self, glossary_keys: list[str], embed_fn: Callable,
                     num_threads: int = 1,
                     progress_callback: Optional[Callable[[int], None]] = None,
                     log_callback: Optional[Callable] = None,
                     force_full: bool = False,
-                    embedding_fingerprint: Optional[dict[str, Any]] = None) -> VectorIndexBuildResult:
+                    embedding_fingerprint: Optional[dict[str, Any]] = None,
+                    glossary_hash: Optional[str] = None) -> VectorIndexBuildResult:
         """Build or rebuild the vector index.
 
         `force_full=True` clears the existing vector index and rebuilds it from the
         current glossary using the current embedding backend/model/dimensions.
         """
-        self.stop_flag = False
-        self.pause_flag = False
+        # Respect GUI stop/pause flags; do not reset them here.
+        num_threads = self._clamp_threads(num_threads)
 
         status_before = self.get_index_status()
         stale_reason_before = status_before.reason if status_before.is_stale else ""
@@ -776,6 +965,29 @@ class VectorStore:
             embedding_fingerprint or self.current_embedding_fingerprint()
         )
         should_full_rebuild = bool(force_full or status_before.is_stale)
+        # size_mismatch is repaired incrementally (补齐) instead of full rebuild.
+        if status_before.is_stale and status_before.reason == "size_mismatch" and not force_full:
+            should_full_rebuild = False
+            try:
+                if self.vectors is not None:
+                    v_count = int(self.vectors.shape[0])
+                    t_count = len(self.terms)
+                    if v_count != t_count:
+                        keep = min(v_count, t_count)
+                        self.terms = self.terms[:keep]
+                        if v_count > keep:
+                            trimmed = np.asarray(self.vectors[:keep])
+                            self._close_mmap()
+                            self.vectors = trimmed
+                        self._rebuild_lexical_index()
+                        log_emit(None, self.config, "WARNING",
+                                 f"Vector size_mismatch repaired incrementally: kept {keep} rows,补齐 missing.",
+                                 module="vector_store", func="build_index")
+            except Exception as e:
+                log_emit(None, self.config, "WARNING",
+                         f"Failed to repair size_mismatch incrementally: {e}",
+                         exc=e, module="vector_store", func="build_index")
+                should_full_rebuild = True
 
         if should_full_rebuild:
             if log_callback:
@@ -788,15 +1000,27 @@ class VectorStore:
                          module="vector_store", func="build_index")
             self.clear_index(delete_files=True)
             self._vectors_are_normalized = True
-            terms_to_process = list(glossary_keys)
+            terms_to_process = list(glossary_keys or [])
             mode = "full"
             reason = stale_reason_before or "requested"
         else:
-            self._reset_terms_without_vectors()
             if self.vectors is not None:
+                try:
+                    if int(self.vectors.shape[1]) != int(self.embed_dim):
+                        log_emit(None, self.config, "WARNING",
+                                 f"Refusing incremental build_index: index dim {self.vectors.shape[1]} != config {self.embed_dim}. Rebuild required.",
+                                 module="vector_store", func="build_index")
+                        return VectorIndexBuildResult(
+                            mode="incremental", reason="dimension_mismatch",
+                            total_terms=0, processed_terms=0, successful_terms=0,
+                            failed_terms=0, final_term_count=len(self.terms),
+                            stale_reason_before=stale_reason_before, force_full=False,
+                        )
+                except Exception:
+                    pass
                 self._ensure_normalization_state()
             existing_terms_set = set(self.terms)
-            terms_to_process = [t for t in glossary_keys if t not in existing_terms_set]
+            terms_to_process = [t for t in (glossary_keys or []) if t not in existing_terms_set]
             mode = "incremental"
             reason = "missing_terms"
 
@@ -833,7 +1057,7 @@ class VectorStore:
         batch_size = 50
         try:
             checkpoint_terms = int(self.config.get(
-                "rag", "vector_index_checkpoint_terms", 1000))
+                "rag", "vector_index_checkpoint_terms", 1000)) if self.config is not None else 1000
         except Exception:
             checkpoint_terms = 1000
         checkpoint_terms = max(batch_size, min(checkpoint_terms, 10_000))
@@ -841,87 +1065,90 @@ class VectorStore:
         pending_terms: list[str] = []
         pending_count = 0
 
-        with ThreadPoolExecutor(max_workers=num_threads) as executor:
-            for i in range(0, total, batch_size):
+        for i in range(0, total, batch_size):
+            if self.stop_flag:
+                if log_callback:
+                    log_emit(log_callback, self.config, "WARNING",
+                             "Index building stopped by user.",
+                             module="vector_store", func="build_index")
+                break
+
+            while self.pause_flag:
+                time.sleep(0.1)
                 if self.stop_flag:
-                    if log_callback:
-                        log_emit(log_callback, self.config, "WARNING",
-                                 "Index building stopped by user.",
-                                 module="vector_store", func="build_index")
                     break
 
-                while self.pause_flag:
-                    time.sleep(0.1)
-                    if self.stop_flag:
-                        break
+            batch_terms = terms_to_process[i:i + batch_size]
+            ordered = self._embed_terms_ordered(batch_terms, embed_fn, num_threads)
+            errors = ordered.pop("_errors", {}) if isinstance(ordered.get("_errors"), dict) else {}
 
-                batch_terms = terms_to_process[i:i + batch_size]
-                futures = {executor.submit(self._embed_task, term, embed_fn): term for term in batch_terms}
+            batch_vectors = []
+            batch_valid_terms = []
 
-                batch_vectors = []
-                batch_valid_terms = []
+            for term in batch_terms:
+                if self.stop_flag:
+                    break
+                vec = ordered.get(term)
+                error = errors.get(term) if isinstance(errors, dict) else None
+                processed_count += 1
 
-                for future in as_completed(futures):
-                    if self.stop_flag:
-                        break
-                    term, vec, error = future.result()
-                    processed_count += 1
+                normalized_vec = None
+                if vec is not None:
+                    try:
+                        normalized_vec = self._normalize_vector(vec)
+                    except ValueError as normalize_error:
+                        error = str(normalize_error)
 
-                    normalized_vec = None
-                    if vec is not None:
-                        try:
-                            normalized_vec = self._normalize_vector(vec)
-                        except ValueError as normalize_error:
-                            error = str(normalize_error)
-
-                    if normalized_vec is not None:
-                        batch_vectors.append(normalized_vec)
-                        batch_valid_terms.append(term)
-                        success_count += 1
-                        if log_callback and processed_count % 10 == 0:
-                            log_emit(log_callback, self.config, "DEBUG",
-                                     f"Indexed [{processed_count}/{total}]: {term}",
-                                     module="vector_store", func="build_index")
-                    else:
-                        failed_count += 1
-                        msg = f"Failed to embed term '{term}': {error}"
-                        log_emit(None, self.config, "ERROR", msg,
+                if normalized_vec is not None and self._check_vector_dimension(
+                        normalized_vec.reshape(1, -1), term):
+                    batch_vectors.append(normalized_vec)
+                    batch_valid_terms.append(term)
+                    success_count += 1
+                    if log_callback and processed_count % 10 == 0:
+                        log_emit(log_callback, self.config, "DEBUG",
+                                 f"Indexed [{processed_count}/{total}]: {term}",
                                  module="vector_store", func="build_index")
-                        if log_callback:
-                            log_emit(log_callback, self.config, "ERROR", msg,
-                                     module="vector_store", func="build_index")
+                else:
+                    failed_count += 1
+                    msg = f"Failed to embed term '{term}': {error}"
+                    log_emit(None, self.config, "ERROR", msg,
+                             module="vector_store", func="build_index")
+                    if log_callback:
+                        log_emit(log_callback, self.config, "ERROR", msg,
+                                 module="vector_store", func="build_index")
 
-                    if progress_callback:
-                        progress_callback(int(processed_count / total * 100))
+                if progress_callback:
+                    progress_callback(int(processed_count / total * 100))
 
-                if batch_vectors:
-                    pending_vector_batches.append(np.vstack(batch_vectors))
-                    pending_terms.extend(batch_valid_terms)
-                    pending_count += len(batch_valid_terms)
+            if batch_vectors:
+                pending_vector_batches.append(np.vstack(batch_vectors))
+                pending_terms.extend(batch_valid_terms)
+                pending_count += len(batch_valid_terms)
 
-                should_checkpoint = bool(
-                    pending_vector_batches
-                    and (
-                        pending_count >= checkpoint_terms
-                        or i + batch_size >= total
-                        or self.stop_flag
-                    )
+            should_checkpoint = bool(
+                pending_vector_batches
+                and (
+                    pending_count >= checkpoint_terms
+                    or i + batch_size >= total
+                    or self.stop_flag
                 )
-                if should_checkpoint:
-                    new_vectors_np = np.vstack(pending_vector_batches)
-                    if self.vectors is None:
-                        self.vectors = new_vectors_np
-                        self._vectors_are_normalized = True
-                    else:
-                        combined_vectors = np.vstack([self.vectors, new_vectors_np])
-                        self._close_mmap()
-                        self.vectors = combined_vectors
-                    self.terms.extend(pending_terms)
-                    self._append_terms_to_lexical_index(pending_terms)
-                    self.save_index_state(embedding_fingerprint=current_fingerprint)
-                    pending_vector_batches.clear()
-                    pending_terms.clear()
-                    pending_count = 0
+            )
+            if should_checkpoint:
+                new_vectors_np = np.vstack(pending_vector_batches)
+                if self.vectors is None:
+                    self.vectors = new_vectors_np
+                    self._vectors_are_normalized = True
+                else:
+                    combined_vectors = np.vstack([np.asarray(self.vectors), new_vectors_np])
+                    self._close_mmap()
+                    self.vectors = combined_vectors
+                self.terms.extend(pending_terms)
+                self._append_terms_to_lexical_index(pending_terms)
+                self.save_index_state(embedding_fingerprint=current_fingerprint,
+                                      glossary_hash=glossary_hash)
+                pending_vector_batches.clear()
+                pending_terms.clear()
+                pending_count = 0
 
         result = VectorIndexBuildResult(
             mode=mode,

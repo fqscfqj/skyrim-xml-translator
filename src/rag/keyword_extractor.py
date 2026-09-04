@@ -99,7 +99,21 @@ class KeywordExtractor:
         except Exception:
             pass
 
-        keywords = self._extract_via_llm(text, log_callback, debug_info=debug_info)
+        try:
+            keywords = self._extract_via_llm(text, log_callback, debug_info=debug_info)
+        except ValueError:
+            raise
+        except Exception as e:
+            # LLM outage degrades to deterministic regex fallback.
+            try:
+                log_emit(log_callback, self.config, "WARNING",
+                         f"[RAG] keyword_extract LLM failed, degrading to regex: {e}",
+                         exc=e, module="keyword_extractor", func="extract")
+            except Exception:
+                pass
+            keywords = []
+            if isinstance(debug_info, dict):
+                debug_info["result_source"] = "llm_error_regex"
         keywords = self._finalize_keywords(
             keywords,
             text,
@@ -211,9 +225,14 @@ class KeywordExtractor:
             except Exception:
                 params = {}
             model_config[f"{section}.parameters"] = params if isinstance(params, dict) else str(params)
+        try:
+            glossary_fp = self.glossary_manager.get_content_fingerprint()
+        except Exception:
+            glossary_fp = ""
         payload = {
             "prompt": prompt_config,
             "model": model_config,
+            "glossary": str(glossary_fp or ""),
         }
         raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -330,6 +349,9 @@ class KeywordExtractor:
 
     def _build_keyword_messages(self, text: str) -> tuple[str, str, str, list[dict[str, str]]]:
         prompt_template = self._get_keyword_prompt_template()
+        prompt_config = self.prompt_manager.get("rag.keywords")
+        if isinstance(prompt_config, dict) and "{text}" not in str(prompt_template or ""):
+            raise ValueError("rag.keywords prompt template is missing required '{text}' placeholder")
         system_template, user_template = self._split_keyword_prompt_template(prompt_template)
 
         prompt = self._apply_prompt_vars(
@@ -435,9 +457,10 @@ class KeywordExtractor:
         src = cls._normalize_for_source_match(source_text)
         if not kw or not src:
             return False
-        if " " in kw:
-            return kw in src
-        return f" {kw} " in f" {src} "
+        if re.search(r"[0-9a-z]", kw):
+            pattern = re.compile(r"(?<![0-9a-z]){}(?![0-9a-z])".format(re.escape(kw)))
+            return bool(pattern.search(src))
+        return kw in src
 
     def _get_rag_int(self, key: str, default: int, min_value: int = 1, max_value: int = 10_000) -> int:
         try:
@@ -640,31 +663,30 @@ class KeywordExtractor:
                 log_emit(
                     log_callback,
                     self.config,
-                    "ERROR",
+                    "ERROR" if not sensitive else "WARNING",
                     f"[RAG] keyword_extract fallback search failed ({reason}, sensitive_block={sensitive}); "
-                    f"result={'local_regex_fallback' if sensitive else 'fallback_failed'}",
+                    f"result=local_regex_fallback",
                     exc=None if sensitive else fallback_error,
                     module="keyword_extractor",
                     func="_extract_via_llm",
                 )
-                if sensitive:
-                    if isinstance(debug_info, dict):
-                        debug_info["result_source"] = "fallback_sensitive_block"
-                    return []
-                raise RuntimeError("keyword search unavailable after fallback") from fallback_error
-
+                if isinstance(debug_info, dict):
+                    debug_info["result_source"] = "fallback_sensitive_block" if sensitive else "fallback_failed_regex"
+                return []
             reason = "refusal_text" if self._is_refusal_response_text(fallback_response_text) else "blank_response"
             fallback_attempt["status"] = "failed"
             fallback_attempt["failure_reason"] = reason
             log_emit(
                 log_callback,
                 self.config,
-                "ERROR",
-                f"[RAG] keyword_extract fallback search failed ({reason}); result=fallback_failed",
+                "WARNING",
+                f"[RAG] keyword_extract fallback search failed ({reason}); result=local_regex_fallback",
                 module="keyword_extractor",
                 func="_extract_via_llm",
             )
-            raise RuntimeError("keyword search unavailable after fallback")
+            if isinstance(debug_info, dict):
+                debug_info["result_source"] = "fallback_failed_regex"
+            return []
 
         log_emit(
             log_callback,
@@ -694,9 +716,20 @@ class KeywordExtractor:
         """Parse LLM response into a list of keyword strings."""
         parsed = None
         try:
-            parsed = json.loads(response)
+            decoder = json.JSONDecoder()
+            stripped = (response or "").strip()
+            if stripped:
+                parsed, _ = decoder.raw_decode(stripped)
         except json.JSONDecodeError:
-            pass
+            try:
+                decoder = json.JSONDecoder()
+                start = (response or "").find("[")
+                if start >= 0:
+                    parsed, _ = decoder.raw_decode(response[start:])
+                else:
+                    parsed = None
+            except json.JSONDecodeError:
+                parsed = None
 
         if isinstance(parsed, list):
             if isinstance(debug_target, dict):
@@ -816,8 +849,15 @@ class KeywordExtractor:
         for kw in keywords:
             if self._keyword_appears_in_text(kw, text):
                 present.append(kw)
-            else:
-                dropped.append(kw)
+                continue
+            try:
+                norm = self.glossary_manager.normalize_term_key(kw)
+                if norm and self.glossary_manager.lookup_normalized(norm) is not None:
+                    present.append(kw)
+                    continue
+            except Exception:
+                pass
+            dropped.append(kw)
         if dropped:
             try:
                 preview = dropped[:10]
@@ -1006,10 +1046,13 @@ class KeywordExtractor:
         if not self._get_rag_bool("keyword_task_decompose_enabled", True):
             return keywords
 
+        try:
+            self.glossary_manager.ensure_token_df()
+        except Exception:
+            pass
         keep_original = self._get_rag_bool("keyword_task_keep_original", False)
         per_phrase_budget = max(2, self._get_query_task_limit())
         min_token_len = 2
-        missing_df = 10 ** 9
 
         expanded: list[str] = []
         for kw in keywords:
@@ -1042,7 +1085,8 @@ class KeywordExtractor:
 
             ranked = sorted(
                 set(token_candidates),
-                key=lambda t: (int(self.glossary_manager._token_df.get(t, missing_df)), -len(t), t),
+                # Missing tokens are rare (df=0) so new entities rank first.
+                key=lambda t: (int(self.glossary_manager._token_df.get(t, 0)), -len(t), t),
             )
             selected_set = set(ranked[:per_phrase_budget])
 
@@ -1170,6 +1214,41 @@ class KeywordExtractor:
         """Minimal fallback for extractor outages."""
         result = []
         seen: set[str] = set()
+
+        # Chinese/CJK fallback: glossary phrases appearing as substrings are kept.
+        try:
+            has_cjk = bool(re.search(r"[\u4e00-\u9fff]", text or ""))
+        except Exception:
+            has_cjk = False
+        if has_cjk:
+            try:
+                glossary = getattr(self.glossary_manager, "glossary", {}) or {}
+                for term in glossary.keys():
+                    if not term or not isinstance(term, str):
+                        continue
+                    norm = self.glossary_manager.normalize_term_key(term)
+                    if not norm:
+                        continue
+                    if term in (text or "") or self._keyword_appears_in_text(term, text or ""):
+                        if norm not in seen:
+                            seen.add(norm)
+                            result.append(term)
+            except Exception:
+                pass
+        # Preserve multi-word glossary phrases appearing verbatim in source.
+        try:
+            glossary = getattr(self.glossary_manager, "glossary", {}) or {}
+            for term in glossary.keys():
+                if not term or not isinstance(term, str) or " " not in term.strip():
+                    continue
+                norm = self.glossary_manager.normalize_term_key(term)
+                if not norm or norm in seen:
+                    continue
+                if self._keyword_appears_in_text(term, text or ""):
+                    seen.add(norm)
+                    result.append(term)
+        except Exception:
+            pass
 
         for token in self._WORD_TOKEN_RE.findall(text or ""):
             token_norm = self.glossary_manager.normalize_term_key(token)

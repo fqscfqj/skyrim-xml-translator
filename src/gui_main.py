@@ -1,5 +1,6 @@
 import sys
 import os
+import time
 import threading
 import shutil
 import datetime
@@ -18,8 +19,29 @@ except ImportError:
 
 try:
     _WINMM = ctypes.windll.winmm
+    try:
+        _WINMM.mciSendStringW.argtypes = [
+            ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint, ctypes.c_void_p]
+        _WINMM.mciSendStringW.restype = ctypes.c_uint
+    except Exception:
+        pass
 except Exception:
     _WINMM = None
+
+
+def resource_path(*parts: str) -> str:
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        return os.path.join(str(base), *parts)
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), *parts)
+
+
+def writable_path(*parts: str) -> str:
+    if getattr(sys, "frozen", False):
+        base = os.path.dirname(os.path.abspath(sys.executable))
+    else:
+        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, *parts)
 
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QLabel, QLineEdit, QPushButton, QTextEdit, QPlainTextEdit,
@@ -273,6 +295,26 @@ class GlossaryWorker(QThread):
         self.completion_state = TASK_COMPLETION_STATE_SUCCESS
         self.task_result = None
         self.completion_message = ""
+        # Own cooperative state; never touch global engine flags.
+        self._stop_event = threading.Event()
+        self._pause_event = threading.Event()
+        self._pause_event.set()
+        self._log_batch: list[str] = []
+        self._log_last_flush = 0.0
+
+    def _wait_if_paused(self) -> bool:
+        while not self._pause_event.wait(timeout=0.5):
+            if self._stop_event.is_set():
+                return False
+        return not self._stop_event.is_set()
+
+    def _flush_batched_log(self) -> None:
+        if self._log_batch:
+            try:
+                self.log.emit("\n".join(self._log_batch))
+            except Exception:
+                pass
+            self._log_batch.clear()
 
     def run(self):
         try:
@@ -339,7 +381,7 @@ class GlossaryWorker(QThread):
                             max_rows=max_rows,
                             max_field_chars=max_field_chars,
                             progress_callback=self.progress.emit,
-                            should_stop=lambda: bool(getattr(self.rag_engine, "stop_flag", False)),
+                            should_stop=lambda: self._stop_event.is_set(),
                         )
                     except GlossaryImportError as parse_error:
                         self.completion_state = TASK_COMPLETION_STATE_FAILURE
@@ -454,7 +496,11 @@ class GlossaryWorker(QThread):
                     self.completion_state = TASK_COMPLETION_STATE_FAILURE
                     self.completion_message = i18n.t("msg_glossary_task_failed")
                     log_emit(self.log.emit, self.rag_engine.config, 'ERROR', i18n.t("msg_error_importing").format(error=e), exc=e, module='gui_main', func='GlossaryWorker.run')
-        
+
+            try:
+                self._flush_batched_log()
+            except Exception:
+                pass
             self.finished.emit()
         except Exception as e:
             self.completion_state = TASK_COMPLETION_STATE_FAILURE
@@ -465,15 +511,19 @@ class GlossaryWorker(QThread):
                 pass
 
     def stop(self):
-        self.rag_engine.stop_flag = True
-        self.rag_engine.pause_flag = False
+        self._stop_event.set()
+        self._pause_event.set()
+        try:
+            self.rag_engine.llm_client.close_clients()
+        except Exception:
+            pass
 
     def pause(self):
-        self.rag_engine.pause_flag = True
+        self._pause_event.clear()
         log_emit(self.log.emit, self.rag_engine.config, 'INFO', i18n.t("msg_task_paused"), module='gui_main', func='GlossaryWorker.pause')
 
     def resume(self):
-        self.rag_engine.pause_flag = False
+        self._pause_event.set()
         log_emit(self.log.emit, self.rag_engine.config, 'INFO', i18n.t("msg_task_resumed"), module='gui_main', func='GlossaryWorker.resume')
 
 class Worker(QThread):
@@ -493,6 +543,9 @@ class Worker(QThread):
         self.stop_receiving = False  # Flag to immediately stop receiving data
         self._pause_event = threading.Event()
         self._pause_event.set()  # Initially not paused (set = running)
+        self._stop_event = threading.Event()
+        self._status_log_last = 0.0
+        self._status_log_pending = 0
 
     @staticmethod
     def _normalize_thread_count(value) -> int:
@@ -682,16 +735,19 @@ class Worker(QThread):
             def translate_task(item):
                 if isinstance(item, list):
                     task_logs: list[str] = []
-                    if not self.is_running or self.stop_receiving:
+                    if not self.is_running or self.stop_receiving or self._stop_event.is_set():
                         return None
-                    self._pause_event.wait()
-                    if not self.is_running or self.stop_receiving:
+                    while not self._pause_event.wait(timeout=0.5):
+                        if not self.is_running or self.stop_receiving or self._stop_event.is_set():
+                            return None
+                    if not self.is_running or self.stop_receiving or self._stop_event.is_set():
                         return None
 
                     def _batch_log_callback(msg):
                         text = str(msg)
                         task_logs.append(text)
-                        self.log.emit(text)
+                        if len(task_logs) <= 5:
+                            self.log.emit(text)
 
                     try:
                         sources = [str(batch_item[1]) for batch_item in item]
@@ -771,19 +827,19 @@ class Worker(QThread):
                 context_hint = item[2] if len(item) > 2 else None
                 dedupe_key = item[3] if len(item) > 3 else self._translation_dedupe_key(source, context_hint)
                 task_logs: list[str] = []
-                if not self.is_running or self.stop_receiving:
+                if not self.is_running or self.stop_receiving or self._stop_event.is_set():
                     return None
-                # Wait while paused using threading.Event for efficient blocking.
-                # Note: In-flight translations (currently executing translate_text) 
-                # will complete before pause takes effect for that task.
-                self._pause_event.wait()
-                if not self.is_running or self.stop_receiving:
+                while not self._pause_event.wait(timeout=0.5):
+                    if not self.is_running or self.stop_receiving or self._stop_event.is_set():
+                        return None
+                if not self.is_running or self.stop_receiving or self._stop_event.is_set():
                     return None
                 try:
                     def _task_log_callback(msg):
                         text = str(msg)
                         task_logs.append(text)
-                        self.log.emit(text)
+                        if len(task_logs) <= 5:
+                            self.log.emit(text)
 
                     translation, debug_info = self.translator.translate_text(
                         source,
@@ -928,14 +984,10 @@ class Worker(QThread):
                                     display_count = min(unique_count, processed_count + future_processed_count + 1)
                                     if len(all_rows) > 1:
                                         status_line = f"[{display_count}/{unique_count}] {safe_source[:20]}... -> {safe_translation[:20]}...{status_suffix} (x{len(all_rows)} {i18n.t('msg_duplicate_applied')})"
-                                        log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO',
-                                                status_line,
-                                                module='gui_main', func='Worker.run')
+                                        self._emit_status_throttled(status_line)
                                     else:
                                         status_line = f"[{display_count}/{unique_count}] {safe_source[:20]}... -> {safe_translation[:20]}...{status_suffix}"
-                                        log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO',
-                                                status_line,
-                                                module='gui_main', func='Worker.run')
+                                        self._emit_status_throttled(status_line)
 
                                     if debug_info and safe_source:
                                         if isinstance(debug_info, dict):
@@ -1016,6 +1068,10 @@ class Worker(QThread):
             self._save_translation_cache()
 
             if not self.stop_receiving:
+                try:
+                    self._flush_status_log()
+                except Exception:
+                    pass
                 if cost_tracker is not None and hasattr(cost_tracker, "get_session_summary"):
                     usage_summary = cost_tracker.get_session_summary()
                     prompt_tokens = int(usage_summary.get("total_prompt_tokens", 0) or 0)
@@ -1054,13 +1110,96 @@ class Worker(QThread):
     def stop(self):
         self.is_running = False
         self.stop_receiving = True  # Immediately stop receiving data
+        try:
+            self._stop_event.set()
+        except Exception:
+            pass
         self._pause_event.set()  # Unblock any waiting tasks so they can exit
+        try:
+            self.translator.llm_client.close_clients()
+        except Exception:
+            pass
+
+    def _emit_status_throttled(self, status_line: str) -> None:
+        if not status_line:
+            return
+        self._status_log_pending += 1
+        now = time.monotonic()
+        if (now - self._status_log_last) >= 0.5 or self._status_log_pending >= 20:
+            if self._status_log_pending > 1:
+                status_line = f"{status_line} (+{self._status_log_pending - 1} more)"
+            log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO',
+                     status_line, module='gui_main', func='Worker.run')
+            self._status_log_last = now
+            self._status_log_pending = 0
+
+    def _flush_status_log(self) -> None:
+        if self._status_log_pending > 0:
+            log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO',
+                     f"Completed {self._status_log_pending} more item(s).",
+                     module='gui_main', func='Worker.run')
+            self._status_log_pending = 0
 
     def pause(self):
         self._pause_event.clear()  # Block waiting tasks
 
     def resume(self):
         self._pause_event.set()  # Unblock waiting tasks
+
+
+class XmlLoadWorker(QThread):
+    loaded = pyqtSignal(str, object, list)
+    load_failed = pyqtSignal(str)
+
+    def __init__(self, file_path: str, parent=None):
+        super().__init__(parent)
+        self.file_path = str(file_path)
+        self._stop_event = threading.Event()
+
+    def request_stop(self) -> None:
+        self._stop_event.set()
+
+    def run(self):
+        try:
+            if self._stop_event.is_set():
+                return
+            file_type = detect_translation_file_type_from_extension(self.file_path)
+            if file_type == FILE_TYPE_XML:
+                try:
+                    tree = parse_xml_file(self.file_path)
+                    root = tree.getroot()
+                    has_esp = has_orig = False
+                    for node in root.iter():
+                        tag = getattr(node, "tag", "")
+                        name = tag.rsplit("}", 1)[-1] if "}" in str(tag) else str(tag)
+                        if name == "ESP":
+                            has_esp = True
+                        elif name == "ORIGINAL":
+                            has_orig = True
+                        if has_esp and has_orig:
+                            break
+                    file_type = FILE_TYPE_ESP_XML if (has_esp and has_orig) else FILE_TYPE_XML
+                except Exception as e:
+                    self.load_failed.emit(str(e))
+                    return
+            if self._stop_event.is_set():
+                return
+            if file_type == FILE_TYPE_MCM:
+                proc = MCMProcessor()
+            elif file_type == FILE_TYPE_ESP_XML:
+                proc = ESPXMLProcessor()
+            else:
+                proc = XMLProcessor()
+            if not proc.load_file(self.file_path):
+                self.load_failed.emit("load_file returned False")
+                return
+            strings = list(proc.get_strings())
+            self.loaded.emit(file_type, proc, strings)
+        except Exception as e:
+            try:
+                self.load_failed.emit(str(e))
+            except Exception:
+                pass
 
 
 # Custom widgets to prevent accidental change via mouse wheel.
@@ -2204,6 +2343,10 @@ class MainWindow(QMainWindow):
         return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     def _task_sound_assets_dir(self) -> str:
+        # Bundled sounds resolve via resource_path (_MEIPASS when frozen).
+        bundled = resource_path("assets", "sounds")
+        if os.path.isdir(bundled):
+            return bundled
         return os.path.join(self._app_root_dir(), "assets", "sounds")
 
     def _task_completion_sound_path(self, state: object) -> Optional[str]:
@@ -2871,65 +3014,127 @@ class MainWindow(QMainWindow):
         """
 
     def closeEvent(self, a0: Optional[QCloseEvent]) -> None:
-        """Handle window close event to properly cleanup threads"""
-        # Close HTTP connections first so in-progress LLM/embedding requests raise
-        # immediately, letting background threads exit without force-termination.
+        # Cooperative cancel only: stop workers + close HTTP clients, no terminate.
         try:
             self.translator.llm_client.close_clients()
         except Exception:
             pass
-
-        # Stop and wait for translation worker
+        try:
+            if self._xml_load_worker is not None and self._xml_load_worker.isRunning():
+                try:
+                    self._xml_load_worker.request_stop()
+                except Exception:
+                    pass
+        except Exception:
+            pass
         if self.worker and self.worker.isRunning():
-            self.worker.stop()
-            self.worker.wait(10000)  # HTTP clients are closed, so requests fail fast
-            if self.worker.isRunning():
-                self.worker.terminate()
-                self.worker.wait(2000)
-
-        # Stop and wait for glossary worker
+            try:
+                self.worker.stop()
+            except Exception:
+                pass
         if self.glossary_worker and self.glossary_worker.isRunning():
-            self.glossary_worker.stop()
-            self.glossary_worker.wait(10000)
-            if self.glossary_worker.isRunning():
-                self.glossary_worker.terminate()
-                self.glossary_worker.wait(2000)
-
+            try:
+                self.glossary_worker.stop()
+            except Exception:
+                pass
+        try:
+            self._stop_task_completion_audio()
+        except Exception:
+            pass
         try:
             self._flush_log_buffer()
             if self._log_flush_timer.isActive():
                 self._log_flush_timer.stop()
         except Exception:
             pass
-
         if a0 is not None:
             a0.accept()
 
+    def _is_supported_drop_file(self, path: str) -> bool:
+        return os.path.splitext(str(path or ""))[1].lower() in self.SUPPORTED_DROP_SUFFIXES
+
+    def _remember_last_dir(self, path: str) -> None:
+        try:
+            d = os.path.dirname(os.path.abspath(str(path or "")))
+            if d and os.path.isdir(d):
+                self._last_open_dir = d
+        except Exception:
+            pass
+
+    def _dialog_dir(self) -> str:
+        try:
+            if self._last_open_dir and os.path.isdir(self._last_open_dir):
+                return self._last_open_dir
+        except Exception:
+            pass
+        return os.path.abspath(os.getcwd())
+
+    def _validate_translation_path(self, path: str) -> tuple[bool, str]:
+        p = str(path or "").strip()
+        if not p:
+            return False, i18n.t("msg_file_not_found")
+        if len(p) > 4096 or len(os.path.basename(p)) > 255:
+            return False, i18n.t("msg_invalid_path_length")
+        invalid = set('<>:"|?*\x00')
+        if any(ch in invalid for ch in p):
+            return False, i18n.t("msg_invalid_path_chars")
+        if not os.path.exists(p):
+            return False, i18n.t("msg_file_not_found")
+        if os.path.isdir(p):
+            return False, i18n.t("msg_drop_directory_rejected")
+        return True, ""
+
     def dragEnterEvent(self, a0: Optional[QDragEnterEvent]) -> None:
-        # Parameter name and Optional handling match the PyQt6 stub signature to satisfy static type checkers
         if a0 is None:
             return
         event_obj = cast(QDragEnterEvent, a0)
         md = event_obj.mimeData()
-        if md is None:
+        if md is None or not md.hasUrls():
+            event_obj.ignore()
             return
-        if md.hasUrls():
-            event_obj.accept()
+        paths = [u.toLocalFile() for u in md.urls() if u.toLocalFile()]
+        if any(os.path.isdir(p) for p in paths):
+            event_obj.ignore()
+            return
+        if any(self._is_supported_drop_file(p) for p in paths):
+            event_obj.acceptProposedAction()
         else:
             event_obj.ignore()
 
     def dropEvent(self, a0: Optional[QDropEvent]) -> None:
-        # Parameter name and Optional handling match the PyQt6 stub signature to satisfy static type checkers
         if a0 is None:
             return
         event_obj = cast(QDropEvent, a0)
         md = event_obj.mimeData()
-        if md is None:
+        if md is None or not md.hasUrls():
             return
-        files = [u.toLocalFile() for u in md.urls()]
-        if files:
-            self.file_path_input.setText(files[0])
-            self.load_xml_to_table()
+        event_obj.acceptProposedAction()
+        paths = [u.toLocalFile() for u in md.urls() if u.toLocalFile()]
+        paths = [p for p in paths if p]
+        if not paths:
+            return
+        dirs = [p for p in paths if os.path.isdir(p)]
+        if dirs:
+            QMessageBox.warning(self, i18n.t("title_warning"),
+                                i18n.t("msg_drop_directory_rejected"))
+            return
+        valid = [p for p in paths if self._is_supported_drop_file(p)]
+        if not valid:
+            QMessageBox.warning(self, i18n.t("title_warning"),
+                                i18n.t("msg_unsupported_translation_file").format(ext="(drop)"))
+            return
+        if len(paths) > 1:
+            QMessageBox.information(
+                self, i18n.t("title_info"),
+                i18n.t("msg_drop_multi_files").format(count=len(paths)))
+        target = valid[0]
+        ok, err = self._validate_translation_path(target)
+        if not ok:
+            QMessageBox.warning(self, i18n.t("title_warning"), err)
+            return
+        self._remember_last_dir(target)
+        self.file_path_input.setText(target)
+        QTimer.singleShot(0, self.load_xml_to_table)
 
     def init_ui(self):
         central_widget = QWidget()
@@ -3094,6 +3299,11 @@ class MainWindow(QMainWindow):
         self.trans_table.setHorizontalHeaderLabels([i18n.t("header_id"), i18n.t("header_source"), i18n.t("header_dest")])
         self.trans_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.trans_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.trans_table.setAcceptDrops(True)
+        try:
+            self.trans_table.viewport().setAcceptDrops(True)
+        except Exception:
+            pass
         header: Optional[QHeaderView] = self.trans_table.horizontalHeader()
         # horizontalHeader() can return None according to type stubs; guard for None to satisfy Pylance
         if header is not None:
@@ -4430,10 +4640,15 @@ class MainWindow(QMainWindow):
         fname, _ = QFileDialog.getOpenFileName(
             self,
             i18n.t("title_open_translation_file", i18n.t("title_open_xml")),
-            "",
+            self._dialog_dir(),
             file_filter,
         )
         if fname:
+            ok, err = self._validate_translation_path(fname)
+            if not ok:
+                QMessageBox.warning(self, i18n.t("title_warning"), err)
+                return
+            self._remember_last_dir(fname)
             self.file_path_input.setText(fname)
             self.load_xml_to_table()
 
@@ -4608,10 +4823,10 @@ class MainWindow(QMainWindow):
         self._translation_task_active = True
         self.worker.start()
 
-    def _detect_file_type(self, file_path: str) -> str:
+    def _detect_file_type(self, file_path: str, _tree=None) -> str:
         file_type = detect_translation_file_type_from_extension(file_path)
         if file_type == FILE_TYPE_XML:
-            return self._detect_xml_variant(file_path)
+            return self._detect_xml_variant(file_path, tree=_tree)
         return file_type
 
     def _build_unsupported_file_message(self, file_path: str, file_type: str) -> str:
@@ -4634,9 +4849,11 @@ class MainWindow(QMainWindow):
             return tag_name.rsplit("}", 1)[-1]
         return tag_name
 
-    def _detect_xml_variant(self, file_path: str) -> str:
+    def _detect_xml_variant(self, file_path: str, tree=None) -> str:
         try:
-            tree = parse_xml_file(file_path)
+            # Reuse already-parsed tree when the caller has one.
+            if tree is None:
+                tree = parse_xml_file(file_path)
             root = tree.getroot()
         except Exception:
             return "xml"
@@ -4733,67 +4950,115 @@ class MainWindow(QMainWindow):
         return backup_path
 
     def load_xml_to_table(self):
-        file_path = self.file_path_input.text()
-        if not os.path.exists(file_path):
-            QMessageBox.warning(self, i18n.t("title_error"), i18n.t("msg_file_not_found"))
+        raw_path = self.file_path_input.text().strip()
+        ok, err = self._validate_translation_path(raw_path)
+        if not ok:
+            QMessageBox.warning(self, i18n.t("title_error"), err)
             return False
-
-        file_type = self._detect_file_type(file_path)
-        if file_type in {FILE_TYPE_RAW_PLUGIN, FILE_TYPE_UNSUPPORTED}:
-            message = self._build_unsupported_file_message(file_path, file_type)
+        file_path = raw_path
+        # Size precheck before background parse.
+        try:
+            size = os.path.getsize(file_path)
+            if size > self.XML_SIZE_HARD_LIMIT_BYTES:
+                QMessageBox.warning(self, i18n.t("title_error"),
+                                    i18n.t("msg_file_too_large").format(size=size))
+                return False
+            if size > self.XML_SIZE_WARN_BYTES:
+                confirm = QMessageBox.question(
+                    self, i18n.t("title_warning"),
+                    i18n.t("msg_large_file_confirm").format(size=size),
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                if confirm != QMessageBox.StandardButton.Yes:
+                    return False
+        except OSError:
+            pass
+        # Fast extension gate (full detect reuses tree in worker).
+        quick_type = detect_translation_file_type_from_extension(file_path)
+        if quick_type in {FILE_TYPE_RAW_PLUGIN, FILE_TYPE_UNSUPPORTED}:
+            message = self._build_unsupported_file_message(file_path, quick_type)
             self.log(message)
             QMessageBox.warning(self, i18n.t("title_warning"), message)
             return False
-
-        self._set_active_file_type(file_type)
-        self.log(i18n.t("msg_loading_file").format(path=file_path))
-        loaded = self.current_processor.load_file(file_path)
-
-        if not loaded:
-            if file_type == FILE_TYPE_MCM:
-                self.log(i18n.t("msg_failed_load_mcm"))
-            else:
-                self.log(i18n.t("msg_failed_load_xml"))
+        if self._xml_load_worker is not None and self._xml_load_worker.isRunning():
+            self.log(i18n.t("msg_loading_in_progress"))
             return False
+        self._remember_last_dir(file_path)
+        self.log(i18n.t("msg_loading_file").format(path=file_path))
+        self._xml_load_worker = XmlLoadWorker(file_path)
+        try:
+            self._xml_load_worker.loaded.connect(self._on_xml_load_finished)
+            self._xml_load_worker.load_failed.connect(self._on_xml_load_failed)
+            self._xml_load_worker.finished.connect(self._on_xml_load_worker_done)
+        except Exception:
+            pass
+        self._xml_load_worker.start()
+        return True
 
-        self.trans_table.setRowCount(0)
-        self.trans_table.blockSignals(True) # Prevent itemChanged signals during load
-        self.row_status_map.clear()
-        self.row_error_map.clear()
-        self._reset_status_summary_counts()
-        self._set_status_summary_refresh_suspended(True)
-        self.progress_bar.setValue(0)
-        self._sync_translation_progress_bar()
+    def _on_xml_load_worker_done(self):
+        if self._xml_load_worker is not None:
+            try:
+                self._xml_load_worker.deleteLater()
+            except Exception:
+                pass
+            self._xml_load_worker = None
 
-        strings = list(self.current_processor.get_strings())
-        display_strings = [
-            item for item in strings
-            if str(item[2] if item[2] is not None else "").strip()
-        ]
-        hidden_blank_count = len(strings) - len(display_strings)
-        self.trans_table.setRowCount(len(display_strings))
-        
-        untranslated_same_count = 0
-        for i, (node, id_text, source, dest) in enumerate(display_strings):
-            # ID
+    def _on_xml_load_failed(self, error: str):
+        self.log(i18n.t("msg_failed_load_xml") + f": {error}")
+        QMessageBox.warning(self, i18n.t("title_error"),
+                            i18n.t("msg_failed_load_xml"))
+
+    def _on_xml_load_finished(self, file_type: str, proc, strings: list):
+        if file_type in {FILE_TYPE_RAW_PLUGIN, FILE_TYPE_UNSUPPORTED}:
+            message = self._build_unsupported_file_message(
+                self.file_path_input.text().strip(), file_type)
+            self.log(message)
+            QMessageBox.warning(self, i18n.t("title_warning"), message)
+            return
+        self._set_active_file_type(file_type)
+        # Keep processor produced in background thread.
+        if file_type == FILE_TYPE_MCM:
+            self.mcm_processor = proc
+        elif file_type == FILE_TYPE_ESP_XML:
+            self.esp_xml_processor = proc
+        else:
+            self.xml_processor = proc
+        self.current_processor = proc
+        display = [it for it in strings
+                   if str(it[2] if it[2] is not None else "").strip()]
+        self._trans_hidden_blank = len(strings) - len(display)
+        self._trans_all_rows = display
+        self._fill_trans_table_paged(0)
+
+    def _fill_trans_table_paged(self, start: int):
+        # Paged/virtual fill: insert PAGE_SIZE rows per tick to keep UI alive.
+        if start == 0:
+            self.trans_table.setRowCount(0)
+            self.trans_table.blockSignals(True)
+            self.row_status_map.clear()
+            self.row_error_map.clear()
+            self._reset_status_summary_counts()
+            self._set_status_summary_refresh_suspended(True)
+            self.progress_bar.setValue(0)
+            self._sync_translation_progress_bar()
+        rows = self._trans_all_rows
+        end = min(len(rows), start + self.TRANS_TABLE_PAGE_SIZE)
+        if start == 0:
+            self.trans_table.setRowCount(len(rows))
+        untranslated_same = 0
+        for i in range(start, end):
+            node, id_text, source, dest = rows[i]
             id_item = QTableWidgetItem(id_text)
-            id_item.setFlags(id_item.flags() ^ Qt.ItemFlag.ItemIsEditable) # Read-only
+            id_item.setFlags(id_item.flags() ^ Qt.ItemFlag.ItemIsEditable)
             self.trans_table.setItem(i, 0, id_item)
-            
-            # Source
             source_item = QTableWidgetItem(source)
-            source_item.setFlags(source_item.flags() ^ Qt.ItemFlag.ItemIsEditable) # Read-only
+            source_item.setFlags(source_item.flags() ^ Qt.ItemFlag.ItemIsEditable)
             self.trans_table.setItem(i, 1, source_item)
-            
-            # Dest
             source_text = str(source) if source is not None else ""
             dest_text = str(dest) if dest is not None else ""
             if source_text.strip() and source_text.strip() == dest_text.strip():
-                untranslated_same_count += 1
-
+                untranslated_same += 1
             dest_item = QTableWidgetItem(dest_text)
-            # Store node in UserRole for easy update
-            dest_item.setData(Qt.ItemDataRole.UserRole, node) 
+            dest_item.setData(Qt.ItemDataRole.UserRole, node)
             self.trans_table.setItem(i, 2, dest_item)
             if source_text.strip() and source_text.strip() == dest_text.strip():
                 self._set_row_status(i, self.ROW_STATUS_UNTRANSLATED)
@@ -4801,41 +5066,61 @@ class MainWindow(QMainWindow):
                 self._set_row_status(i, self.ROW_STATUS_SUCCESS)
             else:
                 self._set_row_status(i, self.ROW_STATUS_UNTRANSLATED)
-
+        if end < len(rows):
+            QTimer.singleShot(0, lambda: self._fill_trans_table_paged(end))
+            return
         self.trans_table.blockSignals(False)
         self._set_status_summary_refresh_suspended(False)
         self._apply_status_filter()
-        log_emit(
-            self.log,
-            self.config_manager,
-            'INFO',
-            i18n.t("msg_loaded_strings").format(count=len(display_strings)),
-            module='gui_main',
-            func='load_xml_to_table'
-        )
-        if hidden_blank_count > 0:
-            log_emit(
-                self.log,
-                self.config_manager,
-                'INFO',
-                f"Hidden {hidden_blank_count} blank source entries from the table view.",
-                module='gui_main',
-                func='load_xml_to_table'
-            )
-        if untranslated_same_count > 0:
-            log_emit(
-                self.log,
-                self.config_manager,
-                'INFO',
-                f"Imported {untranslated_same_count} entries where Source == Dest as untranslated.",
-                module='gui_main',
-                func='load_xml_to_table'
-            )
-        
-        # Clear RAG debug cache when loading new file
+        log_emit(self.log, self.config_manager, 'INFO',
+                 i18n.t("msg_loaded_strings").format(count=len(rows)),
+                 module='gui_main', func='load_xml_to_table')
+        if self._trans_hidden_blank > 0:
+            log_emit(self.log, self.config_manager, 'INFO',
+                     f"Hidden {self._trans_hidden_blank} blank source entries from the table view.",
+                     module='gui_main', func='load_xml_to_table')
+        if untranslated_same > 0:
+            log_emit(self.log, self.config_manager, 'INFO',
+                     f"Imported {untranslated_same} entries where Source == Dest as untranslated.",
+                     module='gui_main', func='load_xml_to_table')
         self.rag_debug_cache.clear()
-        
-        # Update UI button enabled state
+        self.update_translate_buttons_enabled()
+
+    def _fill_trans_table_sync(self, strings: list):
+        # Synchronous fill kept for tests/headless use (no event loop needed).
+        display = [it for it in strings
+                   if str(it[2] if it[2] is not None else "").strip()]
+        self._trans_all_rows = display
+        self._trans_hidden_blank = len(strings) - len(display)
+        self.trans_table.setRowCount(0)
+        self.trans_table.blockSignals(True)
+        self.row_status_map.clear()
+        self.row_error_map.clear()
+        self._reset_status_summary_counts()
+        self._set_status_summary_refresh_suspended(True)
+        self.trans_table.setRowCount(len(display))
+        for i, (node, id_text, source, dest) in enumerate(display):
+            id_item = QTableWidgetItem(id_text)
+            id_item.setFlags(id_item.flags() ^ Qt.ItemFlag.ItemIsEditable)
+            self.trans_table.setItem(i, 0, id_item)
+            source_item = QTableWidgetItem(source)
+            source_item.setFlags(source_item.flags() ^ Qt.ItemFlag.ItemIsEditable)
+            self.trans_table.setItem(i, 1, source_item)
+            dest_item = QTableWidgetItem(str(dest) if dest is not None else "")
+            dest_item.setData(Qt.ItemDataRole.UserRole, node)
+            self.trans_table.setItem(i, 2, dest_item)
+            source_text = str(source) if source is not None else ""
+            dest_text = str(dest) if dest is not None else ""
+            if source_text.strip() and source_text.strip() == dest_text.strip():
+                self._set_row_status(i, self.ROW_STATUS_UNTRANSLATED)
+            elif str(dest_text).strip():
+                self._set_row_status(i, self.ROW_STATUS_SUCCESS)
+            else:
+                self._set_row_status(i, self.ROW_STATUS_UNTRANSLATED)
+        self.trans_table.blockSignals(False)
+        self._set_status_summary_refresh_suspended(False)
+        self._apply_status_filter()
+        self.rag_debug_cache.clear()
         self.update_translate_buttons_enabled()
         return True
 
@@ -4858,15 +5143,16 @@ class MainWindow(QMainWindow):
         if self.current_file_type == FILE_TYPE_MCM:
             save_filter = i18n.t("filter_mcm_files", "MCM text files (*.txt)")
             title = i18n.t("title_save_mcm", i18n.t("title_save_xml"))
-            fname, _ = QFileDialog.getSaveFileName(self, title, '', save_filter)
+            fname, _ = QFileDialog.getSaveFileName(self, title, self._dialog_dir(), save_filter)
         else:
             fname, _ = QFileDialog.getSaveFileName(
                 self,
                 i18n.t("title_save_xml"),
-                '',
+                self._dialog_dir(),
                 "XML files (xTranslator, ESP-ESM Translator) (*.xml)",
             )
         if fname:
+            self._remember_last_dir(fname)
             self.log(i18n.t("msg_saving_as").format(path=fname))
             try:
                 if self.current_file_type == FILE_TYPE_MCM:
@@ -5067,7 +5353,15 @@ class MainWindow(QMainWindow):
         # Immediately set flag to stop receiving results in the UI
         self.stop_receiving_results = True
         if self.worker:
-            self.worker.stop()
+            try:
+                self.worker.stop()
+            except Exception:
+                pass
+            # Interrupt in-flight HTTP so the worker exits promptly.
+            try:
+                self.translator.llm_client.close_clients()
+            except Exception:
+                pass
             self.log(i18n.t("msg_stopping"))
             self.trans_pause_btn.setEnabled(False)
             self.trans_resume_btn.setEnabled(False)
@@ -5111,12 +5405,12 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 self.log(i18n.t("msg_error_saving").format(error=e))
 
-        # Clean up worker thread after translation finishes.
-        # Use a short wait() to ensure the QThread has truly finished its run()
-        # before scheduling deletion, preventing crashes from deleting a live thread.
+        # finished means run() already returned; delete directly without wait.
         if self.worker:
-            self.worker.wait(3000)  # wait up to 3 s; run() should already be done
-            self.worker.deleteLater()
+            try:
+                self.worker.deleteLater()
+            except Exception:
+                pass
             self.worker = None
 
         if translation_task_was_active:
@@ -5207,6 +5501,11 @@ class MainWindow(QMainWindow):
         self.refresh_term_list()
 
     def rebuild_index(self):
+        if self._glossary_task_active or (self.glossary_worker is not None and self.glossary_worker.isRunning()):
+            log_emit(self.log, self.config_manager, 'WARNING',
+                     i18n.t("msg_glossary_task_already_running"),
+                     module='gui_main', func='rebuild_index')
+            return
         self.log(i18n.t("msg_rebuild_started"))
         self.glossary_progress.setVisible(True)
         self.glossary_progress.setValue(0)
@@ -5225,9 +5524,15 @@ class MainWindow(QMainWindow):
         self.glossary_worker.start()
 
     def import_csv(self):
-        fname, _ = QFileDialog.getOpenFileName(self, i18n.t("title_import_glossary"), '', i18n.t("filter_glossary_files"))
+        if self._glossary_task_active or (self.glossary_worker is not None and self.glossary_worker.isRunning()):
+            log_emit(self.log, self.config_manager, 'WARNING',
+                     i18n.t("msg_glossary_task_already_running"),
+                     module='gui_main', func='import_csv')
+            return
+        fname, _ = QFileDialog.getOpenFileName(self, i18n.t("title_import_glossary"), self._dialog_dir(), i18n.t("filter_glossary_files"))
         if not fname:
             return
+        self._remember_last_dir(fname)
 
         # Dry-run preview first: parse + report without touching data.
         try:
@@ -5306,8 +5611,12 @@ class MainWindow(QMainWindow):
         if glossary_task_was_active:
             self._play_task_completion_sound(completion_state)
 
+        # finished means run() already returned; delete directly without wait.
         if self.glossary_worker is not None:
-            self.glossary_worker.deleteLater()
+            try:
+                self.glossary_worker.deleteLater()
+            except Exception:
+                pass
             self.glossary_worker = None
 
         if completion_state == TASK_COMPLETION_STATE_FAILURE:
@@ -5562,7 +5871,14 @@ class MainWindow(QMainWindow):
 
     def cancel_glossary_task(self):
         if self.glossary_worker and self.glossary_worker.isRunning():
-            self.glossary_worker.stop()
+            try:
+                self.glossary_worker.stop()
+            except Exception:
+                pass
+            try:
+                self.llm_client.close_clients()
+            except Exception:
+                pass
             log_emit(self.log, self.config_manager, 'INFO',
                      i18n.t("msg_task_cancelled"),
                      module='gui_main', func='cancel_glossary_task')

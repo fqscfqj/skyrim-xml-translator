@@ -42,7 +42,7 @@ class ResponseParser:
               llm_client=None, log_callback: Optional[Callable] = None) -> str:
         """Parse translation from LLM response. Handles JSON, plain text, and recovery."""
         response_text = "" if response is None else str(response)
-        clean_response = self._MARKDOWN_CODE_RE.sub("", response_text).strip()
+        clean_response = self._strip_code_fences(response_text)
 
         if not clean_response:
             log_emit(log_callback, self.config, "WARNING",
@@ -54,12 +54,18 @@ class ResponseParser:
             raise ModelRefusalError("Model returned a task-level refusal")
 
         if self._looks_like_broken_json_fragment(clean_response):
-            log_emit(log_callback, self.config, "WARNING",
+            log_emit(log_callback, self.config, "ERROR",
                      f"Discarding broken JSON fragment response: {clean_response[:120]}",
                      module="response_parser", func="parse")
-            return str(original_text)
+            raise ValueError(f"Broken JSON fragment response: {clean_response[:120]}")
 
-        # Try direct JSON parse
+        # raw_decode first for leading JSON plus trailing chatter.
+        data = self._try_parse_first_json_object(clean_response, required_keys=("translation",))
+        found, translation = self._extract_translation_value(data)
+        if found:
+            return self._ensure_not_refusal(translation, original_text)
+
+        # Direct JSON fallback.
         try:
             data = json.loads(clean_response)
             found, translation = self._extract_translation_value(data)
@@ -100,7 +106,20 @@ class ResponseParser:
                  f"JSON Parse Error. Response: {response_text}",
                  module="response_parser", func="parse")
 
-        return self._ensure_not_refusal(response_text.strip(), original_text)
+        clean = response_text.strip()
+        if not clean or clean.startswith("{"):
+            return ""
+        return self._ensure_not_refusal(clean, original_text)
+
+    @staticmethod
+    def _strip_code_fences(text: str) -> str:
+        """Strip only leading/trailing fences, preserving inner content."""
+        cleaned = "" if text is None else str(text).strip()
+        if not cleaned:
+            return ""
+        cleaned = re.sub(r"^```(?:json)?[ \t]*\r?\n?", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"[ \t]*\r?\n?```[ \t]*$", "", cleaned)
+        return cleaned.strip()
 
     @staticmethod
     def _ensure_not_refusal(translation: str, original_text: str) -> str:
@@ -109,10 +128,11 @@ class ResponseParser:
         return translation
 
     def parse_batch(self, response: str,
-                    log_callback: Optional[Callable] = None) -> Optional[dict[int, str]]:
+                    log_callback: Optional[Callable] = None,
+                    expected_ids: Optional[object] = None) -> Optional[dict[int, str]]:
         """Parse batch translation response into {item_id: translation}."""
         response_text = "" if response is None else str(response)
-        clean_response = self._MARKDOWN_CODE_RE.sub("", response_text).strip()
+        clean_response = self._strip_code_fences(response_text)
         if not clean_response.startswith(("{", "[")) and is_model_refusal(clean_response):
             log_emit(log_callback, self.config, "WARNING",
                      "Batch response was a task-level model refusal",
@@ -178,6 +198,16 @@ class ResponseParser:
                      f"Batch response did not contain translations: {response_text}",
                      module="response_parser", func="parse_batch")
             return None
+        if expected_ids is not None:
+            try:
+                expected = set(range(expected_ids)) if isinstance(expected_ids, int) else {int(x) for x in expected_ids}
+                if set(parsed.keys()) != expected:
+                    log_emit(log_callback, self.config, "WARNING",
+                             f"Batch ID set mismatch: got {sorted(parsed)} expected {sorted(expected)}",
+                             module="response_parser", func="parse_batch")
+                    return None
+            except Exception:
+                pass
         return parsed
 
     @staticmethod
@@ -196,34 +226,39 @@ class ResponseParser:
     @staticmethod
     def _try_parse_first_json_object(text: str,
                                      required_keys: Optional[tuple[str, ...]] = None) -> Optional[dict]:
-        """Parse the first valid JSON object from text, ignoring trailing content."""
+        """Parse first JSON object via raw_decode; require quoted keys."""
         if not text:
             return None
 
         decoder = json.JSONDecoder()
 
-        def _matches(parsed: object) -> bool:
+        def _matches(parsed: object, raw: str) -> bool:
             if not isinstance(parsed, dict):
                 return False
             if not required_keys:
                 return True
-            return any(key in parsed for key in required_keys)
+            lowered = {str(k).lower() for k in parsed.keys()}
+            for key in required_keys:
+                if str(key).lower() not in lowered:
+                    return False
+                if not re.search(r'"' + re.escape(str(key)) + r'"', raw, flags=re.IGNORECASE):
+                    if not re.search(r"'" + re.escape(str(key)) + r"'", raw):
+                        return False
+            return True
 
-        # Fast path: string starts with JSON object.
         compact = text.lstrip()
         if compact.startswith("{"):
             try:
-                parsed, _ = decoder.raw_decode(compact)
-                if _matches(parsed):
+                parsed, end = decoder.raw_decode(compact)
+                if _matches(parsed, compact[:end]):
                     return parsed
             except json.JSONDecodeError:
                 pass
 
-        # Fallback: find the first decodable object anywhere in the text.
         for match in re.finditer(r"\{", text):
             try:
-                parsed, _ = decoder.raw_decode(text[match.start():])
-                if _matches(parsed):
+                parsed, end = decoder.raw_decode(text[match.start():])
+                if _matches(parsed, text[match.start():match.start() + end]):
                     return parsed
             except json.JSONDecodeError:
                 continue
@@ -259,10 +294,13 @@ class ResponseParser:
 
     @staticmethod
     def _extract_translation_value(data: object) -> tuple[bool, str]:
-        if not isinstance(data, dict) or "translation" not in data:
+        if not isinstance(data, dict):
+            return False, ""
+        norm = {str(k).lower(): v for k, v in data.items()}
+        if "translation" not in norm:
             return False, ""
 
-        value = data.get("translation")
+        value = norm.get("translation")
         if value is None:
             return True, ""
         if not isinstance(value, str):
@@ -281,6 +319,8 @@ class ResponseParser:
                                   log_callback: Optional[Callable] = None) -> Optional[str]:
         """Try to extract translation from malformed JSON-like responses."""
         clean = response.strip()
+        if len(clean) > 200_000:
+            return None
 
         # Fix trailing commas: {"translation": "text",} -> {"translation": "text"}
         fixed = re.sub(r",\s*}", "}", clean)
@@ -319,15 +359,20 @@ class ResponseParser:
                      module="response_parser", func="_try_relaxed_json_extract")
             return m.group("value")
 
-        # Match bare translation: value (no quotes)
+        # Match bare translation: empty value is empty response.
         m = self._BARE_TRANSLATION_RE.search(clean)
         if m:
-            result = m.group(1).strip().strip("\"").strip("'").strip()
-            if result:
-                log_emit(log_callback, self.config, "DEBUG",
-                         "Recovered translation via bare-value regex",
+            raw_value = m.group(1) or ""
+            result = raw_value.strip().strip("\"").strip("'").strip()
+            if not result:
+                log_emit(log_callback, self.config, "WARNING",
+                         "Empty bare translation value treated as empty response",
                          module="response_parser", func="_try_relaxed_json_extract")
-                return result
+                return ""
+            log_emit(log_callback, self.config, "DEBUG",
+                     "Recovered translation via bare-value regex",
+                     module="response_parser", func="_try_relaxed_json_extract")
+            return result
 
         return None
 
@@ -359,8 +404,7 @@ class ResponseParser:
                     followup_msg,
                     log_callback=log_callback,
                 )
-                clean_followup = self._MARKDOWN_CODE_RE.sub(
-                    "", followup_response).strip()
+                clean_followup = ResponseParser._strip_code_fences(followup_response)
                 data = json.loads(clean_followup)
                 found, result = self._extract_translation_value(data)
                 if not found:
@@ -454,6 +498,13 @@ class ResponseParser:
         if re.search(r"(?im)^\s*(system|developer|assistant|user)\s*[:：]", text):
             return True
         source_len = len(str(original_text or "").strip())
-        if source_len > 0 and len(text) > max(1000, source_len * 6):
-            return True
+        if source_len > 0:
+            if source_len <= 10:
+                limit = 1000
+            elif source_len <= 100:
+                limit = max(1000, source_len * 10)
+            else:
+                limit = max(1500, source_len * 6)
+            if len(text) > limit:
+                return True
         return False

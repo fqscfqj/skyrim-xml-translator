@@ -4,9 +4,11 @@ import traceback
 import datetime
 import threading
 import tempfile
+import time
 import faulthandler
 from typing import Optional, TextIO
 from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtCore import QTimer
 from PyQt6.QtGui import QPalette, QColor
 from src.gui_main import MainWindow
 from src.logging_helper import emit as log_emit
@@ -14,6 +16,32 @@ from src.config.manager import ConfigManager
 
 
 _FAULT_LOG_STREAM: Optional[TextIO] = None
+_HOOK_LAST_DIALOG_TS: float = 0.0
+_THREAD_LOG_LAST: dict[str, float] = {}
+
+
+def _should_emit_thread_log(message: str, interval: float = 5.0) -> bool:
+    now = time.monotonic()
+    last = _THREAD_LOG_LAST.get(message, 0.0)
+    if now - last < interval:
+        return False
+    _THREAD_LOG_LAST[message] = now
+    if len(_THREAD_LOG_LAST) > 200:
+        for key, _ in sorted(_THREAD_LOG_LAST.items(), key=lambda kv: kv[1])[:100]:
+            _THREAD_LOG_LAST.pop(key, None)
+    return True
+
+
+def _lazy_warm_index(window) -> None:
+    try:
+        engine = getattr(window, "rag_engine", None)
+        if engine is None:
+            return
+        status_fn = getattr(engine, "get_vector_index_status", None)
+        if callable(status_fn):
+            status_fn()
+    except Exception:
+        pass
 
 
 def _build_dark_palette() -> QPalette:
@@ -160,6 +188,7 @@ def main():
     _install_faulthandler(cfg)
 
     def excepthook(exc_type, exc_value, exc_traceback):
+        global _HOOK_LAST_DIALOG_TS
         crash_log_path = _write_crash_record(
             exc_type, exc_value, exc_traceback,
             source="main_thread", config_manager=cfg
@@ -168,11 +197,22 @@ def main():
         if crash_log_path:
             message += f"\nCrash log: {crash_log_path}"
         log_emit(None, cfg, 'ERROR', message, exc=exc_value, module='main', func='excepthook')
-        try:
-            QMessageBox.critical(None, 'Unhandled Exception', message)
-        except Exception:
+        now = time.monotonic()
+        if now - _HOOK_LAST_DIALOG_TS >= 5.0:
+            _HOOK_LAST_DIALOG_TS = now
+            try:
+                if QApplication.instance() is not None:
+                    QMessageBox.critical(None, 'Unhandled Exception', message)
+                else:
+                    print(message)
+            except Exception:
+                print(message)
+        else:
             print(message)
-        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        try:
+            sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        except Exception:
+            pass
 
     def thread_excepthook(args):
         crash_log_path = _write_crash_record(
@@ -183,7 +223,8 @@ def main():
         log_message = f"Unhandled thread exception: {args.exc_value}"
         if crash_log_path:
             log_message += f" | crash_log={crash_log_path}"
-        log_emit(None, cfg, 'ERROR', log_message, exc=args.exc_value, module='main', func='thread_excepthook')
+        if _should_emit_thread_log(str(args.exc_value)[:200]):
+            log_emit(None, cfg, 'ERROR', log_message, exc=args.exc_value, module='main', func='thread_excepthook')
 
     def unraisablehook(unraisable):
         exc_value = unraisable.exc_value or RuntimeError("Unraisable exception")
@@ -198,7 +239,8 @@ def main():
         log_message = f"Unraisable exception: {exc_value}"
         if crash_log_path:
             log_message += f" | crash_log={crash_log_path}"
-        log_emit(None, cfg, 'ERROR', log_message, exc=exc_value, module='main', func='unraisablehook')
+        if _should_emit_thread_log(str(exc_value)[:200]):
+            log_emit(None, cfg, 'ERROR', log_message, exc=exc_value, module='main', func='unraisablehook')
 
     sys.excepthook = excepthook
     threading.excepthook = thread_excepthook
@@ -215,6 +257,11 @@ def main():
 
     window = MainWindow()
     window.show()
+    try:
+        QTimer.singleShot(0, lambda: threading.Thread(
+            target=_lazy_warm_index, args=(window,), daemon=True).start())
+    except Exception:
+        pass
 
     exit_code = app.exec()
     try:

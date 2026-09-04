@@ -1,15 +1,18 @@
 """Embedding vector cache to avoid redundant API calls."""
 
 import json
+import unicodedata
 from typing import Optional, Any
 
-from src.cache.lru_cache import LRUCache
+from src.cache.lru_cache import LRUCache, _coerce_positive_int, _coerce_ttl
 
 
 class EmbeddingCache:
     def __init__(self, max_size: int = 5000, ttl_seconds: float = 0,
                  persist_path: Optional[str] = None):
-        self._cache = LRUCache(max_size=max_size, ttl_seconds=ttl_seconds, persist_path=persist_path)
+        coerced = _coerce_positive_int(max_size, 5000)
+        ttl = _coerce_ttl(ttl_seconds)  # raises on negative
+        self._cache = LRUCache(max_size=coerced, ttl_seconds=ttl, persist_path=persist_path)
 
     def get(self, text: str, fingerprint: Any) -> Optional[list[float]]:
         key = self._make_key(text, fingerprint)
@@ -26,7 +29,11 @@ class EmbeddingCache:
         """
         cached: dict[str, list[float]] = {}
         uncached: list[str] = []
-        for text in texts:
+        seen: set[str] = set()
+        for text in texts or []:
+            if text in seen:
+                continue
+            seen.add(text)
             vec = self.get(text, fingerprint)
             if vec is not None:
                 cached[text] = vec
@@ -55,9 +62,18 @@ class EmbeddingCache:
         return self._cache._max_size
 
     @staticmethod
+    def _normalize_text(text: Any) -> str:
+        try:
+            normalized = unicodedata.normalize("NFKC", str(text or ""))
+        except Exception:
+            normalized = str(text or "")
+        return normalized.strip()
+
+    @staticmethod
     def _make_key(text: str, fingerprint: Any) -> str:
+        norm_text = EmbeddingCache._normalize_text(text)
         if isinstance(fingerprint, dict):
-            normalized = json.dumps(fingerprint, ensure_ascii=False, sort_keys=True)
+            normalized = json.dumps(fingerprint, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         else:
             normalized = str(fingerprint)
-        return LRUCache.make_key(text, normalized)
+        return LRUCache.make_key(norm_text, normalized)

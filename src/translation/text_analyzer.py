@@ -30,6 +30,13 @@ class TextAnalyzer:
 
     # Compile regex patterns once
     _FORMAT_SENTINEL_PATTERN = r"__FMT_(?:[A-Z0-9]+_)?\d{4,}__"
+    _FORMAT_SENTINEL_RE = re.compile(_FORMAT_SENTINEL_PATTERN)
+    _FORMAT_SENTINEL_RE_IGNORECASE = re.compile(_FORMAT_SENTINEL_PATTERN, re.IGNORECASE)
+    _sentinel_global_serial = 0
+    _COMMENT_CDATA_PATTERN = r"<!--.*?-->|<!\[CDATA\[.*?\]\]>"
+    _COMMENT_CDATA_RE = re.compile(_COMMENT_CDATA_PATTERN, flags=re.DOTALL)
+    _DOLLAR_TOKEN_PATTERN = r"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[^{}]+\}|\d+)"
+    _NAMED_BRACE_PATTERN = r"\{[A-Za-z_][A-Za-z0-9_\-:.]*\}"
     _PERCENT_PLACEHOLDER_PATTERN = (
         r"(?:(?<![>\d])%[A-Za-z_][A-Za-z0-9_]*|"
         r"%%|"
@@ -40,7 +47,6 @@ class TextAnalyzer:
     _PERCENT_LITERAL_PATTERN = r"(?:(?<=[>\d])%|%(?![A-Za-z0-9_]))"
     _BRACKET_TOKEN_PATTERN = r"\[[^\]]+\]"
     _ANGLE_BLOCK_RE = re.compile(r"<[^>]*>")
-    _FORMAT_SENTINEL_RE = re.compile(_FORMAT_SENTINEL_PATTERN)
     _XML_TAG_NAME_RE = re.compile(r"^[A-Za-z_][\w:.-]*$")
     _XML_ATTRS_RE = re.compile(
         r'^[A-Za-z_:][\w:.-]*\s*=\s*(?:"[^"]*"|\'[^\']*\'|[^<>\s"\']+)'
@@ -54,23 +60,34 @@ class TextAnalyzer:
         + r"|"
         + _PERCENT_LITERAL_PATTERN
         + r"|\{\d+\}|"
+        + _NAMED_BRACE_PATTERN
+        + r"|"
+        + _DOLLAR_TOKEN_PATTERN
+        + r"|"
         + _BRACKET_TOKEN_PATTERN
     )
     _PROTECTED_TOKEN_RE = re.compile(
-        _FORMAT_SENTINEL_PATTERN
+        _COMMENT_CDATA_PATTERN
+        + r"|"
+        + _FORMAT_SENTINEL_PATTERN
         + r"|<[^>]*>|"
         + _PERCENT_PLACEHOLDER_PATTERN
         + r"|"
         + _PERCENT_LITERAL_PATTERN
         + r"|\{\d+\}|"
+        + _NAMED_BRACE_PATTERN
+        + r"|"
+        + _DOLLAR_TOKEN_PATTERN
+        + r"|"
         + _BRACKET_TOKEN_PATTERN
-        + r"|\s+"
+        + r"|\s+",
+        flags=re.DOTALL,
     )
     # Match latin words even when adjacent to CJK (e.g. "Choose你的").
     _ENGLISH_WORD_RE = re.compile(r"(?<![A-Za-z])[A-Za-z]{2,}(?![A-Za-z])")
     _CJK_CHAR_RE = re.compile(r"[\u4e00-\u9fff]")
     _ALPHA_CHAR_RE = re.compile(r"[a-zA-Z]")
-    _BRACKET_PLACEHOLDER_NAME_RE = re.compile(r"^[a-z][a-z0-9_:-]*$")
+    _BRACKET_PLACEHOLDER_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_:-]*$")
     _IDENTIFIER_CHAR_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_:-]*$")
     _WHITESPACE_RE = re.compile(r"\s+")
     _COMMON_UI_TOKENS = {
@@ -107,9 +124,11 @@ class TextAnalyzer:
         """Remove XML tags and known placeholder patterns from text."""
         if text is None:
             return ""
-        text = self._ANGLE_BLOCK_RE.sub(self._strip_protected_angle_match, str(text))
-        text = self._PLACEHOLDER_TOKEN_RE.sub(self._strip_placeholder_match, text)
-        return self._FORMAT_SENTINEL_RE.sub("", text)
+        source = str(text)
+        source = self._COMMENT_CDATA_RE.sub("", source)
+        source = self._ANGLE_BLOCK_RE.sub(self._strip_protected_angle_match, source)
+        source = self._PLACEHOLDER_TOKEN_RE.sub(self._strip_placeholder_match, source)
+        return self._FORMAT_SENTINEL_RE.sub("", source)
 
     def extract_placeholder_tokens(self, text: str) -> list[str]:
         """Extract placeholder-like tokens that must be preserved exactly."""
@@ -121,7 +140,7 @@ class TextAnalyzer:
         for match in self._PLACEHOLDER_TOKEN_RE.finditer(source):
             token = match.group(0)
             start, end = match.span()
-            if token == "%" and not self._is_protected_percent_literal(source, start, end):
+            if not self._should_protect_percent_token(source, start, end, token):
                 continue
             if token.startswith("[") and token.endswith("]"):
                 if self._is_protected_bracket_token(token):
@@ -133,14 +152,15 @@ class TextAnalyzer:
     def build_protected_format_shell(
             self,
             text: str,
-            whitespace_policy: str = WHITESPACE_POLICY_STRICT) -> ProtectedFormatShell:
+            whitespace_policy: str = WHITESPACE_POLICY_STRICT,
+            serial: Optional[int] = None) -> ProtectedFormatShell:
         """Replace immutable formatting tokens with deterministic sentinels."""
         if text is None:
             return ProtectedFormatShell("", (), ())
 
         source = str(text)
         normalized_policy = self.normalize_whitespace_policy(whitespace_policy)
-        sentinel_prefix = self._build_sentinel_prefix(source)
+        sentinel_prefix = self._build_sentinel_prefix(source, serial=serial)
         parts: list[str] = []
         sentinels: list[str] = []
         tokens: list[str] = []
@@ -152,12 +172,16 @@ class TextAnalyzer:
 
             if self._FORMAT_SENTINEL_RE.fullmatch(token):
                 should_protect = True
-            elif token == "%":
-                should_protect = self._is_protected_percent_literal(source, start, end)
+            elif self._COMMENT_CDATA_RE.fullmatch(token):
+                should_protect = True
+            elif not self._should_protect_percent_token(source, start, end, token):
+                should_protect = False
             elif token.startswith("<") and token.endswith(">"):
                 should_protect = self._is_protected_angle_token(token)
             elif token.startswith("[") and token.endswith("]"):
                 should_protect = self._is_protected_bracket_token(token)
+            elif token.startswith("$") or token.startswith("{"):
+                should_protect = True
             elif token.isspace():
                 should_protect = self._should_protect_whitespace(
                     source,
@@ -182,17 +206,20 @@ class TextAnalyzer:
         return ProtectedFormatShell("".join(parts), tuple(sentinels), tuple(tokens))
 
     def restore_protected_format_shell(self, text: str, shell: ProtectedFormatShell) -> str:
-        """Restore a protected-format shell by replacing sentinels with original tokens."""
+        """Restore shell case-insensitively; count mismatch validated downstream."""
         if not shell or not shell.tokens:
             return "" if text is None else str(text)
 
         restored = "" if text is None else str(text)
-        for sentinel, token in zip(shell.sentinels, shell.tokens):
-            restored = restored.replace(sentinel, token)
-        return restored
+        lookup = {str(s).lower(): t for s, t in zip(shell.sentinels, shell.tokens)}
+
+        def _repl(match: re.Match[str]) -> str:
+            return lookup.get(match.group(0).lower(), match.group(0))
+
+        return self._FORMAT_SENTINEL_RE_IGNORECASE.sub(_repl, restored)
 
     def normalize_cjk_runtime_tag_spacing(self, text: str) -> str:
-        """Remove English-style spaces around Skyrim runtime tags in CJK output."""
+        """Remove spaces around runtime tags only in CJK context."""
         if text is None:
             return ""
 
@@ -200,19 +227,16 @@ class TextAnalyzer:
         if not normalized:
             return normalized
 
-        cjk_context_chars = (
-            r"\u4e00-\u9fff"
-            r"\u3040-\u30ff"
-            r"\uac00-\ud7af"
-            r"，。！？；：、“”‘’（）《》〈〉「」『』【】〔〕…—"
-            r",.!?;:\)\]\}"
-            r"\(\[\{"
+        cjk_chars = (
+            r"\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af\u3400-\u4dbf"
+            r"，。"
+            r"！？；：、“”‘’（）《》〈〉「」『』【】〔〕…—·"
         )
         before_tag_re = re.compile(
-            rf"(?P<left>[{cjk_context_chars}])(?P<gap>[ \t]+)(?P<tag><[^>]*>)"
+            rf"(?P<left>[{cjk_chars}])(?P<gap>[ \t\u3000]+)(?P<tag><[^>]*>)"
         )
         after_tag_re = re.compile(
-            rf"(?P<tag><[^>]*>)(?P<gap>[ \t]+)(?P<right>[{cjk_context_chars}])"
+            rf"(?P<tag><[^>]*>)(?P<gap>[ \t\u3000]+)(?P<right>[{cjk_chars}])"
         )
 
         def strip_before(match: re.Match[str]) -> str:
@@ -270,6 +294,7 @@ class TextAnalyzer:
     def _find_chunk_boundary(self, text: str, start: int, limit: int) -> int:
         max_end = min(len(text), start + limit)
         window = text[start:max_end]
+        hard_cap = min(len(text), start + limit + 256)
 
         boundary_patterns = (
             re.compile(r"(?:\r?\n){2,}\s*"),
@@ -282,7 +307,9 @@ class TextAnalyzer:
             candidates = [
                 start + match.end()
                 for match in pattern.finditer(window)
-                if start + match.end() > start and self._is_safe_chunk_boundary(text, start + match.end())
+                if start + match.end() > start
+                and self._is_safe_chunk_boundary(text, start + match.end())
+                and not self._is_adjacent_to_protected_token(text, start + match.end())
             ]
             if candidates:
                 return candidates[-1]
@@ -294,9 +321,11 @@ class TextAnalyzer:
             return split_at
 
         split_at = max_end
-        while split_at < len(text) and not self._is_safe_chunk_boundary(text, split_at):
+        while split_at < hard_cap and not self._is_safe_chunk_boundary(text, split_at):
             split_at += 1
-        return split_at if split_at > start else max_end
+        if split_at < hard_cap and split_at > start:
+            return split_at
+        return max_end
 
     def _is_safe_chunk_boundary(self, text: str, index: int) -> bool:
         if index <= 0 or index >= len(text):
@@ -332,9 +361,10 @@ class TextAnalyzer:
             if self._FORMAT_SENTINEL_RE.fullmatch(token):
                 tokens.append(token)
                 continue
-            if token == "%":
-                if self._is_protected_percent_literal(source, start, end):
-                    tokens.append(token)
+            if self._COMMENT_CDATA_RE.fullmatch(token):
+                tokens.append(token)
+                continue
+            if not self._should_protect_percent_token(source, start, end, token):
                 continue
             if token.startswith("<") and token.endswith(">"):
                 if self._is_protected_angle_token(token):
@@ -343,6 +373,9 @@ class TextAnalyzer:
             if token.startswith("[") and token.endswith("]"):
                 if self._is_protected_bracket_token(token):
                     tokens.append(token)
+                continue
+            if token.startswith("$") or (token.startswith("{") and token.endswith("}")):
+                tokens.append(token)
                 continue
             if token.isspace():
                 if self._should_protect_whitespace(
@@ -362,13 +395,17 @@ class TextAnalyzer:
 
     def _strip_placeholder_match(self, match: re.Match[str]) -> str:
         token = match.group(0)
-        if token == "%":
-            return "" if self._is_protected_percent_literal(match.string, match.start(), match.end()) else token
+        if not self._should_protect_percent_token(match.string, match.start(), match.end(), token):
+            return token
         if token.startswith("[") and token.endswith("]"):
             return "" if self._is_protected_bracket_token(token) else token
         return ""
 
     def _is_protected_angle_token(self, token: str) -> bool:
+        if not token or not token.startswith("<") or not token.endswith(">"):
+            return False
+        if self._COMMENT_CDATA_RE.fullmatch(token):
+            return True
         return self._is_xml_like_tag(token) or self._is_skyrim_runtime_token(token)
 
     def _is_protected_bracket_token(self, token: str) -> bool:
@@ -431,14 +468,32 @@ class TextAnalyzer:
     def _format_sentinel(prefix: str, index: int) -> str:
         return f"{prefix}{index:04d}__"
 
-    @staticmethod
-    def _build_sentinel_prefix(text: str) -> str:
-        salt = 1
-        while True:
-            prefix = f"__FMT_{salt:X}_"
-            if prefix not in text:
-                return prefix
+    @classmethod
+    def _build_sentinel_prefix(cls, text: str, serial: Optional[int] = None) -> str:
+        # Deterministic salt=1 for single builds (keeps __FMT_1_* stable);
+        # mix chunk serial for cross-chunk global uniqueness.
+        if serial is None:
+            salt = 1
+            while f"__FMT_{salt:X}_" in text:
+                salt += 1
+            return f"__FMT_{salt:X}_"
+        try:
+            base = (int(serial) + 1) * 0x100 + 1
+        except Exception:
+            base = 1
+        salt = base
+        while f"__FMT_{salt:X}_" in text:
             salt += 1
+            cls._sentinel_global_serial = salt
+        return f"__FMT_{salt:X}_"
+
+    def _should_protect_percent_token(self, text: str, start: int, end: int, token: str) -> bool:
+        """Single entry for all percent decisions."""
+        if not token or "%" not in token:
+            return True
+        if token != "%":
+            return True
+        return self._is_protected_percent_literal(text, start, end)
 
     def _is_protected_percent_literal(self, text: str, start: int, end: int) -> bool:
         """Keep structural percent tokens, but allow numeric percentages in prose to translate naturally."""
@@ -494,7 +549,7 @@ class TextAnalyzer:
                 and self._has_protected_token_starting_at(text, end)
             )
         if start == 0 or end == len(text):
-            return True
+            return False
         if len(token) > 1:
             return True
 
@@ -563,19 +618,30 @@ class TextAnalyzer:
             return False
         if self._FORMAT_SENTINEL_RE.fullmatch(token):
             return True
+        if self._COMMENT_CDATA_RE.fullmatch(token):
+            return True
         if token == "%":
             return self._is_protected_percent_literal(text, start, end)
         if token.startswith("<") and token.endswith(">"):
             return self._is_protected_angle_token(token)
         if token.startswith("[") and token.endswith("]"):
             return self._is_protected_bracket_token(token)
+        if token.startswith("$") or (token.startswith("{") and token.endswith("}")):
+            return True
         return True
+
+    def _is_adjacent_to_protected_token(self, text: str, index: int) -> bool:
+        if index <= 0 or index >= len(text):
+            return False
+        if self._has_protected_token_ending_at(text, index):
+            return True
+        return self._has_protected_token_starting_at(text, index)
 
     @staticmethod
     def _is_format_boundary_char(ch: str) -> bool:
         if not ch:
             return True
-        return ch in "<>[]{}%\r\n\t"
+        return ch in "<>[]{}%$\r\n\t"
 
     def normalize_text(self, text: str) -> str:
         """Normalize text for heuristic comparisons without changing semantics."""

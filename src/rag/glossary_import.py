@@ -33,7 +33,7 @@ IMPORT_FORMAT_VERSION_STR = "glossary_import_v1"
 _SAMPLE_INVALID_KEEP = 5
 
 
-class GlossaryImportError(Exception):
+class GlossaryImportError(FileNotFoundError):
     """Raised when an import file cannot be decoded or parsed."""
 
 
@@ -191,7 +191,8 @@ def _looks_like_header(row: list[str]) -> bool:
         return False
     # "Term,Translation" as a data row is the canonical legacy fixture.
     # Only treat the first row as a header when it declares at least one
-    # extra known column (domain/pos/priority/...) or unknown column.
+    # extra known column (domain/pos/priority/...). Unknown columns alone
+    # never promote a row to header.
     known_names = (
         _DOMAIN_KEYS | _POS_KEYS | _PRIORITY_KEYS | _FORBIDDEN_KEYS
         | _EXAMPLES_KEYS | _VARIANTS_KEYS | _META_SOURCE_KEYS
@@ -199,7 +200,7 @@ def _looks_like_header(row: list[str]) -> bool:
     )
     if len(row) > 2:
         return True
-    return any(name in known_names or name not in (_TERM_KEYS | _TRANSLATION_KEYS) for name in lowered if name)
+    return any(name in known_names for name in lowered if name)
 
 
 def _detect_delimiter(sample_text: str, extension: str) -> str:
@@ -212,14 +213,17 @@ def _detect_delimiter(sample_text: str, extension: str) -> str:
         return ","
     try:
         sniffer = csv.Sniffer()
-        dialect = sniffer.sniff(sample_text, delimiters=[",", "\t", ";"])
-        if dialect.delimiter in (",", "\t", ";"):
+        dialect = sniffer.sniff(sample_text, delimiters=",\t;|")
+        if dialect.delimiter in (",", "\t", ";", "|"):
             return dialect.delimiter
     except Exception:
         pass
     tab_count = sample_text.count("\t")
     comma_count = sample_text.count(",")
     semi_count = sample_text.count(";")
+    pipe_count = sample_text.count("|")
+    if pipe_count > comma_count and pipe_count >= tab_count and pipe_count >= semi_count:
+        return "|"
     if tab_count > comma_count and tab_count >= semi_count:
         return "\t"
     if semi_count > comma_count and semi_count > tab_count:
@@ -240,8 +244,8 @@ def _read_text_with_encoding(file_path: str) -> tuple[str, str]:
             "GBK/ANSI 编码需先转换，直接导入会被拒绝以避免乱码入库。"
         )
         raise GlossaryImportError(reason) from exc
-    except FileNotFoundError:
-        raise
+    except FileNotFoundError as exc:
+        raise GlossaryImportError(f"导入文件不存在 '{file_path}'：{exc}") from exc
     except OSError as exc:
         raise GlossaryImportError(f"无法读取导入文件 '{file_path}'：{exc}") from exc
 
@@ -250,6 +254,33 @@ def _record_invalid(result: ParsedGlossaryImport, message: str) -> None:
     result.invalid_rows += 1
     if len(result.samples_invalid) < _SAMPLE_INVALID_KEEP:
         result.samples_invalid.append(message)
+
+
+def _record_limited(result: ParsedGlossaryImport, message: str) -> None:
+    result.limited_rows += 1
+    if len(result.samples_invalid) < _SAMPLE_INVALID_KEEP:
+        result.samples_invalid.append(message)
+
+
+def _normalize_import_key(text: str) -> str:
+    import unicodedata as _unicodedata
+    try:
+        normalized = _unicodedata.normalize("NFKC", str(text or ""))
+    except Exception:
+        normalized = str(text or "")
+    return normalized.strip().lower()
+
+
+def _find_term_key(mapping: dict[str, Any], term: str) -> Optional[str]:
+    if term in mapping:
+        return term
+    target = _normalize_import_key(term)
+    if not target:
+        return None
+    for key in mapping.keys():
+        if _normalize_import_key(key) == target:
+            return key
+    return None
 
 
 def _apply_entry(
@@ -269,11 +300,15 @@ def _apply_entry(
         if not term:
             _record_invalid(result, f"{line_hint}删除行缺少词面，已跳过")
             return
-        if term in result.terms:
-            del result.terms[term]
-            result.rich_meta.pop(term, None)
+        existing = _find_term_key(result.terms, term)
+        if existing is not None:
+            del result.terms[existing]
+            result.rich_meta.pop(existing, None)
+            for alias in [k for k in list(result.rich_meta.keys()) if _normalize_import_key(k) == _normalize_import_key(term)]:
+                result.rich_meta.pop(alias, None)
             result.duplicate_overwrites += 1
-        if term not in result.deletes:
+        norm = _normalize_import_key(term)
+        if not any(_normalize_import_key(d) == norm for d in result.deletes):
             result.deletes.append(term)
         else:
             result.duplicate_overwrites += 1
@@ -282,13 +317,16 @@ def _apply_entry(
         _record_invalid(result, f"{line_hint}空词面或空译文，已跳过")
         return
     if max_field_chars and (len(term) > max_field_chars or len(translation) > max_field_chars):
-        result.limited_rows += 1
+        _record_limited(result, f"{line_hint}字段超限（>{max_field_chars}字符）已截断：{term[:30]}")
         return
-    if term in result.terms:
+    existing = _find_term_key(result.terms, term)
+    if existing is not None:
         result.duplicate_overwrites += 1
-        # A later upsert cancels an earlier delete declaration for the same term.
-        if term in result.deletes:
-            result.deletes.remove(term)
+        for pending in [d for d in list(result.deletes) if _normalize_import_key(d) == _normalize_import_key(term)]:
+            result.deletes.remove(pending)
+        if existing != term:
+            result.terms.pop(existing, None)
+            result.rich_meta.pop(existing, None)
     result.terms[term] = translation
     cleaned = {key: value for key, value in rich.items() if value not in (None, "", [], {})}
     if cleaned:
@@ -338,8 +376,11 @@ def parse_delimited_text(
             except Exception:
                 pass
         if max_rows and data_index > max_rows:
-            result.limited_rows += 1
-            continue
+            remaining = total - data_index + 1
+            result.limited_rows += remaining
+            if len(result.samples_invalid) < _SAMPLE_INVALID_KEEP:
+                result.samples_invalid.append(f"第{data_index + data_start}行:超出 max_rows={max_rows}，剩余{remaining}行已截断")
+            break
         result.total_rows += 1
         line_hint = f"第{data_index + data_start}行:"
         if header_map:
@@ -374,6 +415,10 @@ def parse_delimited_text(
             if len(row) < 2:
                 _record_invalid(result, f"{line_hint}列数不足 2 列，已跳过")
                 continue
+            if len(row) > 2:
+                result.unknown_fields += 1
+                if len(result.samples_invalid) < _SAMPLE_INVALID_KEEP:
+                    result.samples_invalid.append(f"{line_hint}legacy 多出 {len(row) - 2} 列已忽略，仅取前两列")
             _apply_entry(
                 result, str(row[0] or ""), str(row[1] or ""), {},
                 max_field_chars=max_field_chars, line_hint=line_hint,
@@ -531,13 +576,20 @@ def parse_json_text(
             except Exception:
                 pass
         if max_rows and data_index > max_rows:
-            result.limited_rows += 1
-            continue
+            remaining = total - data_index + 1
+            result.limited_rows += remaining
+            if len(result.samples_invalid) < _SAMPLE_INVALID_KEEP:
+                result.samples_invalid.append(f"第{data_index}条:超出 max_rows={max_rows}，剩余{remaining}条已截断")
+            break
         result.total_rows += 1
         line_hint = f"第{data_index}条:"
         if isinstance(entry, (list, tuple)):
             term = str(entry[0] if len(entry) > 0 else "").strip()
             translation = str(entry[1] if len(entry) > 1 else "").strip()
+            if len(entry) > 2:
+                result.unknown_fields += 1
+                if len(result.samples_invalid) < _SAMPLE_INVALID_KEEP:
+                    result.samples_invalid.append(f"{line_hint}legacy 多出 {len(entry) - 2} 列已忽略，仅取前两列")
             _apply_entry(result, term, translation, {}, max_field_chars=max_field_chars, line_hint=line_hint)
             continue
         term, translation, rich, op, unknown = _entry_from_json_object(entry)

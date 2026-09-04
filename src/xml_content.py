@@ -5,9 +5,12 @@ from __future__ import annotations
 import re
 from typing import Any, Iterator
 
+_MAX_XML_FRAGMENT_LEN = 200_000  # 单fragment长度限制防DoS
 _TAG_TOKEN_RE = re.compile(
-    r"<(?P<closing>/)?(?P<name>[A-Za-z_][\w:.-]*)(?P<attrs>(?:\s+[^<>]*?)?)\s*(?P<selfclosing>/)?>"
-)
+    r"<(?P<closing>/)?(?P<name>[A-Za-z_][\w:.-]*)"
+    r"(?P<attrs>(?:\s+[^\s<>/=]+(?:\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s<>\"'=]+))?)*)"
+    r"\s*(?P<selfclosing>/)?>"
+)  # 属性引号感知，容忍>出现在引号内
 
 
 def get_node_inner_content(node: Any, etree_module: Any) -> str:
@@ -71,8 +74,9 @@ def set_node_inner_content(node: Any, value: str, etree_module: Any) -> None:
         node.text = ""
         return
 
+    nsmap = getattr(node, "nsmap", None)  # fragment校验继承父nsmap
     last_child = None
-    for fragment_type, fragment in _iter_content_fragments(content, etree_module):
+    for fragment_type, fragment in _iter_content_fragments(content, etree_module, nsmap):
         if fragment_type == "text":
             if last_child is None:
                 node.text = (node.text or "") + fragment
@@ -80,7 +84,7 @@ def set_node_inner_content(node: Any, value: str, etree_module: Any) -> None:
                 last_child.tail = (last_child.tail or "") + fragment
             continue
 
-        child = _parse_fragment(fragment, etree_module)
+        child = _parse_fragment(fragment, etree_module, nsmap)
         node.append(child)
         last_child = child
 
@@ -96,7 +100,16 @@ def _clear_node_children(node: Any) -> None:
 def _node_text_uses_cdata(node: Any, etree_module: Any) -> bool:
     if node is None or etree_module is None or not getattr(node, "text", None):
         return False
-    try:
+    text = getattr(node, "text", None)
+    try:  # 直接看CDATA类型，命中即返回免序列化
+        cdata_factory = getattr(etree_module, "CDATA", None)
+        if isinstance(cdata_factory, type) and isinstance(text, cdata_factory):
+            return True
+        if type(text).__name__ in ("CDATA", "_CDATA", "CData"):
+            return True
+    except Exception:
+        pass
+    try:  # 回退序列化判断，兼容解析后变普通str的CDATA
         serialized = _serialize_element(node, etree_module)
     except Exception:
         return False
@@ -110,7 +123,7 @@ def _assign_node_text(node: Any, value: str, etree_module: Any,
                       preserve_cdata: bool = False) -> None:
     cdata_factory = getattr(etree_module, "CDATA", None) if etree_module is not None else None
     if preserve_cdata and callable(cdata_factory):
-        node.text = cdata_factory(value)
+        node.text = cdata_factory(value)  # lxml自动把]]>拆分为多个CDATA段
     else:
         node.text = value
 
@@ -120,26 +133,66 @@ def _serialize_element(element: Any, etree_module: Any) -> str:
     try:
         return etree_module.tostring(element, encoding="unicode", with_tail=False)
     except TypeError:
-        original_tail = getattr(element, "tail", None)
+        import copy  # copy后操作tail，避免并发改原节点
+
+        elem_copy = copy.deepcopy(element)
         try:
-            if original_tail is not None:
-                element.tail = None
-            return etree_module.tostring(element, encoding="unicode")
-        finally:
-            if original_tail is not None:
-                element.tail = original_tail
+            elem_copy.tail = None
+        except Exception:
+            pass
+        return etree_module.tostring(elem_copy, encoding="unicode")
 
 
 
-def _parse_fragment(fragment: str, etree_module: Any) -> Any:
-    try:
+def _parse_fragment(fragment: str, etree_module: Any, nsmap: Any = None) -> Any:
+    try:  # 首选直接解析
         return etree_module.fromstring(fragment)
     except TypeError:
         return etree_module.fromstring(fragment.encode("utf-8"))
+    except Exception:
+        if not nsmap:  # 无nsmap直接抛给单次校验判否
+            raise
+        decls = []  # 继承父nsmap后重试，解未绑定前缀
+        try:
+            for prefix, uri in dict(nsmap).items():
+                if not uri:
+                    continue
+                if prefix:
+                    decls.append(f'xmlns:{prefix}="{uri}"')
+                else:
+                    decls.append(f'xmlns="{uri}"')
+        except Exception:
+            raise
+        wrapper = f"<_frag_wrapper {' '.join(decls)}>{fragment}</_frag_wrapper>"
+        try:
+            wrapped = etree_module.fromstring(wrapper.encode("utf-8"))
+        except TypeError:
+            wrapped = etree_module.fromstring(wrapper)
+        if len(wrapped) != 1:
+            raise ValueError("invalid fragment with nsmap")
+        return wrapped[0]
 
 
 
-def _iter_content_fragments(content: str, etree_module: Any) -> Iterator[tuple[str, str]]:
+def _match_special_end(content: str, start: int) -> int | None:
+    # 注释/PI/声明/CDATA整体过滤，不当元素解析
+    if content.startswith("<!--", start):
+        end = content.find("-->", start + 4)
+        return len(content) if end < 0 else end + 3
+    if content.startswith("<![CDATA[", start):
+        end = content.find("]]>", start + 9)
+        return len(content) if end < 0 else end + 3
+    if content.startswith("<?", start):
+        end = content.find("?>", start + 2)
+        return len(content) if end < 0 else end + 2
+    if content.startswith("<!", start):
+        end = content.find(">", start + 2)  # DOCTYPE/ENTITY等声明
+        return len(content) if end < 0 else end + 1
+    return None
+
+
+
+def _iter_content_fragments(content: str, etree_module: Any, nsmap: Any = None) -> Iterator[tuple[str, str]]:
     cursor = 0
     while cursor < len(content):
         next_lt = content.find("<", cursor)
@@ -150,9 +203,15 @@ def _iter_content_fragments(content: str, etree_module: Any) -> Iterator[tuple[s
         if next_lt > cursor:
             yield "text", content[cursor:next_lt]
 
-        fragment_end = _find_balanced_xml_fragment_end(content, next_lt, etree_module)
+        special_end = _match_special_end(content, next_lt)
+        if special_end is not None:  # 注释/PI整体当文本
+            yield "text", content[next_lt:special_end]
+            cursor = special_end
+            continue
+
+        fragment_end = _find_balanced_xml_fragment_end(content, next_lt, etree_module, nsmap)
         if fragment_end is None:
-            yield "text", "<"
+            yield "text", "<"  # 非法<当文本跳过而非abort
             cursor = next_lt + 1
             continue
 
@@ -161,7 +220,9 @@ def _iter_content_fragments(content: str, etree_module: Any) -> Iterator[tuple[s
 
 
 
-def _find_balanced_xml_fragment_end(content: str, start: int, etree_module: Any) -> int | None:
+def _find_balanced_xml_fragment_end(content: str, start: int, etree_module: Any, nsmap: Any = None) -> int | None:
+    if _match_special_end(content, start) is not None:
+        return None
     first_token = _match_tag_token(content, start)
     if first_token is None:
         return None
@@ -171,7 +232,9 @@ def _find_balanced_xml_fragment_end(content: str, start: int, etree_module: Any)
         return None
     if token_type == "self":
         fragment = content[start:token_end]
-        return token_end if _is_valid_xml_fragment(fragment, etree_module) else None
+        if len(fragment) > _MAX_XML_FRAGMENT_LEN:  # 长度限制
+            return None
+        return token_end if _is_valid_xml_fragment(fragment, etree_module, nsmap) else None
 
     stack = [tag_name]
     cursor = token_end
@@ -180,9 +243,15 @@ def _find_balanced_xml_fragment_end(content: str, start: int, etree_module: Any)
         if next_lt < 0:
             return None
 
+        special_end = _match_special_end(content, next_lt)
+        if special_end is not None:  # 跳过注释/PI继续找平衡
+            cursor = special_end
+            continue
+
         token = _match_tag_token(content, next_lt)
         if token is None:
-            return None
+            cursor = next_lt + 1  # 非法<跳过继续，而非整体abort
+            continue
 
         token_type, current_name, token_end = token
         if token_type == "open":
@@ -193,7 +262,9 @@ def _find_balanced_xml_fragment_end(content: str, start: int, etree_module: Any)
             stack.pop()
             if not stack:
                 fragment = content[start:token_end]
-                return token_end if _is_valid_xml_fragment(fragment, etree_module) else None
+                if len(fragment) > _MAX_XML_FRAGMENT_LEN:  # 长度限制
+                    return None
+                return token_end if _is_valid_xml_fragment(fragment, etree_module, nsmap) else None
 
         cursor = token_end
 
@@ -218,11 +289,20 @@ def _match_tag_token(content: str, start: int) -> tuple[str, str, int] | None:
 
 
 
-def _is_valid_xml_fragment(fragment: str, etree_module: Any) -> bool:
-    try:
-        _parse_fragment(fragment, etree_module)
+def _is_valid_xml_fragment(fragment: str, etree_module: Any, nsmap: Any = None) -> bool:
+    if not fragment or len(fragment) > _MAX_XML_FRAGMENT_LEN:  # 长度限制
+        return False
+    try:  # 单次校验，成功即真
+        _parse_fragment(fragment, etree_module, nsmap)
         return True
     except Exception:
+        if "&nbsp;" in fragment:  # &nbsp;友好提示，XML无此HTML实体
+            try:
+                from src.logging_helper import emit as _emit
+
+                _emit(None, None, "WARNING", "XML fragment contains &nbsp;; use &#160; instead (XML has no HTML entities)", module="xml_content", func="_is_valid_xml_fragment")
+            except Exception:
+                pass
         return False
 
 

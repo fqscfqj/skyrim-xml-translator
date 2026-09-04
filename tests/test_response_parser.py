@@ -151,9 +151,15 @@ class ResponseParserTests(unittest.TestCase):
         self.assert_no_json_parse_warning(logs)
 
     def test_broken_json_fragment_returns_original_text(self):
-        result, logs = self._parse_with_logs('{"translation":"你好', original_text="Hello")
-
-        self.assertEqual(result, "Hello")
+        logs: list = []
+        with self.assertRaises(ValueError):
+            self.parser.parse(
+                '{"translation":"你好',
+                "Hello",
+                [],
+                llm_client=None,
+                log_callback=logs.append,
+            )
         self.assertTrue(any("Discarding broken JSON fragment" in message for message in logs), logs)
 
     def test_followup_reformat_only_receives_candidate_response(self):
@@ -167,7 +173,8 @@ class ResponseParserTests(unittest.TestCase):
         )
 
         self.assertEqual(result, "候选译文")
-        combined = "\n".join(message["content"] for message in client.messages)
+        self.assertIsNotNone(client.messages)
+        combined = "\n".join(message["content"] for message in client.messages or [])
         self.assertIn("候选响应", combined)
         self.assertIn("不得翻译、润色、补全、总结", combined)
         self.assertNotIn("完整原任务提示不得转发", combined)

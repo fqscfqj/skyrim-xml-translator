@@ -298,12 +298,15 @@ class RAGSearcher:
             return set()
 
         max_df = self._get_rag_int("keyword_weight_anchor_max_df", 500, min_value=1, max_value=100_000)
-        missing_df = 10 ** 9
-        self.glossary_manager.ensure_token_df()
+        try:
+            self.glossary_manager.ensure_token_df()
+        except Exception:
+            pass
 
         ranked: list[tuple[int, str]] = []
         for token in query_tokens:
-            df = int(self.glossary_manager._token_df.get(token, missing_df))
+            # Missing tokens are rare (df=0) so new entities rank first.
+            df = int(self.glossary_manager._token_df.get(token, 0))
             ranked.append((df, token))
         ranked.sort(key=lambda x: (x[0], len(x[1]), x[1]))
 
@@ -778,13 +781,13 @@ class RAGSearcher:
                              f"[RAG] Query '{query}' marked low-signal; skipping semantic recall",
                              module="rag_search", func="search")
 
-                # 0) Deterministic direct match
-                if not skip_semantic_recall:
-                    direct_term = self._resolve_direct_match_term(query, source_text)
-                    if direct_term:
-                        add_candidate(direct_term, 1.2, candidate_source="direct")
-                        if return_debug:
-                            query_details["direct_match"] = direct_term
+                # 0) Deterministic direct match (always tried to preserve glossary hits,
+                # even for low-signal queries; semantic recall remains gated).
+                direct_term = self._resolve_direct_match_term(query, source_text)
+                if direct_term:
+                    add_candidate(direct_term, 1.2, candidate_source="direct")
+                    if return_debug:
+                        query_details["direct_match"] = direct_term
 
                 # 1) Vector semantic search
                 if vector_ready and not skip_semantic_recall:
@@ -862,10 +865,7 @@ class RAGSearcher:
                     if score >= threshold or score >= 1.0:
                         if term not in preselected_terms:
                             preselected_terms.append(term)
-                if not preselected_terms:
-                    for term, _score in ranked_candidates:
-                        if term not in preselected_terms:
-                            preselected_terms.append(term)
+                # If all candidates are below threshold, return empty (no forced best).
                 threshold_filtered_terms = [
                     {
                         "term": term,

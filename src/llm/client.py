@@ -1,5 +1,7 @@
 """OpenAI-compatible LLM API client with unified retry logic and cost tracking."""
 
+from threading import RLock
+
 from openai import OpenAI
 from time import monotonic
 from typing import Any, Callable, Optional
@@ -8,6 +10,24 @@ from src.logging_helper import emit as log_emit
 from src.llm.retry import RetryTimeBudgetExceeded, execute_with_retry
 from src.llm.cost_tracker import CostTracker
 from src.llm.reasoning import apply_reasoning_controls, strip_reasoning_controls
+
+
+def _safe_int(value: Any, default: int) -> int:
+    try:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return default
+        return int(float(str(value).strip()) if isinstance(value, str) else value)
+    except Exception:
+        return default
+
+
+def _safe_float(value: Any, default: float) -> float:
+    try:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return default
+        return float(str(value).strip() if isinstance(value, str) else value)
+    except Exception:
+        return default
 
 
 class LLMClient:
@@ -22,37 +42,91 @@ class LLMClient:
         # Always collect lightweight per-run usage. Besides cost estimates this
         # exposes DeepSeek/Qwen prompt-cache hit rates to the worker log.
         self.cost_tracker = cost_tracker or CostTracker()
+        self._client_lock = RLock()
         self._init_clients()
+
+    def _build_client(self, section: str) -> Optional[OpenAI]:
+        raw_key = self.config.get(section, "api_key")
+        api_key = str(raw_key or "").strip()
+        if not api_key:
+            return None
+        raw_url = self.config.get(section, "base_url")
+        base_url = str(raw_url or "").strip() or None
+        timeout = _safe_int(self.config.get(section, "request_timeout", 120), 120)
+        if timeout <= 0:
+            timeout = 120
+        try:
+            # Use one retry strategy path only (src.llm.retry) to avoid retry amplification.
+            kwargs: dict[str, Any] = {"api_key": api_key, "timeout": timeout, "max_retries": 0}
+            if base_url:
+                kwargs["base_url"] = base_url
+            return OpenAI(**kwargs)
+        except Exception:
+            return None
 
     def _init_clients(self) -> None:
-        def build_client(section: str) -> Optional[OpenAI]:
-            api_key = self.config.get(section, "api_key")
-            base_url = self.config.get(section, "base_url")
-            if not api_key:
-                return None
-            timeout = int(self.config.get(section, "request_timeout", 120))
-            # Use one retry strategy path only (src.llm.retry) to avoid retry amplification.
-            return OpenAI(api_key=api_key, base_url=base_url, timeout=timeout, max_retries=0)
-
-        # Initialize LLM Client
-        self.llm_client = build_client("llm")
-
-        # Initialize Search LLM Client (Optional)
-        self.search_llm_client = build_client("llm_search")
-
-        # Initialize Search Fallback LLM Client (Optional)
-        self.search_fallback_llm_client = build_client("llm_search_fallback")
-
-        # Initialize Embedding Client
-        self.embed_client = build_client("embedding")
+        # Build first, then swap to avoid a window with partial clients.
+        new_llm = self._build_client("llm")
+        new_search = self._build_client("llm_search")
+        new_fallback = self._build_client("llm_search_fallback")
+        new_embed = self._build_client("embedding")
+        self.llm_client = new_llm
+        self.search_llm_client = new_search
+        self.search_fallback_llm_client = new_fallback
+        self.embed_client = new_embed
 
     def reload_config(self) -> None:
-        self.close_clients()
-        self._init_clients()
+        lock = getattr(self, "_client_lock", None)
+        if lock is None:
+            self._client_lock = RLock()
+            lock = self._client_lock
+        with lock:
+            if "_init_clients" in self.__dict__:
+                # Test double replaces _init_clients; keep legacy ordering.
+                self.close_clients()
+                self._init_clients()
+                return
+            new_llm = self._build_client("llm")
+            new_search = self._build_client("llm_search")
+            new_fallback = self._build_client("llm_search_fallback")
+            new_embed = self._build_client("embedding")
+            old_clients = (
+                self.llm_client, self.search_llm_client,
+                self.search_fallback_llm_client, self.embed_client,
+            )
+            self.llm_client = new_llm
+            self.search_llm_client = new_search
+            self.search_fallback_llm_client = new_fallback
+            self.embed_client = new_embed
+        for client in old_clients:
+            if client:
+                try:
+                    client.close()
+                except Exception:
+                    pass
 
     def close_clients(self) -> None:
         """Close all underlying HTTP connections to interrupt any in-progress requests."""
-        for client in (self.llm_client, self.search_llm_client, self.search_fallback_llm_client, self.embed_client):
+        lock = getattr(self, "_client_lock", None)
+        if lock is None:
+            clients = (getattr(self, "llm_client", None), getattr(self, "search_llm_client", None),
+                       getattr(self, "search_fallback_llm_client", None), getattr(self, "embed_client", None))
+            try:
+                self.llm_client = None
+                self.search_llm_client = None
+                self.search_fallback_llm_client = None
+                self.embed_client = None
+            except Exception:
+                pass
+        else:
+            with lock:
+                clients = (self.llm_client, self.search_llm_client,
+                           self.search_fallback_llm_client, self.embed_client)
+                self.llm_client = None
+                self.search_llm_client = None
+                self.search_fallback_llm_client = None
+                self.embed_client = None
+        for client in clients:
             if client:
                 try:
                     client.close()
@@ -230,17 +304,54 @@ class LLMClient:
             raise ValueError("Embedding client not initialized. Please check API Key.")
 
         callback = log_callback if log_callback else self.log_callback
-        model = self.config.get("embedding", "model", "text-embedding-ada-002")
+        raw_model = self.config.get("embedding", "model", "text-embedding-ada-002")
+        model = str(raw_model or "").strip() or "text-embedding-ada-002"
+        is_batch = isinstance(text, list)
 
-        try:
-            is_batch = isinstance(text, list)
+        def _do_embed():
             if self.cost_tracker:
                 self.cost_tracker.increment_counter("embedding_api_attempts")
-            response = self.embed_client.embeddings.create(input=text, model=model)
+            try:
+                return self.embed_client.embeddings.create(input=text, model=model)
+            except Exception as exc:
+                if isinstance(exc, RetryTimeBudgetExceeded):
+                    raise
+                raise
+
+        try:
+            max_retries = _safe_int(self.config.get("embedding", "max_retries", 2), 2)
+            backoff_base = _safe_float(self.config.get("embedding", "backoff_base", 0.5), 0.5)
+            retry_total = _safe_float(self.config.get("embedding", "retry_total_timeout", 0.0), 0.0)
+            response = execute_with_retry(
+                fn=_do_embed,
+                max_retries=max(0, max_retries),
+                backoff_base=max(0.0, backoff_base),
+                log_callback=callback,
+                log_prefix="embedding",
+                config_manager=self.config,
+                max_total_seconds=max(0.0, retry_total),
+            )
 
             if self.cost_tracker:
-                tokens = response.usage.total_tokens if hasattr(response, "usage") and response.usage else 0
-                self.cost_tracker.record(model, tokens, 0, "embedding")
+                try:
+                    stats = self._extract_usage_stats(response)
+                    prompt_tokens = stats.get("prompt_tokens")
+                    total = stats.get("total_tokens")
+                    tokens: Optional[int] = prompt_tokens if prompt_tokens is not None else total
+                    if tokens is None:
+                        usage_obj = getattr(response, "usage", None)
+                        if isinstance(usage_obj, dict):
+                            tokens = usage_obj.get("prompt_tokens", usage_obj.get("total_tokens"))
+                        else:
+                            raw_total = getattr(usage_obj, "total_tokens", None) if usage_obj is not None else None
+                            try:
+                                tokens = int(raw_total) if raw_total is not None else None
+                            except Exception:
+                                tokens = None
+                    if tokens is not None:
+                        self.cost_tracker.record(model, int(tokens), 0, "embedding")
+                except Exception:
+                    pass
 
             if is_batch:
                 return [item.embedding for item in response.data]
@@ -262,23 +373,31 @@ class LLMClient:
             raise ValueError("LLM client not initialized. Please check API Key.")
 
         callback = log_callback if log_callback else self.log_callback
-        model = self.config.get(config_section, "model", "gpt-3.5-turbo")
+        raw_model = self.config.get(config_section, "model", "gpt-3.5-turbo")
+        model = str(raw_model or "").strip() or "gpt-3.5-turbo"
         api_mode = str(
             self.config.get(config_section, "api_mode", "chat_completions") or ""
         ).strip().lower()
         use_responses_api = api_mode == "responses"
-        max_retries = int(self.config.get(config_section, "max_retries",
-                          self.config.get("llm", "max_retries", 3)))
-        backoff_base = float(self.config.get(config_section, "backoff_base",
-                             self.config.get("llm", "backoff_base", 0.5)))
-        timeout_base = float(self.config.get(config_section, "request_timeout",
-                             self.config.get("llm", "request_timeout", 120)))
-        timeout_step = float(self.config.get(config_section, "request_timeout_step",
-                             self.config.get("llm", "request_timeout_step", 15)))
-        timeout_max = float(self.config.get(config_section, "request_timeout_max",
-                            self.config.get("llm", "request_timeout_max", 180)))
-        retry_total_timeout = float(self.config.get(config_section, "retry_total_timeout",
-                        self.config.get("llm", "retry_total_timeout", 300)))
+
+        def _section_float(key: str, default: float) -> float:
+            raw = self.config.get(config_section, key, None)
+            if raw is None:
+                raw = self.config.get("llm", key, default)
+            return _safe_float(raw, default)
+
+        def _section_int(key: str, default: int) -> int:
+            raw = self.config.get(config_section, key, None)
+            if raw is None:
+                raw = self.config.get("llm", key, default)
+            return _safe_int(raw, default)
+
+        max_retries = _section_int("max_retries", 3)
+        backoff_base = _section_float("backoff_base", 0.5)
+        timeout_base = _section_float("request_timeout", 120.0)
+        timeout_step = _section_float("request_timeout_step", 15.0)
+        timeout_max = _section_float("request_timeout_max", 180.0)
+        retry_total_timeout = _section_float("retry_total_timeout", 300.0)
         if timeout_base <= 0:
             timeout_base = 120.0
         if timeout_step < 0:
@@ -290,7 +409,9 @@ class LLMClient:
 
         # Build final parameters
         final_params: dict[str, Any] = {}
-        stored_params = self.config.get(config_section, "parameters", {}) or {}
+        stored_params = self.config.get(config_section, "parameters", {})
+        if not isinstance(stored_params, dict):
+            stored_params = {}
         for key, value in stored_params.items():
             if value is not None:
                 final_params[key] = value
@@ -298,6 +419,8 @@ class LLMClient:
         # Output length is governed by the prompt and provider/model defaults.
         # Consume stale configuration instead of forwarding a hard cutoff.
         final_params.pop("max_tokens", None)
+        final_params.pop("max_completion_tokens", None)
+        final_params.pop("max_output_tokens", None)
 
         json_response_format_enabled = self._coerce_bool(
             self.config.get(config_section, "json_response_format_enabled", False),
@@ -314,6 +437,17 @@ class LLMClient:
             "input" if use_responses_api else "messages": messages,
         }
         extra_body: dict[str, Any] = {}
+        # Merge a stored extra_body preset before provider mapping.
+        preset_extra = final_params.pop("extra_body", None)
+        if isinstance(preset_extra, dict):
+            for key, value in preset_extra.items():
+                if value is not None:
+                    extra_body[key] = value
+        sampling_snapshot = {
+            key: final_params[key] for key in (
+                "temperature", "top_p", "frequency_penalty", "presence_penalty",
+            ) if key in final_params
+        }
         reasoning_application = apply_reasoning_controls(
             final_params,
             extra_body,
@@ -356,7 +490,14 @@ class LLMClient:
 
         request_args.update(final_params)
         if extra_body:
-            request_args["extra_body"] = extra_body
+            merged_extra: dict[str, Any] = {}
+            existing_extra = request_args.get("extra_body")
+            if isinstance(existing_extra, dict):
+                merged_extra.update(existing_extra)
+            merged_extra.update(extra_body)
+            request_args["extra_body"] = merged_extra
+        # Non-streaming client; never leave stream enabled by stale config.
+        request_args["stream"] = False
 
         log_emit(callback, self.config, "DEBUG",
                  f"{operation} LLM call: model={model} messages_len={len(messages)} "
@@ -381,6 +522,12 @@ class LLMClient:
                 raise RetryTimeBudgetExceeded(
                     f"{operation} LLM retry time budget exceeded "
                     f"({retry_total_timeout:.2f}s)"
+                )
+            # Remaining budget too small for a useful attempt; fail fast.
+            if remaining < 1.0:
+                raise RetryTimeBudgetExceeded(
+                    f"{operation} LLM retry time budget too small "
+                    f"(remaining={remaining:.2f}s)"
                 )
             return min(proposed_timeout, remaining)
 
@@ -408,6 +555,8 @@ class LLMClient:
                     else client.chat.completions.create(**call_args)
                 )
             except Exception as exc:
+                if isinstance(exc, RetryTimeBudgetExceeded):
+                    raise
                 has_response_format = (
                     call_args.get("response_format") is not None
                     or isinstance(call_args.get("text"), dict)
@@ -428,17 +577,22 @@ class LLMClient:
                         self.cost_tracker.increment_counter(f"{operation}_api_attempts")
                         self.cost_tracker.increment_counter("response_format_fallbacks")
                     call_args["timeout"] = bounded_request_timeout(call_timeout)
+                    call_args["stream"] = False
                     response = (
                         client.responses.create(**call_args)
                         if use_responses_api
                         else client.chat.completions.create(**call_args)
                     )
                 elif (reasoning_application.applied
+                        and reasoning_application.thinking_enabled is not False
                         and not reasoning_control_fallback["used"]
                         and self._is_reasoning_control_rejection(exc)):
                     reasoning_control_fallback["used"] = True
                     strip_reasoning_controls(request_args)
                     strip_reasoning_controls(call_args)
+                    for key, value in sampling_snapshot.items():
+                        request_args.setdefault(key, value)
+                        call_args[key] = value
                     log_emit(
                         callback,
                         self.config,
@@ -451,6 +605,7 @@ class LLMClient:
                         self.cost_tracker.increment_counter("reasoning_control_fallbacks")
                         self.cost_tracker.increment_counter(f"{operation}_api_attempts")
                     call_args["timeout"] = bounded_request_timeout(call_timeout)
+                    call_args["stream"] = False
                     response = (
                         client.responses.create(**call_args)
                         if use_responses_api
@@ -481,29 +636,32 @@ class LLMClient:
                     func="_call",
                 )
 
-            # Track cost if tracker available
-            if self.cost_tracker and hasattr(response, "usage") and response.usage:
-                if cached_tokens is not None:
-                    self.cost_tracker.increment_counter("prompt_cache_usage_reports")
-                self.cost_tracker.record(
-                    model,
-                    prompt_tokens or 0,
-                    completion_tokens or 0,
-                    operation,
-                    cached_prompt_tokens=cached_tokens or 0,
-                )
+            # Track cost if tracker available; skip zero-only records with no usage.
+            if self.cost_tracker and getattr(response, "usage", None) is not None:
+                if prompt_tokens is not None or completion_tokens is not None:
+                    if cached_tokens is not None:
+                        self.cost_tracker.increment_counter("prompt_cache_usage_reports")
+                    self.cost_tracker.record(
+                        model,
+                        prompt_tokens or 0,
+                        completion_tokens or 0,
+                        operation,
+                        cached_prompt_tokens=cached_tokens or 0,
+                    )
             if use_responses_api:
                 content = getattr(response, "output_text", None)
                 if content is None:
+                    preview = str(response)[:500]
                     raise ValueError(
                         f"Responses API returned no output_text. Model: {model}, "
-                        f"Response: {response}"
+                        f"Response: {preview}"
                     )
                 return content if isinstance(content, str) else str(content)
             if not response.choices:
+                preview = str(response)[:500]
                 raise ValueError(
-                    f"API returned empty choices list (possible content filter). "
-                    f"Model: {model}, Response: {response}"
+                    "API returned empty choices list (possible content filter). "
+                    f"Model: {model}, Response: {preview}"
                 )
             content = response.choices[0].message.content
             if content is None:

@@ -49,12 +49,21 @@ _MODEL_REFUSAL_PATTERNS = (
 
 
 def is_model_refusal(text: str, original_text: str = "") -> bool:
-    """Return whether output is a high-confidence task-level model refusal."""
+    """High-confidence refusal: pattern on short/high-density text."""
     candidate = str(text or "").strip()
     original = str(original_text or "").strip()
     if not candidate or (original and candidate.casefold() == original.casefold()):
         return False
-    return any(pattern.search(candidate) is not None for pattern in _MODEL_REFUSAL_PATTERNS)
+    for pattern in _MODEL_REFUSAL_PATTERNS:
+        match = pattern.search(candidate)
+        if match is None:
+            continue
+        if len(candidate) > 200 and len(match.group(0)) / max(1, len(candidate)) < 0.4:
+            continue
+        if len(candidate) > 500:
+            continue
+        return True
+    return False
 
 
 @dataclass
@@ -264,13 +273,18 @@ class QualityChecker:
             chinese_chars = len(self._CJK_CHAR_RE.findall(text_only))
             alpha_chars = len(self._text_analyzer._ALPHA_CHAR_RE.findall(text_only))
             total_chars = chinese_chars + alpha_chars
-            if total_chars > 5 and alpha_chars > chinese_chars * self._latin_ratio_threshold:
-                return QualityIssue(
-                    issue_type=QualityIssueType.UNTRANSLATED,
-                    severity="error",
-                    details=f"Translation appears mostly untranslated (alpha={alpha_chars}, cjk={chinese_chars})",
-                    rule_id="latin_ratio",
-                )
+            if total_chars > 5:
+                cjk_ratio = chinese_chars / total_chars if total_chars else 0.0
+                required = 1.0 / (1.0 + self._latin_ratio_threshold)
+                if alpha_chars > chinese_chars * self._latin_ratio_threshold or (
+                    chinese_chars == 0 and alpha_chars > 5
+                ):
+                    return QualityIssue(
+                        issue_type=QualityIssueType.UNTRANSLATED,
+                        severity="error",
+                        details=f"Translation appears mostly untranslated (alpha={alpha_chars}, cjk={chinese_chars}, cjk_ratio={cjk_ratio:.2f}<{required:.2f})",
+                        rule_id="latin_ratio",
+                    )
 
         return None
 
@@ -287,7 +301,17 @@ class QualityChecker:
         if not translation_visible:
             return ""
 
-        text = self._UPPER_ACRONYM_RE.sub("", translation_visible)
+        source_acronyms = {
+            m.group(0).upper() for m in self._UPPER_ACRONYM_RE.finditer(source_visible or "")
+        }
+        text = translation_visible
+        for acronym in sorted(source_acronyms, key=len, reverse=True):
+            text = re.sub(
+                r"(?<![A-Za-z])" + re.escape(acronym) + r"(?![A-Za-z])",
+                "",
+                text,
+                flags=re.IGNORECASE,
+            )
         spans_to_strip: set[str] = set()
         source_visible_lower = source_visible.lower()
 
@@ -481,10 +505,23 @@ class QualityChecker:
                 rule_id="runtime_token_sequence",
                 fragments=self._collect_sequence_fragments(source_runtime_tokens, translation_runtime_tokens),
             ))
+        elif not self._should_check_latin_ratio(target_lang):
+            if source_runtime_tokens != translation_runtime_tokens:
+                issues.append(QualityIssue(
+                    issue_type=QualityIssueType.FORMAT_VIOLATION,
+                    severity="error",
+                    details=self._describe_token_sequence_mismatch(
+                        "Skyrim runtime token order mismatch",
+                        source_runtime_tokens,
+                        translation_runtime_tokens,
+                    ),
+                    rule_id="runtime_token_sequence",
+                    fragments=self._collect_sequence_fragments(source_runtime_tokens, translation_runtime_tokens),
+                ))
 
         source_placeholders = self._text_analyzer.extract_placeholder_tokens(source)
         translation_placeholders = self._text_analyzer.extract_placeholder_tokens(translation)
-        if source_placeholders != translation_placeholders:
+        if [p.lower() for p in source_placeholders] != [p.lower() for p in translation_placeholders]:
             issues.append(QualityIssue(
                 issue_type=QualityIssueType.PLACEHOLDER_MISMATCH,
                 severity="error",
@@ -530,7 +567,7 @@ class QualityChecker:
             return False
 
         token = str(tokens[index])
-        if token != " ":
+        if not re.fullmatch(r"[ \t]+", token):
             return False
 
         prev_non_space = self._nearest_non_space_token(tokens, index, step=-1)
@@ -656,8 +693,10 @@ class QualityChecker:
             return False
 
         quote_positions = [idx for idx, ch in enumerate(text) if ch == wrapper_ch]
-        if len(quote_positions) < 4:
+        if len(quote_positions) == 2:
             return False
+        if len(quote_positions) < 4 or len(quote_positions) % 2 == 1:
+            return True
 
         for pos in range(1, len(quote_positions) - 1, 2):
             close_idx = quote_positions[pos]

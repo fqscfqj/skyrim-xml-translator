@@ -1,10 +1,13 @@
 import datetime
+import logging
 import traceback
 import inspect
 import os
 import re
 import sys
 import tempfile
+import time
+from logging.handlers import RotatingFileHandler
 from typing import Optional, Callable
 
 
@@ -15,6 +18,8 @@ LEVELS = {
     'ERROR': 40
 }
 
+_SHOULD_EMIT_LAST_WARN = 0.0
+
 
 _SENSITIVE_KEY_RE = re.compile(
     r"(?i)(api[_-]?key|authorization|access[_-]?token|refresh[_-]?token|secret|password)"
@@ -22,28 +27,51 @@ _SENSITIVE_KEY_RE = re.compile(
 _SENSITIVE_ASSIGNMENT_RE = re.compile(
     r"(?i)\b(api[_-]?key|authorization|access[_-]?token|refresh[_-]?token|secret|password)"
     r"(\s*[=:]\s*)"
-    r"([^\s,;\]\}\)]+)"
+    r"([^\s,;\]\}\)\"']+)"
+)
+_SENSITIVE_JSON_RE = re.compile(
+    r"(?i)(\"api[_-]?key\"|\"authorization\"|\"access[_-]?token\"|\"refresh[_-]?token\""
+    r"|\"secret\"|\"password\")(\s*:\s*\")([^\"]*)(\")"
 )
 _BEARER_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
+_API_KEY_HEADER_RE = re.compile(r"(?i)\b(X-Api-Key|Api-Key)(\s*[:=]\s*)([^\s,;\]\}\)\"']+)")
 _OPENAI_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9][A-Za-z0-9._-]{8,}\b")
 
 
 def _redact_sensitive_text(value) -> str:
     text = str(value)
+    text = _SENSITIVE_JSON_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}***{m.group(4)}", text)
     text = _SENSITIVE_ASSIGNMENT_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}***", text)
     text = _BEARER_RE.sub("Bearer ***", text)
+    text = _API_KEY_HEADER_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}***", text)
     text = _OPENAI_KEY_RE.sub("sk-***", text)
     return text
+
+
+def _redact_obj(obj):
+    if isinstance(obj, dict):
+        return {k: ("***" if _SENSITIVE_KEY_RE.search(str(k)) else _redact_obj(v))
+                for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        red = [_redact_obj(v) for v in obj]
+        return type(obj)(red) if isinstance(obj, tuple) else red
+    if isinstance(obj, str):
+        return _redact_sensitive_text(obj)
+    return obj
 
 
 def _redact_extra_value(key, value) -> str:
     if _SENSITIVE_KEY_RE.search(str(key)):
         return "***"
-    return _redact_sensitive_text(value)
+    try:
+        redacted = _redact_obj(value)
+        return _redact_sensitive_text(redacted)
+    except Exception:
+        return "***"
 
 
 def _now_ts():
-    return datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
 
 
 def _resolve_log_file_path(config_manager):
@@ -67,52 +95,80 @@ def _resolve_log_file_path(config_manager):
     return os.path.abspath(candidate)
 
 
+def _write_via_rotating(path: str, message: str) -> None:
+    handler = RotatingFileHandler(path, maxBytes=2 * 1024 * 1024,
+                                  backupCount=3, encoding="utf-8")
+    try:
+        record = logging.LogRecord(name="trx2", level=logging.INFO, pathname="",
+                                   lineno=0, msg=message, args=(), exc_info=None)
+        handler.emit(record)
+    finally:
+        try:
+            handler.close()
+        except Exception:
+            pass
+
+
 def _write_log_to_disk(path: Optional[str], message: str) -> None:
     if not path:
         return
+    text = message if message.endswith("\n") else message + "\n"
 
-    def _candidate_paths() -> list[str]:
-        filename = os.path.basename(path) or 'app.log'
-        candidates = [path]
-
+    def _fallback_paths(main: str) -> list[str]:
+        filename = os.path.basename(main) or 'app.log'
+        candidates: list[str] = []
         if os.name == 'nt':
             local_app_data = os.environ.get('LOCALAPPDATA')
             if local_app_data:
                 candidates.append(os.path.join(local_app_data, 'trx2', 'logs', filename))
         candidates.append(os.path.join(os.path.expanduser('~'), '.trx2', 'logs', filename))
         candidates.append(os.path.join(tempfile.gettempdir(), 'trx2', 'logs', filename))
-
         deduped: list[str] = []
         seen: set[str] = set()
         for item in candidates:
             resolved = os.path.abspath(item)
-            if resolved in seen:
+            if resolved == os.path.abspath(main) or resolved in seen:
                 continue
             seen.add(resolved)
             deduped.append(resolved)
         return deduped
 
-    for candidate in _candidate_paths():
+    try:
+        log_dir = os.path.dirname(path)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+        _write_via_rotating(path, text)
+        return
+    except Exception as main_err:
+        print(f"[logging] WARNING main log path failed {path}: {main_err}",
+              file=sys.stderr)
+    for candidate in _fallback_paths(path):
         try:
             log_dir = os.path.dirname(candidate)
             if log_dir:
                 os.makedirs(log_dir, exist_ok=True)
             with open(candidate, 'a', encoding='utf-8') as f:
-                f.write(message)
-                if not message.endswith('\n'):
-                    f.write('\n')
+                f.write(text)
             return
         except Exception:
             continue
+    print(f"[logging] ERROR all log paths failed, dropping message: {text[:200]}",
+          file=sys.stderr)
 
 
 def should_emit(config_manager, level: str) -> bool:
+    global _SHOULD_EMIT_LAST_WARN
     try:
-        configured = (config_manager.get('general', 'log_level') or 'INFO').upper()
-        return LEVELS.get(level.upper(), 20) >= LEVELS.get(configured, 20)
-    except Exception:
-        # Fallback: always emit
-        return True
+        getter = getattr(config_manager, "get", None) if config_manager else None
+        configured = (getter('general', 'log_level') if callable(getter) else 'INFO') or 'INFO'
+        configured = str(configured).upper()
+        return LEVELS.get(str(level).upper(), 20) >= LEVELS.get(configured, 20)
+    except Exception as e:
+        now = time.monotonic()
+        if now - _SHOULD_EMIT_LAST_WARN > 60:
+            _SHOULD_EMIT_LAST_WARN = now
+            print(f"[logging] WARNING should_emit fallback to INFO: {e}", file=sys.stderr)
+        return LEVELS.get(str(level).upper(), 20) >= LEVELS.get('INFO', 20)
 
 
 def format_log_message(level: str, message: str, module: Optional[str] = None,
@@ -156,6 +212,7 @@ def emit(log_callback: Optional[Callable[[str], None]], config_manager, level: s
     """
     Format a message and send it to the provided log callback. If callback is None, print to console.
     Will not emit messages under the configured log level.
+    Callers must pass module/func explicitly; inspect fallback is best-effort only.
     """
     try:
         if not should_emit(config_manager, level):
@@ -163,10 +220,7 @@ def emit(log_callback: Optional[Callable[[str], None]], config_manager, level: s
     except Exception:
         pass
 
-    # Try to deduce caller info if none provided.
-    # Only call inspect.stack() when essential info (module/func) is missing.
-    # inspect.stack() is expensive because it builds the entire call stack with
-    # frame info; skip it when callers already supply module and func.
+    # Best-effort caller deduction; prefer explicit module/func from callers.
     if not module or not func:
         try:
             # inspect stack: 0: emit, 1: caller of emit, 2: maybe wrapper; choose index 2

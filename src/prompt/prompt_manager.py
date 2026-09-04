@@ -22,6 +22,8 @@ import sys
 from threading import RLock
 from typing import Any, Optional
 
+from src.logging_helper import emit as log_emit
+
 
 class PromptManager:
 
@@ -31,6 +33,7 @@ class PromptManager:
         self._file_path: Optional[str] = None
         self._loaded_paths: list[str] = []
         self._mtime: Optional[float] = None
+        self._dir_fingerprint: str = ""
         self._fingerprint: str = ""
         self._lock = RLock()
 
@@ -46,15 +49,25 @@ class PromptManager:
         self.prompts_dir = os.path.join(base_path, "prompts")
         self.load()
 
-    def _deep_merge(self, target: dict, incoming: dict) -> None:
+    def _deep_merge(self, target: dict, incoming: dict, path: str = "") -> None:
         for key, value in incoming.items():
+            cur_path = f"{path}.{key}" if path else str(key)
             if (
                 key in target
                 and isinstance(target.get(key), dict)
                 and isinstance(value, dict)
             ):
-                self._deep_merge(target[key], value)
+                self._deep_merge(target[key], value, cur_path)
             else:
+                if key in target and type(target.get(key)) is not type(value):
+                    try:
+                        log_emit(None, self.config, "WARNING",
+                                 f"Prompt type conflict at '{cur_path}': "
+                                 f"{type(target.get(key)).__name__} overwritten by "
+                                 f"{type(value).__name__}",
+                                 module="prompt_manager", func="_deep_merge")
+                    except Exception:
+                        pass
                 target[key] = value
 
     def _load_from_directory(self, root_dir: str) -> tuple[dict, list[str], Optional[float]]:
@@ -96,7 +109,14 @@ class PromptManager:
                 try:
                     with open(full_path, "r", encoding="utf-8") as f:
                         data = json.load(f)
-                except Exception:
+                except Exception as e:
+                    try:
+                        log_emit(None, self.config, "WARNING",
+                                 f"Skipping corrupted prompt file {full_path}: {e}",
+                                 exc=e, module="prompt_manager",
+                                 func="_load_from_directory")
+                    except Exception:
+                        pass
                     continue
 
                 loaded_paths.append(full_path)
@@ -124,6 +144,29 @@ class PromptManager:
 
         return merged, loaded_paths, latest_mtime
 
+    def _compute_dir_fingerprint(self) -> str:
+        """Hash (relpath, size, mtime_ns) for all prompt JSONs; detects add/del."""
+        entries: list[str] = []
+        try:
+            if not os.path.isdir(self.prompts_dir):
+                return ""
+            for root, dirs, files in os.walk(self.prompts_dir):
+                dirs.sort(key=str.casefold)
+                for fn in sorted(files, key=str.casefold):
+                    if not fn.lower().endswith(".json"):
+                        continue
+                    fp = os.path.join(root, fn)
+                    try:
+                        st = os.stat(fp)
+                        rel = os.path.relpath(fp, self.prompts_dir)
+                        entries.append(f"{rel}:{st.st_size}:{st.st_mtime_ns}")
+                    except Exception:
+                        entries.append(os.path.relpath(fp, self.prompts_dir))
+        except Exception:
+            return self._dir_fingerprint
+        raw = "\n".join(entries)
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
     def load(self) -> None:
         """Load prompts from category-based files under prompts/.
 
@@ -142,6 +185,7 @@ class PromptManager:
                     self._loaded_paths = loaded_paths
                     self._mtime = latest_mtime
                     self._refresh_fingerprint()
+                    self._dir_fingerprint = self._compute_dir_fingerprint()
                     return
 
             legacy_path = os.path.join(self.prompts_dir, "en.json")
@@ -156,15 +200,22 @@ class PromptManager:
                     except Exception:
                         self._mtime = None
                     self._refresh_fingerprint()
+                    self._dir_fingerprint = self._compute_dir_fingerprint()
                     return
-                except Exception:
-                    pass
+                except Exception as e:
+                    try:
+                        log_emit(None, self.config, "WARNING",
+                                 f"Skipping corrupted prompt file {legacy_path}: {e}",
+                                 exc=e, module="prompt_manager", func="load")
+                    except Exception:
+                        pass
 
             self.prompts = {}
             self._file_path = None
             self._loaded_paths = []
             self._mtime = None
             self._refresh_fingerprint()
+            self._dir_fingerprint = self._compute_dir_fingerprint()
 
     def _refresh_fingerprint(self) -> None:
         raw = json.dumps(
@@ -189,25 +240,12 @@ class PromptManager:
         self.load()
 
     def reload_if_changed(self) -> None:
-        """Reload prompts if any loaded file was modified."""
+        """Reload prompts if directory fingerprint changed (mtime+size+add/del)."""
         with self._lock:
-            if not self._loaded_paths:
+            if not self._loaded_paths and not self._dir_fingerprint:
                 return
-
-            latest_mtime: Optional[float] = None
-            for path in self._loaded_paths:
-                if not path or not os.path.exists(path):
-                    continue
-                try:
-                    mtime = os.path.getmtime(path)
-                except Exception:
-                    continue
-                if latest_mtime is None or mtime > latest_mtime:
-                    latest_mtime = mtime
-
-            if latest_mtime is None:
-                return
-            if self._mtime is None or latest_mtime > self._mtime:
+            current = self._compute_dir_fingerprint()
+            if current and current != self._dir_fingerprint:
                 self.load()
 
     def get(self, key: str, default: Any = None) -> Any:

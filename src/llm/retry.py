@@ -42,8 +42,31 @@ _DEFAULT_STRATEGIES: dict[ErrorType, RetryStrategy] = {
     ErrorType.AUTH_ERROR: RetryStrategy(max_retries=0),
     ErrorType.CONTENT_BLOCK: RetryStrategy(max_retries=0),
     ErrorType.INVALID_REQUEST: RetryStrategy(max_retries=0),
-    ErrorType.UNKNOWN: RetryStrategy(max_retries=1, backoff_base=1.0),
+    ErrorType.UNKNOWN: RetryStrategy(max_retries=0, backoff_base=1.0),
 }
+
+
+# Whitelist of transient network phrases: UNKNOWN errors carrying these are
+# treated as connection errors instead of failing immediately.
+_TRANSIENT_NETWORK_MARKERS = (
+    "connection",
+    "network",
+    "timeout",
+    "timed out",
+    "temporary",
+    "temporarily",
+    "try again",
+    "econnreset",
+    "econnrefused",
+    "econnaborted",
+    "broken pipe",
+    "socket",
+    "dns",
+    "unreachable",
+    "reset by peer",
+    "service unavailable",
+    "overloaded",
+)
 
 
 _CONTENT_BLOCK_MARKERS = (
@@ -135,33 +158,54 @@ def format_provider_error(exc: Exception) -> str:
 
 def _is_content_block_error(exc: Exception) -> bool:
     """Detect provider-side safety / content-inspection blocks."""
-    status_code = getattr(exc, "status_code", None)
-    if status_code == 421:
-        return True
-
     message = str(exc or "")
-    if _has_any_marker(message, _CONTENT_BLOCK_MARKERS):
-        return True
-
     details = extract_provider_error_details(exc)
     fields = " ".join(
         str(details.get(key) or "")
         for key in ("code", "type", "param", "message")
     )
+    combined = f"{message}\n{fields}"
+    # 421/403 alone are not enough; content markers must also hit.
+    if _has_any_marker(message, _CONTENT_BLOCK_MARKERS):
+        return True
     if _has_any_marker(fields, _CONTENT_BLOCK_MARKERS):
         return True
-
-    if status_code == 403 and _has_any_marker(fields, ("content", "moderation", "inspection", "safety")):
+    status_code = details.get("status_code")
+    try:
+        status_code = int(status_code) if status_code is not None else None
+    except Exception:
+        status_code = None
+    if status_code in (421, 403) and _has_any_marker(
+        combined, ("content", "moderation", "inspection", "safety")
+    ):
         return True
     return False
 
 
 def classify_error(exc: Exception) -> ErrorType:
     """Classify an OpenAI/API exception into an ErrorType."""
+    if isinstance(exc, RetryTimeBudgetExceeded):
+        return ErrorType.UNKNOWN
     if isinstance(exc, openai.RateLimitError):
         return ErrorType.RATE_LIMIT
     if _is_content_block_error(exc):
         return ErrorType.CONTENT_BLOCK
+    # Status-code driven 4xx policy: only 408/409/429 are retryable.
+    try:
+        details_status = extract_provider_error_details(exc).get("status_code")
+        status_code = int(details_status) if details_status is not None else None
+    except Exception:
+        status_code = None
+    if status_code is not None and 400 <= status_code < 500:
+        if status_code == 429:
+            return ErrorType.RATE_LIMIT
+        if status_code == 408:
+            return ErrorType.TIMEOUT
+        if status_code == 409:
+            return ErrorType.SERVER_ERROR
+        if status_code == 401:
+            return ErrorType.AUTH_ERROR
+        return ErrorType.INVALID_REQUEST
     if isinstance(exc, openai.InternalServerError):
         return ErrorType.SERVER_ERROR
     if isinstance(exc, openai.APIConnectionError):
@@ -174,6 +218,8 @@ def classify_error(exc: Exception) -> ErrorType:
         return ErrorType.INVALID_REQUEST
     if isinstance(exc, openai.APIError):
         return ErrorType.SERVER_ERROR
+    if _has_any_marker(str(exc or ""), _TRANSIENT_NETWORK_MARKERS):
+        return ErrorType.CONNECTION_ERROR
     return ErrorType.UNKNOWN
 
 
@@ -190,13 +236,16 @@ def get_strategy(error_type: ErrorType, config_overrides: Optional[dict] = None)
         return base
     override_retries = config_overrides.get("max_retries")
     override_backoff = config_overrides.get("backoff_base")
-    max_retries = base.max_retries if override_retries is None else int(override_retries)
-    backoff_base = base.backoff_base if override_backoff is None else float(override_backoff)
-
-    # For 429s, never be more aggressive than the default strategy.
-    if error_type == ErrorType.RATE_LIMIT:
-        max_retries = max(max_retries, base.max_retries)
-        backoff_base = max(backoff_base, base.backoff_base)
+    try:
+        max_retries = base.max_retries if override_retries is None else int(override_retries)
+    except Exception:
+        max_retries = base.max_retries
+    try:
+        backoff_base = base.backoff_base if override_backoff is None else float(override_backoff)
+    except Exception:
+        backoff_base = base.backoff_base
+    max_retries = max(0, max_retries)
+    backoff_base = max(0.0, backoff_base)
 
     return RetryStrategy(
         max_retries=max_retries,
@@ -221,7 +270,38 @@ def _extract_retry_after_seconds(exc: Exception) -> float:
     if not headers:
         return 0.0
 
-    raw = headers.get("retry-after") or headers.get("Retry-After")
+    def _lower_map(raw_headers: Any) -> dict[str, str]:
+        lowered: dict[str, str] = {}
+        try:
+            items = raw_headers.items()  # type: ignore[union-attr]
+        except Exception:
+            return lowered
+        try:
+            for key, value in items:
+                try:
+                    lowered[str(key).strip().lower()] = str(value).strip()
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return lowered
+
+    lowered_headers = _lower_map(headers)
+    if not lowered_headers:
+        try:
+            lowered_headers = {
+                "retry-after": str(headers.get("retry-after") or headers.get("Retry-After") or "").strip()
+            }
+        except Exception:
+            return 0.0
+
+    raw = ""
+    is_ms = False
+    for key in ("retry-after", "x-retry-after", "retry-after-ms", "x-retry-after-ms"):
+        if lowered_headers.get(key):
+            raw = lowered_headers[key]
+            is_ms = key.endswith("-ms")
+            break
     if not raw:
         return 0.0
 
@@ -229,9 +309,12 @@ def _extract_retry_after_seconds(exc: Exception) -> float:
     if not value:
         return 0.0
 
-    # Delta-seconds form.
+    # Delta-seconds (or milliseconds) form.
     try:
-        return max(float(value), 0.0)
+        parsed = float(value)
+        if is_ms:
+            parsed = parsed / 1000.0
+        return max(parsed, 0.0)
     except Exception:
         pass
 
@@ -264,12 +347,14 @@ def execute_with_retry(
     """
     from src.logging_helper import emit as log_emit
 
-    attempt = 0
+    per_type_attempts: dict[ErrorType, int] = {}
     started_at = time.monotonic()
     while True:
         try:
             return fn()
         except Exception as exc:
+            if isinstance(exc, RetryTimeBudgetExceeded):
+                raise
             error_type = classify_error(exc)
             strategy = get_strategy(error_type, {
                 "max_retries": max_retries,
@@ -291,7 +376,8 @@ def execute_with_retry(
                          module="llm.retry", func="execute_with_retry")
                 raise
 
-            attempt += 1
+            per_type_attempts[error_type] = per_type_attempts.get(error_type, 0) + 1
+            attempt = per_type_attempts[error_type]
             if attempt > strategy.max_retries:
                 log_emit(log_callback, config_manager, "ERROR",
                          f"{log_prefix} retries exhausted ({attempt - 1}/{strategy.max_retries}): {exc}",

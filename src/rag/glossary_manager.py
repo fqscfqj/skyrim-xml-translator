@@ -1,11 +1,14 @@
 """Glossary CRUD, normalization, lookup table, and token DF computation."""
 
+import glob
 import json
+import datetime
 import hashlib
 import os
 import re
 import shutil
 import time
+import unicodedata
 from typing import Any, Dict, Optional
 
 from src.logging_helper import emit as log_emit
@@ -82,7 +85,10 @@ class GlossaryManager:
         # Rich per-term metadata (domain/pos/priority/forbidden/examples/...).
         # Keyed by normalized term; v1 is store-only (retrieval ignores it).
         self.rich_meta: Dict[str, Dict[str, Any]] = {}
+        self._rich_refcount: Dict[str, int] = {}
         self._last_backup_path: Optional[str] = None
+        self._glossary_corrupt = False
+        self._sidecar_corrupt = False
 
         self.load()
 
@@ -101,7 +107,11 @@ class GlossaryManager:
         """Normalize term for case/punctuation-insensitive comparison."""
         if not text:
             return ""
-        cleaned = text.strip().lower()
+        try:
+            cleaned = unicodedata.normalize("NFKC", str(text))
+        except Exception:
+            cleaned = str(text)
+        cleaned = cleaned.strip().lower()
         cleaned = self._NORMALIZE_TERM_RE.sub(" ", cleaned)
         cleaned = self._WHITESPACE_RE.sub(" ", cleaned).strip()
         return cleaned
@@ -127,14 +137,25 @@ class GlossaryManager:
         """Build a normalized lookup map for instant exact hits."""
         lookup = {}
         term_token_index: Dict[str, list[str]] = {}
+        refcount: Dict[str, int] = {}
         for term in self.glossary.keys():
             normalized = self.normalize_term_key(term)
-            if normalized and normalized not in lookup:
+            if not normalized:
+                continue
+            refcount[normalized] = refcount.get(normalized, 0) + 1
+            if normalized not in lookup:
                 lookup[normalized] = term
+            else:
+                if lookup[normalized] != term:
+                    log_emit(None, self.config, "WARNING",
+                             f"Glossary normalized collision '{normalized}': "
+                             f"keeping '{lookup[normalized]}', ignoring alias '{term}'",
+                             module="glossary_manager", func="rebuild_lookup")
             for token in set(self._term_index_tokens(term)):
                 term_token_index.setdefault(token, []).append(term)
         self._glossary_lookup = lookup
         self._term_token_index = term_token_index
+        self._rich_refcount = refcount
         self._token_df_dirty = True
         raw = json.dumps(
             self.glossary,
@@ -202,28 +223,31 @@ class GlossaryManager:
             return False
         self.ensure_token_df()
         df = self._token_df.get(token_norm, 0)
-        return 0 < df <= self._signal_max_df()
+        if df == 0:
+            return True
+        return df <= self._signal_max_df()
 
     # --- Load / Save ---
 
     def _atomic_write_json(self, path: str, payload: Any) -> Optional[str]:
-        """Write JSON atomically (tmp + fsync + replace). Returns backup path."""
+        """Write JSON atomically (tmp+pid + fsync + replace). Returns backup path."""
         parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, exist_ok=True)
         backup_path: Optional[str] = None
         if os.path.exists(path):
-            stamp = time.strftime("%Y%m%d-%H%M%S")
+            stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
             backup_path = f"{path}.bak.{stamp}"
             try:
                 shutil.copy2(path, backup_path)
                 self._last_backup_path = backup_path
+                self._prune_backups(path, keep=5)
             except Exception as exc:
                 log_emit(None, self.config, "WARNING",
                          f"Failed to backup {path}: {exc}", exc=exc,
                          module="glossary_manager", func="_atomic_write_json")
                 backup_path = None
-        tmp_path = f"{path}.tmp"
+        tmp_path = f"{path}.tmp.{os.getpid()}"
         try:
             with open(tmp_path, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle, indent=4, ensure_ascii=False)
@@ -241,6 +265,28 @@ class GlossaryManager:
                     pass
         return backup_path
 
+    def _prune_backups(self, path: str, keep: int = 5) -> None:
+        try:
+            pattern = f"{path}.bak.*"
+            candidates = sorted(glob.glob(pattern))
+            if len(candidates) > keep:
+                for stale in candidates[:len(candidates) - keep]:
+                    try:
+                        os.remove(stale)
+                    except OSError:
+                        pass
+        except Exception:
+            pass
+
+    def _quarantine_corrupt_file(self, path: str, exc: Exception) -> Optional[str]:
+        try:
+            stamp = time.strftime("%Y%m%d-%H%M%S") + f"-{os.getpid()}"
+            corrupt_path = f"{path}.corrupt.{stamp}"
+            os.replace(path, corrupt_path)
+            return corrupt_path
+        except Exception:
+            return None
+
     def _load_sidecar(self) -> None:
         self.rich_meta = {}
         if not os.path.exists(self.sidecar_path):
@@ -257,8 +303,11 @@ class GlossaryManager:
                             cleaned[normalized] = dict(value)
                 self.rich_meta = cleaned
         except Exception as exc:
+            corrupt_path = self._quarantine_corrupt_file(self.sidecar_path, exc)
+            self._sidecar_corrupt = True
+            self.rich_meta = {}
             log_emit(None, self.config, "WARNING",
-                     f"Failed to load glossary rich metadata: {exc}", exc=exc,
+                     f"Glossary sidecar corrupt, quarantined to {corrupt_path}: {exc}", exc=exc,
                      module="glossary_manager", func="_load_sidecar")
 
     def _save_sidecar(self) -> None:
@@ -322,9 +371,12 @@ class GlossaryManager:
                     self.glossary = {str(k): str(v) for k, v in loaded.items()}
                 else:
                     self.glossary = {}
+                self._glossary_corrupt = False
             except Exception as e:
+                corrupt_path = self._quarantine_corrupt_file(self.glossary_path, e)
+                self._glossary_corrupt = True
                 log_emit(None, self.config, "ERROR",
-                         f"Error loading glossary: {e}", exc=e,
+                         f"Glossary corrupt, quarantined to {corrupt_path}: {e}", exc=e,
                          module="glossary_manager", func="load")
                 self.glossary = {}
         self._load_sidecar()
@@ -336,8 +388,27 @@ class GlossaryManager:
 
     # --- CRUD ---
 
+    def _warn_normalized_collision(self, term: str) -> None:
+        norm = self.normalize_term_key(term)
+        if not norm:
+            return
+        canonical = self._glossary_lookup.get(norm)
+        if canonical is not None and canonical != term:
+            log_emit(None, self.config, "WARNING",
+                     f"Glossary normalized dedup '{norm}': '{term}' overwrites alias of '{canonical}'",
+                     module="glossary_manager", func="add_term")
+
+    def _drop_rich_meta_if_unreferenced(self, normalized: str) -> None:
+        if not normalized or normalized not in self.rich_meta:
+            return
+        for term in self.glossary.keys():
+            if self.normalize_term_key(term) == normalized:
+                return
+        self.rich_meta.pop(normalized, None)
+
     def add_term(self, term: str, translation: str, rich_meta: Optional[Dict[str, Any]] = None) -> None:
         """Add a term to the glossary (glossary-only, no vector)."""
+        self._warn_normalized_collision(term)
         self.glossary[term] = translation
         if isinstance(rich_meta, dict) and rich_meta:
             normalized = self.normalize_term_key(term)
@@ -350,8 +421,9 @@ class GlossaryManager:
     def delete_term(self, term: str) -> bool:
         """Delete a term from the glossary. Returns True if found."""
         if term in self.glossary:
+            norm = self.normalize_term_key(term)
             del self.glossary[term]
-            self.rich_meta.pop(self.normalize_term_key(term), None)
+            self._drop_rich_meta_if_unreferenced(norm)
             self.save()
             self._save_sidecar()
             self.rebuild_lookup()
@@ -360,7 +432,23 @@ class GlossaryManager:
 
     def add_terms_batch(self, terms_dict: dict[str, str], rich_meta: Optional[Dict[str, Dict[str, Any]]] = None) -> None:
         """Batch add terms to glossary (glossary-only, no vectors)."""
-        self.glossary.update(terms_dict)
+        seen_norms: Dict[str, str] = {}
+        for term in (terms_dict or {}).keys():
+            norm = self.normalize_term_key(str(term or ""))
+            if not norm:
+                continue
+            if norm in seen_norms and seen_norms[norm] != term:
+                log_emit(None, self.config, "WARNING",
+                         f"Glossary batch normalized dedup '{norm}': '{term}' overwrites '{seen_norms[norm]}' in same import",
+                         module="glossary_manager", func="add_terms_batch")
+            else:
+                canonical = self._glossary_lookup.get(norm)
+                if canonical is not None and canonical != term and canonical not in (terms_dict or {}):
+                    log_emit(None, self.config, "WARNING",
+                             f"Glossary normalized dedup '{norm}': '{term}' overwrites alias of '{canonical}'",
+                             module="glossary_manager", func="add_terms_batch")
+            seen_norms[norm] = term
+        self.glossary.update(terms_dict or {})
         if isinstance(rich_meta, dict) and rich_meta:
             for term, meta in rich_meta.items():
                 if not isinstance(meta, dict) or not meta:
@@ -375,11 +463,14 @@ class GlossaryManager:
     def delete_terms_batch(self, terms_list: list[str]) -> int:
         """Batch delete terms from glossary. Returns count of deleted terms."""
         deleted = 0
-        for term in terms_list:
+        touched_norms: set[str] = set()
+        for term in terms_list or []:
             if term in self.glossary:
+                touched_norms.add(self.normalize_term_key(term))
                 del self.glossary[term]
-                self.rich_meta.pop(self.normalize_term_key(term), None)
                 deleted += 1
+        for norm in touched_norms:
+            self._drop_rich_meta_if_unreferenced(norm)
         if deleted > 0:
             self.save()
             self._save_sidecar()

@@ -1,7 +1,8 @@
-PyQt6
-openai
+# Runtime dependencies (requires Python >= 3.10).
+# Build-only tools live in build-requirements.txt (pyinstaller).
+PyQt6>=6.5.0
+openai>=1.0.0
 lxml>=5.0.0
 defusedxml>=0.7.1
-numpy
-scikit-learn
-pyinstaller
+numpy>=1.24.0
+# Note: httpx/tiktoken are transitive via openai; scikit-learn is not used directly.

@@ -1,7 +1,13 @@
-"""Resolve composable translation style profiles from editable prompt data."""
+"""Resolve composable translation style profiles from editable prompt data.
+
+Extends semantics: child overrides parent. Parent rules load first, then child
+rules; duplicates keep the child's position so child intent wins.
+"""
 
 from dataclasses import dataclass
 from typing import Any, Optional
+
+from src.logging_helper import emit as log_emit
 
 
 @dataclass(frozen=True)
@@ -24,6 +30,14 @@ class StyleProfileResolver:
         profiles = self.prompt_manager.get("translator.style_profiles", {})
         if not isinstance(profiles, dict):
             profiles = {}
+        if not profiles:
+            try:
+                log_emit(None, self.config, "WARNING",
+                         "No style profiles configured; using 'none'",
+                         module="style_profiles", func="resolve")
+            except Exception:
+                pass
+            return ResolvedStyleProfile(profile_id="none", rules=())
 
         profile_id = self._select_profile_id(profiles, context_hint)
         rules = self._resolve_rules(
@@ -38,14 +52,18 @@ class StyleProfileResolver:
                            context_hint: Optional[dict]) -> str:
         context = context_hint if isinstance(context_hint, dict) else {}
         explicit = str(context.get("style_profile", "") or "").strip()
-        if explicit and explicit.lower() != "auto" and explicit in profiles:
-            return explicit
+        if explicit and explicit.lower() != "auto":
+            if explicit in profiles:
+                return explicit
+            self._warn_unknown(explicit, "context.style_profile")
 
         configured = str(
             self.config.get("general", "style_profile", "auto") or "auto"
         ).strip()
-        if configured and configured.lower() != "auto" and configured in profiles:
-            return configured
+        if configured and configured.lower() != "auto":
+            if configured in profiles:
+                return configured
+            self._warn_unknown(configured, "general.style_profile")
 
         mappings = self.prompt_manager.get("translator.style_profile_mappings", {})
         if not isinstance(mappings, dict):
@@ -78,6 +96,15 @@ class StyleProfileResolver:
         if profiles:
             return str(next(iter(profiles.keys())))
         return self.DEFAULT_PROFILE
+
+    def _warn_unknown(self, value: str, source: str) -> None:
+        try:
+            from src.logging_helper import emit as _emit
+            _emit(None, self.config, "WARNING",
+                   f"Unknown style_profile '{value}' from {source}, falling back to default",
+                   module="style_profiles", func="_select_profile_id")
+        except Exception:
+            pass
 
     def _resolve_rules(self, profile_id: str, prompt_style: str,
                        profiles: dict, visiting: set[str]) -> list[str]:
@@ -119,11 +146,9 @@ class StyleProfileResolver:
 
     @staticmethod
     def _dedupe_rules(rules: list[str]) -> list[str]:
-        result: list[str] = []
-        seen: set[str] = set()
-        for rule in rules:
-            if rule in seen:
-                continue
-            seen.add(rule)
-            result.append(rule)
-        return result
+        # Child overrides parent: keep last occurrence, preserve child order.
+        last_index: dict[str, int] = {}
+        for idx, rule in enumerate(rules):
+            last_index[rule] = idx
+        ordered = sorted(last_index.items(), key=lambda kv: kv[1])
+        return [rule for rule, _ in ordered]

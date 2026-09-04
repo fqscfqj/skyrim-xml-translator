@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import logging
+import warnings
 from dataclasses import dataclass
 from typing import Any
+
+
+logger = logging.getLogger(__name__)
 
 
 PROTOCOLS = frozenset({
@@ -18,6 +23,13 @@ PROTOCOLS = frozenset({
 
 EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"})
 
+# Single source of truth for Claude adaptive-thinking model markers.
+_CLAUDE_ADAPTIVE_MARKERS = (
+    "4-6", "4.6", "4-7", "4.7", "4-8", "4.8",
+    "claude-5", "sonnet-5", "opus-5", "fable", "mythos",
+    "opus-4-5", "opus-4.5",
+)
+
 
 @dataclass(frozen=True)
 class ReasoningApplication:
@@ -31,28 +43,34 @@ def detect_reasoning_protocol(base_url: str, model: str) -> str:
     url = str(base_url or "").strip().lower()
     model_name = str(model or "").strip().lower()
 
+    # Gateway endpoints win over model names.
     if "openrouter.ai" in url:
         return "openrouter"
     if any(marker in url for marker in ("dashscope", "aliyuncs.com", "modelstudio")):
         return "qwen"
-    if "deepseek" in url or "deepseek" in model_name:
+    # Model names take priority over generic base URLs from here on.
+    if "deepseek" in model_name:
         return "deepseek"
-    if "anthropic" in url or "claude" in model_name:
-        adaptive_markers = (
-            "4-6", "4.6", "4-7", "4.7", "4-8", "4.8",
-            "claude-5", "sonnet-5", "opus-5", "fable", "mythos",
-            "opus-4-5", "opus-4.5",
-        )
-        if any(marker in model_name for marker in adaptive_markers):
+    if any(marker in model_name for marker in ("qwen", "qwq")):
+        return "qwen"
+    if "claude" in model_name:
+        if any(marker in model_name for marker in _CLAUDE_ADAPTIVE_MARKERS):
             return "anthropic_adaptive"
         # Older Claude reasoning controls require a fixed token budget. Leave
         # those models on the gateway's standard/default behavior instead of
         # imposing a hidden cutoff.
         return "standard"
-    if "googleapis.com" in url or "gemini" in model_name:
+    if "gemini" in model_name:
         return "gemini"
-    if any(marker in model_name for marker in ("qwen", "qwq")):
-        return "qwen"
+    # Fall back to URL hints when the model name is generic/empty.
+    if "deepseek" in url:
+        return "deepseek"
+    if "anthropic" in url:
+        if any(marker in model_name for marker in _CLAUDE_ADAPTIVE_MARKERS):
+            return "anthropic_adaptive"
+        return "standard"
+    if "googleapis.com" in url:
+        return "gemini"
     return "standard"
 
 
@@ -87,10 +105,8 @@ def _merge_object(target: dict[str, Any], key: str, values: dict[str, Any]) -> N
 
 def _anthropic_requires_thinking(model: str) -> bool:
     model_name = str(model or "").lower()
-    return any(marker in model_name for marker in (
-        "4-7", "4.7", "4-8", "4.8", "claude-5", "sonnet-5", "opus-5",
-        "fable", "mythos",
-    ))
+    return any(marker in model_name for marker in _CLAUDE_ADAPTIVE_MARKERS
+               if marker not in ("4-6", "4.6"))
 
 
 def _gemini_lowest_effort(model: str) -> str | None:
@@ -140,10 +156,7 @@ def _anthropic_supports_adaptive(model: str) -> bool:
     if not model_name:
         # A manually selected Claude protocol is assumed to target a current model.
         return True
-    return any(marker in model_name for marker in (
-        "4-6", "4.6", "4-7", "4.7", "4-8", "4.8",
-        "claude-5", "sonnet-5", "opus-5", "fable", "mythos",
-    ))
+    return any(marker in model_name for marker in _CLAUDE_ADAPTIVE_MARKERS)
 
 
 def apply_reasoning_controls(
@@ -159,7 +172,8 @@ def apply_reasoning_controls(
     ``reasoning_effort`` settings remain valid; new configurations can also
     select a protocol. Fixed thinking-token budgets are deliberately ignored.
     """
-    selected = str(final_params.pop("reasoning_protocol", "auto") or "auto").strip().lower()
+    raw_protocol = final_params.pop("reasoning_protocol", "auto")
+    selected = str(raw_protocol or "auto").strip().lower()
     aliases = {
         "openai": "standard",
         "meta": "standard",
@@ -168,11 +182,21 @@ def apply_reasoning_controls(
     }
     selected = aliases.get(selected, selected)
     if selected not in PROTOCOLS:
+        warnings.warn(f"Unknown reasoning_protocol {raw_protocol!r}; falling back to 'auto'.")
         selected = "auto"
     protocol = detect_reasoning_protocol(base_url, model) if selected == "auto" else selected
 
-    thinking_enabled = _coerce_optional_bool(final_params.pop("enable_thinking", None))
-    effort = _normalize_effort(final_params.pop("reasoning_effort", None))
+    raw_thinking = final_params.pop("enable_thinking", None)
+    # Qwen gateways may pre-seed the switch inside extra_body; accept either place.
+    if raw_thinking is None and isinstance(extra_body.get("enable_thinking"), bool):
+        raw_thinking = extra_body.get("enable_thinking")
+    thinking_enabled = _coerce_optional_bool(raw_thinking)
+    if raw_thinking is not None and thinking_enabled is None:
+        warnings.warn(f"Unknown enable_thinking value {raw_thinking!r}; ignoring.")
+    raw_effort = final_params.pop("reasoning_effort", None)
+    effort = _normalize_effort(raw_effort)
+    if raw_effort is not None and effort is None:
+        warnings.warn(f"Unknown reasoning_effort {raw_effort!r}; ignoring.")
     # Consume the removed setting from short-lived/pre-release configurations
     # without forwarding it to a provider.
     final_params.pop("reasoning_budget_tokens", None)
@@ -187,22 +211,27 @@ def apply_reasoning_controls(
     if protocol == "deepseek":
         provider_effort = _deepseek_effort(effort)
         if thinking_enabled is not None:
-            extra_body["thinking"] = {
+            _merge_object(extra_body, "thinking", {
                 "type": "enabled" if thinking_enabled else "disabled"
-            }
+            })
             applied = True
         if thinking_enabled is not False and provider_effort not in (None, "none"):
             final_params["reasoning_effort"] = provider_effort
             applied = True
         if thinking_enabled is True or (thinking_enabled is None and effort is not None):
-            for unsupported in (
+            removed = [key for key in (
                 "temperature", "top_p", "frequency_penalty", "presence_penalty",
-            ):
-                final_params.pop(unsupported, None)
+            ) if key in final_params]
+            for key in removed:
+                final_params.pop(key, None)
+            if removed:
+                logger.info("DeepSeek thinking enabled: dropped sampling params %s", removed)
 
     elif protocol == "qwen":
         if thinking_enabled is not None:
             extra_body["enable_thinking"] = thinking_enabled
+            # Top-level/extra_body compat: keep both wire positions in sync.
+            final_params["enable_thinking"] = thinking_enabled
             applied = True
         if thinking_enabled is not False:
             if effort not in (None, "none"):
@@ -212,8 +241,9 @@ def apply_reasoning_controls(
     elif protocol == "openrouter":
         reasoning: dict[str, Any] = {}
         if thinking_enabled is False:
-            reasoning["effort"] = "none"
-        elif effort is not None:
+            # Providers without a 'none' level should omit reasoning; no fallback.
+            pass
+        elif effort not in (None, "none"):
             reasoning["effort"] = effort
         elif thinking_enabled is True:
             reasoning["enabled"] = True
@@ -225,13 +255,13 @@ def apply_reasoning_controls(
         provider_effort = _anthropic_effort(effort, model)
         if thinking_enabled is False:
             if _anthropic_requires_thinking(model):
-                extra_body["thinking"] = {"type": "adaptive"}
+                _merge_object(extra_body, "thinking", {"type": "adaptive"})
                 _merge_object(extra_body, "output_config", {"effort": "low"})
             else:
-                extra_body["thinking"] = {"type": "disabled"}
+                _merge_object(extra_body, "thinking", {"type": "disabled"})
             applied = True
         elif thinking_enabled is True and _anthropic_supports_adaptive(model):
-            extra_body["thinking"] = {"type": "adaptive"}
+            _merge_object(extra_body, "thinking", {"type": "adaptive"})
             applied = True
         if thinking_enabled is not False and provider_effort not in (None, "none"):
             _merge_object(extra_body, "output_config", {"effort": provider_effort})
@@ -242,7 +272,7 @@ def apply_reasoning_controls(
         if lowest_effort is not None:
             final_params["reasoning_effort"] = lowest_effort
             applied = True
-        elif effort is not None:
+        elif effort not in (None, "none"):
             final_params["reasoning_effort"] = (
                 "high" if effort in {"xhigh", "max"} else effort
             )
@@ -250,6 +280,7 @@ def apply_reasoning_controls(
         elif thinking_enabled is True:
             final_params["reasoning_effort"] = "medium"
             applied = True
+        # OFF without a supported lowest level omits the param (no 'none' fallback).
 
     else:  # OpenAI, Meta Model API, and generic OpenAI-compatible endpoints.
         provider_effort = _standard_effort(effort, base_url, model)

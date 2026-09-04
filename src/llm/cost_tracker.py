@@ -36,13 +36,18 @@ class CostTracker:
         self._records: list[UsageRecord] = []
         self._counters: dict[str, int] = {}
         self._lock = Lock()
-        self._pricing = pricing or DEFAULT_PRICING
+        source = pricing if pricing is not None else DEFAULT_PRICING
+        self._pricing = {key: dict(value) for key, value in source.items()}
 
     def increment_counter(self, name: str, amount: int = 1) -> None:
-        if not name or amount == 0:
+        try:
+            delta = int(amount)  # type: ignore[arg-type]
+        except Exception:
+            return
+        if not name or delta == 0:
             return
         with self._lock:
-            self._counters[name] = self._counters.get(name, 0) + int(amount)
+            self._counters[name] = self._counters.get(name, 0) + delta
 
     def get_counter(self, name: str) -> int:
         with self._lock:
@@ -51,7 +56,15 @@ class CostTracker:
     def record(self, model: str, prompt_tokens: int, completion_tokens: int,
                operation: str = "translate",
                cached_prompt_tokens: int = 0) -> None:
-        cached_prompt_tokens = max(0, min(int(cached_prompt_tokens or 0), int(prompt_tokens or 0)))
+        def _nonneg(value: object) -> int:
+            try:
+                return max(0, int(value or 0))  # type: ignore[arg-type]
+            except Exception:
+                return 0
+
+        prompt_tokens = _nonneg(prompt_tokens)
+        completion_tokens = _nonneg(completion_tokens)
+        cached_prompt_tokens = max(0, min(_nonneg(cached_prompt_tokens), prompt_tokens))
         cost = self.estimate_cost(
             model,
             prompt_tokens,
@@ -73,13 +86,18 @@ class CostTracker:
     def estimate_cost(self, model: str, prompt_tokens: int, completion_tokens: int,
                       cached_prompt_tokens: int = 0) -> float:
         """Estimate cost in USD based on model pricing."""
-        # Try exact match first, then prefix match
-        pricing = self._pricing.get(model)
+        model_name = str(model or "")
+        with self._lock:
+            pricing_snapshot = {key: dict(value) for key, value in self._pricing.items()}
+        # Try exact match first, then longest-prefix match.
+        pricing = pricing_snapshot.get(model_name)
         if pricing is None:
-            for key in self._pricing:
-                if model.startswith(key):
-                    pricing = self._pricing[key]
-                    break
+            best_key: Optional[str] = None
+            for key in pricing_snapshot:
+                if model_name.startswith(key) and (best_key is None or len(key) > len(best_key)):
+                    best_key = key
+            if best_key is not None:
+                pricing = pricing_snapshot[best_key]
         if pricing is None:
             return 0.0
         cached_prompt_tokens = max(0, min(int(cached_prompt_tokens or 0), int(prompt_tokens or 0)))
@@ -163,9 +181,9 @@ class CostTracker:
 
 
 def estimate_tokens(text: str) -> int:
-    """Lightweight heuristic token estimator.
+    """Heuristic token estimator (approximate, not a real tokenizer).
 
-    - CJK characters count as 1 token each.
+    - CJK/表意字符 (Han extensions, Hiragana/Katakana, Hangul, etc.) count as 1 token each.
     - ASCII alphanumeric sequences count as 1 token per sequence.
 
     This is the canonical implementation, replacing the duplicated versions
@@ -173,12 +191,25 @@ def estimate_tokens(text: str) -> int:
     """
     if not text:
         return 0
+
+    def _is_cjk(ch: str) -> bool:
+        code = ord(ch)
+        return (
+            0x3400 <= code <= 0x4DBF  # CJK Ext A
+            or 0x4E00 <= code <= 0x9FFF  # CJK Unified
+            or 0xF900 <= code <= 0xFAFF  # CJK Compatibility
+            or 0x3040 <= code <= 0x30FF  # Hiragana/Katakana
+            or 0x31F0 <= code <= 0x31FF  # Katakana Phonetic Ext
+            or 0xAC00 <= code <= 0xD7AF  # Hangul Syllables
+            or 0x20000 <= code <= 0x2EBEF  # CJK Ext B-F+
+        )
+
     i = 0
     length = len(text)
     tokens = 0
     while i < length:
         ch = text[i]
-        if "\u4e00" <= ch <= "\u9fff":
+        if _is_cjk(ch):
             tokens += 1
             i += 1
             continue

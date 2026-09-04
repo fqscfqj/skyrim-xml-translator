@@ -23,9 +23,10 @@ def check_environment():
 
 
 def collect_data_files():
-    """Return a list of --add-data strings for PyInstaller (Windows format).
+    """Return a list of --add-data strings for PyInstaller.
 
-    Ensures commonly required data files are included if they exist in repo.
+    Uses os.pathsep + absolute paths cross-platform.
+    Note: glossary/ vector files are NOT bundled; self-created at runtime.
     """
     candidates = [
         ('locales', 'locales'),
@@ -38,17 +39,18 @@ def collect_data_files():
         print('Skipping config.json during build to avoid bundling local API keys. Use config.example.json instead.')
     for src, dst in candidates:
         if os.path.exists(src):
-            add_data.append(f'{src};{dst}')
+            abs_src = os.path.abspath(src)
+            add_data.append(f'{abs_src}{os.pathsep}{dst}')
     return add_data
 
 
 def copy_runtime_folders_to_dist(dist_root: str):
-    """Copy runtime folders (locales/prompts) next to the executable.
+    """Copy runtime folders next to the exe (exe旁).
 
     PyInstaller may place bundled datas under the internal extraction directory.
     This ensures the end-user can edit/override JSON files directly in dist.
     """
-    folders = ['locales', 'prompts']
+    folders = ['locales', 'prompts', 'assets']
     for folder in folders:
         src = os.path.abspath(folder)
         if not os.path.isdir(src):
@@ -61,10 +63,27 @@ def copy_runtime_folders_to_dist(dist_root: str):
         shutil.copytree(src, dst)
 
 
+def resolve_icon_path(icon):
+    if not icon:
+        return None
+    candidates = [icon]
+    root, ext = os.path.splitext(icon)
+    if os.name != "nt" and ext.lower() == ".ico":
+        candidates.append(root + ".png")
+        candidates.append(os.path.join("assets", "logo.png"))
+    for cand in candidates:
+        if cand and os.path.exists(cand):
+            return os.path.abspath(cand)
+    return None
+
+
 def build(onefile=True, windowed=True, name='SkyrimXMLTranslator', icon=None,
           clean_build=True, copy_runtime_folders=True):
     print('Starting build process...')
     check_environment()
+
+    if not clean_build:
+        print('Incremental build requested: reusing previous dist/build without --clean.')
 
     if clean_build:
         # Clean up previous build for deterministic release artifacts.
@@ -92,8 +111,11 @@ def build(onefile=True, windowed=True, name='SkyrimXMLTranslator', icon=None,
     else:
         args.append('--onedir')
 
-    if icon and os.path.exists(icon):
-        args.append(f'--icon={icon}')
+    resolved_icon = resolve_icon_path(icon)
+    if resolved_icon:
+        args.append(f'--icon={resolved_icon}')
+    elif icon:
+        print(f'Icon not found, skipping: {icon}')
 
     for data in collect_data_files():
         args.append(f'--add-data={data}')

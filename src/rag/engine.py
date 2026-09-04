@@ -20,9 +20,16 @@ class RAGEngine:
         self.llm_client = llm_client
         self.prompt_manager = PromptManager(config_manager)
 
-        # Resolve paths
-        glossary_path = self.config.get("paths", "glossary_file", "glossary/glossary.json")
-        vector_path = self.config.get("paths", "vector_index_file", "glossary/vector_index.npy")
+        # Resolve paths relative to config dir (supports ~/env + abspath).
+        resolver = getattr(self.config, "resolve_path", None)
+        if callable(resolver):
+            glossary_path = resolver(self.config.get("paths", "glossary_file", "glossary/glossary.json"),
+                                     "glossary/glossary.json")
+            vector_path = resolver(self.config.get("paths", "vector_index_file", "glossary/vector_index.npy"),
+                                   "glossary/vector_index.npy")
+        else:
+            glossary_path = self.config.get("paths", "glossary_file", "glossary/glossary.json")
+            vector_path = self.config.get("paths", "vector_index_file", "glossary/vector_index.npy")
         terms_path = os.path.join(
             os.path.dirname(vector_path) if os.path.dirname(vector_path) else ".",
             "terms_index.json",
@@ -57,11 +64,15 @@ class RAGEngine:
                 func="__init__",
             )
         try:
-            cache_ttl_seconds = max(0.0, float(self.config.get("cache", "cache_ttl_hours", 0)) * 3600)
+            raw_ttl = float(self.config.get("cache", "cache_ttl_hours", 0) or 0)
         except Exception:
-            cache_ttl_seconds = 0
+            raw_ttl = 0.0
+        if raw_ttl < 0:
+            raise ValueError(f"cache_ttl_hours must be >= 0, got {raw_ttl!r}")
+        cache_ttl_seconds = raw_ttl * 3600.0 if raw_ttl > 0 else 0.0
 
-        self._keyword_cache = LRUCache(max_size=max(1000, kw_cache_size // 10), ttl_seconds=cache_ttl_seconds)
+        self._keyword_cache = LRUCache(max_size=max(1000, self._coerce_positive_int(kw_cache_size, 50000) // 10),
+                                       ttl_seconds=cache_ttl_seconds)
         self._embedding_cache = EmbeddingCache(max_size=embed_cache_size, ttl_seconds=cache_ttl_seconds)
 
         self._keyword_extractor = KeywordExtractor(
@@ -176,6 +187,7 @@ class RAGEngine:
         self._embedding_cache.clear()
 
     def reload_embedding_runtime(self, clear_embedding_cache: bool = True) -> VectorIndexStatus:
+        self._fingerprint_mismatch_warned = False
         self._vector_store.embed_dim = VectorStore._coerce_dimension(
             self.config.get("embedding", "dimensions", 1536)
         )
@@ -189,7 +201,11 @@ class RAGEngine:
         self._glossary_mgr.add_term(term, translation, rich_meta=rich_meta)
         try:
             vec = self.llm_client.get_embedding(term)
-            self._vector_store.add_vector(term, vec)
+            self._vector_store.add_vector(
+                term, vec,
+                embedding_fingerprint=self.get_embedding_fingerprint(),
+                glossary_hash=self.get_glossary_fingerprint(),
+            )
         except Exception as e:
             log_emit(None, self.config, "ERROR",
                      f"Error adding term vector: {e}", exc=e,
@@ -214,12 +230,21 @@ class RAGEngine:
 
         applied_deletes = 0
         if deletes:
+            norm_terms = {self._glossary_mgr.normalize_term_key(t) for t in terms_dict.keys()}
+            glossary_norms = {self._glossary_mgr.normalize_term_key(t): t for t in self._glossary_mgr.glossary.keys()}
+            vector_norms = {self._glossary_mgr.normalize_term_key(t): t for t in self._vector_store.terms}
+            vector_term_set = set(self._vector_store.terms)
             for term in list(deletes):
-                if term in terms_dict:
+                term_norm = self._glossary_mgr.normalize_term_key(term)
+                if term_norm in norm_terms:
                     continue
-                if term in self._glossary_mgr.glossary or term in set(self._vector_store.terms):
-                    self._glossary_mgr.delete_term(term)
-                    self._vector_store.delete_vector(term)
+                target_glossary = term if term in self._glossary_mgr.glossary else glossary_norms.get(term_norm)
+                target_vector = term if term in vector_term_set else vector_norms.get(term_norm)
+                if target_glossary is not None or target_vector is not None:
+                    if target_glossary is not None:
+                        self._glossary_mgr.delete_term(target_glossary)
+                    if target_vector is not None:
+                        self._vector_store.delete_vector(target_vector)
                     applied_deletes += 1
             if applied_deletes and log_callback:
                 log_emit(log_callback, self.config, "INFO",
@@ -230,8 +255,9 @@ class RAGEngine:
                          f"Applied {applied_deletes} explicit delete operations from import.",
                          module="rag_engine", func="add_terms_batch")
 
-        # Identify new terms needing embedding
-        new_terms = [t for t in terms_dict if t not in set(self._vector_store.terms)]
+        # Identify new terms needing embedding (build set once, O(N)).
+        existing_indexed = set(self._vector_store.terms)
+        new_terms = [t for t in terms_dict if t not in existing_indexed]
         if not new_terms:
             if log_callback:
                 log_emit(log_callback, self.config, "INFO",
@@ -251,6 +277,8 @@ class RAGEngine:
             progress_callback=progress_callback,
             log_callback=log_callback,
             index_extra={"source": dict(import_source) if isinstance(import_source, dict) else {}},
+            embedding_fingerprint=self.get_embedding_fingerprint(),
+            glossary_hash=self.get_glossary_fingerprint(),
         )
 
     def delete_terms_batch(self, terms_list):
@@ -270,6 +298,7 @@ class RAGEngine:
             log_callback=log_callback,
             force_full=force_full,
             embedding_fingerprint=self.get_embedding_fingerprint(),
+            glossary_hash=self.get_glossary_fingerprint(),
         )
 
     def extract_keywords(self, text, log_callback=None, return_debug: bool = False):
