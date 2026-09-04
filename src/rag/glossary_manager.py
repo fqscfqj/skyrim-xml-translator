@@ -267,14 +267,14 @@ class GlossaryManager:
 
     def _prune_backups(self, path: str, keep: int = 5) -> None:
         try:
-            pattern = f"{path}.bak.*"
-            candidates = sorted(glob.glob(pattern))
-            if len(candidates) > keep:
-                for stale in candidates[:len(candidates) - keep]:
-                    try:
-                        os.remove(stale)
-                    except OSError:
-                        pass
+            for pattern in (f"{path}.bak.*", f"{path}.corrupt.*"):
+                candidates = sorted(glob.glob(pattern))
+                if len(candidates) > keep:
+                    for stale in candidates[:len(candidates) - keep]:
+                        try:
+                            os.remove(stale)
+                        except OSError:
+                            pass
         except Exception:
             pass
 
@@ -283,6 +283,7 @@ class GlossaryManager:
             stamp = time.strftime("%Y%m%d-%H%M%S") + f"-{os.getpid()}"
             corrupt_path = f"{path}.corrupt.{stamp}"
             os.replace(path, corrupt_path)
+            self._prune_backups(path, keep=5)
             return corrupt_path
         except Exception:
             return None

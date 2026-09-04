@@ -32,7 +32,6 @@ class TextAnalyzer:
     _FORMAT_SENTINEL_PATTERN = r"__FMT_(?:[A-Z0-9]+_)?\d{4,}__"
     _FORMAT_SENTINEL_RE = re.compile(_FORMAT_SENTINEL_PATTERN)
     _FORMAT_SENTINEL_RE_IGNORECASE = re.compile(_FORMAT_SENTINEL_PATTERN, re.IGNORECASE)
-    _sentinel_global_serial = 0
     _COMMENT_CDATA_PATTERN = r"<!--.*?-->|<!\[CDATA\[.*?\]\]>"
     _COMMENT_CDATA_RE = re.compile(_COMMENT_CDATA_PATTERN, flags=re.DOTALL)
     _DOLLAR_TOKEN_PATTERN = r"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[^{}]+\}|\d+)"
@@ -468,8 +467,8 @@ class TextAnalyzer:
     def _format_sentinel(prefix: str, index: int) -> str:
         return f"{prefix}{index:04d}__"
 
-    @classmethod
-    def _build_sentinel_prefix(cls, text: str, serial: Optional[int] = None) -> str:
+    @staticmethod
+    def _build_sentinel_prefix(text: str, serial: Optional[int] = None) -> str:
         # Deterministic salt=1 for single builds (keeps __FMT_1_* stable);
         # mix chunk serial for cross-chunk global uniqueness.
         if serial is None:
@@ -484,7 +483,6 @@ class TextAnalyzer:
         salt = base
         while f"__FMT_{salt:X}_" in text:
             salt += 1
-            cls._sentinel_global_serial = salt
         return f"__FMT_{salt:X}_"
 
     def _should_protect_percent_token(self, text: str, start: int, end: int, token: str) -> bool:

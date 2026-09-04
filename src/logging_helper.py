@@ -6,6 +6,7 @@ import os
 import re
 import sys
 import tempfile
+import threading
 import time
 from logging.handlers import RotatingFileHandler
 from typing import Optional, Callable
@@ -19,6 +20,9 @@ LEVELS = {
 }
 
 _SHOULD_EMIT_LAST_WARN = 0.0
+
+_ROTATING_HANDLERS: dict[str, RotatingFileHandler] = {}
+_ROTATING_LOCK = threading.RLock()
 
 
 _SENSITIVE_KEY_RE = re.compile(
@@ -95,18 +99,52 @@ def _resolve_log_file_path(config_manager):
     return os.path.abspath(candidate)
 
 
+def _get_rotating_handler(path: str) -> RotatingFileHandler:
+    with _ROTATING_LOCK:
+        handler = _ROTATING_HANDLERS.get(path)
+        if handler is not None:
+            try:
+                if handler.baseFilename == os.path.abspath(path) and handler.stream:
+                    return handler
+            except Exception:
+                pass
+            try:
+                handler.close()
+            except Exception:
+                pass
+            _ROTATING_HANDLERS.pop(path, None)
+        handler = RotatingFileHandler(path, maxBytes=2 * 1024 * 1024,
+                                      backupCount=3, encoding="utf-8")
+        if len(_ROTATING_HANDLERS) >= 8:
+            oldest, _ = next(iter(_ROTATING_HANDLERS.items()))
+            try:
+                _ROTATING_HANDLERS.pop(oldest, None).close()  # type: ignore[union-attr]
+            except Exception:
+                pass
+        _ROTATING_HANDLERS[path] = handler
+        return handler
+
+
 def _write_via_rotating(path: str, message: str) -> None:
-    handler = RotatingFileHandler(path, maxBytes=2 * 1024 * 1024,
-                                  backupCount=3, encoding="utf-8")
+    key = os.path.abspath(path)
+    try:
+        handler = _get_rotating_handler(key)
+    except Exception:
+        handler = RotatingFileHandler(key, maxBytes=2 * 1024 * 1024,
+                                      backupCount=3, encoding="utf-8")
     try:
         record = logging.LogRecord(name="trx2", level=logging.INFO, pathname="",
                                    lineno=0, msg=message, args=(), exc_info=None)
         handler.emit(record)
-    finally:
-        try:
-            handler.close()
-        except Exception:
-            pass
+    except Exception:
+        with _ROTATING_LOCK:
+            stale = _ROTATING_HANDLERS.pop(key, None)
+            if stale is not None:
+                try:
+                    stale.close()
+                except Exception:
+                    pass
+        raise
 
 
 def _write_log_to_disk(path: Optional[str], message: str) -> None:

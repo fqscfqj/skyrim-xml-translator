@@ -783,12 +783,12 @@ class VectorStore:
         return indices_to_delete
 
     def _embed_terms_ordered(self, batch_terms: list[str], embed_fn: Callable,
-                               num_threads: int) -> dict[str, Any]:
+                               num_threads: int) -> tuple[dict[str, Any], dict[str, str]]:
         """Embed a batch preserving input order. Tries list-batch first."""
         ordered: dict[str, Any] = {}
         errors: dict[str, str] = {}
         if not batch_terms:
-            return ordered
+            return ordered, errors
         # Fast path: list-batch API (LLM client supports list input).
         try:
             maybe_batch = embed_fn(list(batch_terms))  # type: ignore[arg-type]
@@ -797,7 +797,7 @@ class VectorStore:
                     and all(isinstance(v, (list, tuple, np.ndarray)) for v in maybe_batch)):
                 for term, vec in zip(batch_terms, maybe_batch):
                     ordered[term] = vec
-                return ordered
+                return ordered, errors
         except Exception:
             pass
         # Fallback: per-term threaded embedding.
@@ -815,9 +815,7 @@ class VectorStore:
         for term, err in errors.items():
             if term not in ordered:
                 ordered[term] = None
-        # Attach errors via attribute for caller logging.
-        ordered["_errors"] = errors  # type: ignore[assignment]
-        return ordered
+        return ordered, errors
 
     # --- Batch build ---
 
@@ -887,8 +885,7 @@ class VectorStore:
                     break
 
             batch_terms_input = new_terms[i:i + batch_size]
-            ordered = self._embed_terms_ordered(batch_terms_input, embed_fn, num_threads)
-            errors = ordered.pop("_errors", {}) if isinstance(ordered.get("_errors"), dict) else {}
+            ordered, errors = self._embed_terms_ordered(batch_terms_input, embed_fn, num_threads)
 
             batch_results = []
             batch_terms_confirmed = []
@@ -1079,8 +1076,7 @@ class VectorStore:
                     break
 
             batch_terms = terms_to_process[i:i + batch_size]
-            ordered = self._embed_terms_ordered(batch_terms, embed_fn, num_threads)
-            errors = ordered.pop("_errors", {}) if isinstance(ordered.get("_errors"), dict) else {}
+            ordered, errors = self._embed_terms_ordered(batch_terms, embed_fn, num_threads)
 
             batch_vectors = []
             batch_valid_terms = []

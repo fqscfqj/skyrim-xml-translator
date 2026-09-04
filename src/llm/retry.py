@@ -347,7 +347,12 @@ def execute_with_retry(
     """
     from src.logging_helper import emit as log_emit
 
+    try:
+        max_total_attempts = max(0, int(max_retries))
+    except Exception:
+        max_total_attempts = 3
     per_type_attempts: dict[ErrorType, int] = {}
+    total_attempts = 0
     started_at = time.monotonic()
     while True:
         try:
@@ -378,9 +383,15 @@ def execute_with_retry(
 
             per_type_attempts[error_type] = per_type_attempts.get(error_type, 0) + 1
             attempt = per_type_attempts[error_type]
+            total_attempts += 1
             if attempt > strategy.max_retries:
                 log_emit(log_callback, config_manager, "ERROR",
                          f"{log_prefix} retries exhausted ({attempt - 1}/{strategy.max_retries}): {exc}",
+                         exc=exc, module="llm.retry", func="execute_with_retry")
+                raise
+            if total_attempts > max_total_attempts:
+                log_emit(log_callback, config_manager, "ERROR",
+                         f"{log_prefix} retries exhausted (total {total_attempts - 1}/{max_total_attempts}): {exc}",
                          exc=exc, module="llm.retry", func="execute_with_retry")
                 raise
 
