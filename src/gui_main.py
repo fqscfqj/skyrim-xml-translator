@@ -510,9 +510,24 @@ class GlossaryWorker(QThread):
             except Exception:
                 pass
 
+    def _sync_engine_flags(self) -> None:
+        """Push the facade stop/pause flags down to the RAG vector layer."""
+        sync = getattr(self.rag_engine, "_sync_stop_flags", None)
+        if callable(sync):
+            try:
+                sync()
+            except Exception:
+                pass
+
     def stop(self):
         self._stop_event.set()
         self._pause_event.set()
+        try:
+            self.rag_engine.stop_flag = True
+            self.rag_engine.pause_flag = False
+        except Exception:
+            pass
+        self._sync_engine_flags()
         try:
             self.rag_engine.llm_client.close_clients()
         except Exception:
@@ -520,10 +535,20 @@ class GlossaryWorker(QThread):
 
     def pause(self):
         self._pause_event.clear()
+        try:
+            self.rag_engine.pause_flag = True
+        except Exception:
+            pass
+        self._sync_engine_flags()
         log_emit(self.log.emit, self.rag_engine.config, 'INFO', i18n.t("msg_task_paused"), module='gui_main', func='GlossaryWorker.pause')
 
     def resume(self):
         self._pause_event.set()
+        try:
+            self.rag_engine.pause_flag = False
+        except Exception:
+            pass
+        self._sync_engine_flags()
         log_emit(self.log.emit, self.rag_engine.config, 'INFO', i18n.t("msg_task_resumed"), module='gui_main', func='GlossaryWorker.resume')
 
 class Worker(QThread):
@@ -541,6 +566,8 @@ class Worker(QThread):
         self.num_threads = num_threads
         self.is_running = True
         self.stop_receiving = False  # Flag to immediately stop receiving data
+        # P0-02: snapshot of the document generation this worker translates.
+        self.doc_epoch = 0
         self._pause_event = threading.Event()
         self._pause_event.set()  # Initially not paused (set = running)
         self._stop_event = threading.Event()
@@ -731,6 +758,8 @@ class Worker(QThread):
 
             processed_count = 0
             completed_keys = set()
+            # F-04: incremental counter instead of re-summing every completed key.
+            completed_rows = 0
 
             def translate_task(item):
                 if isinstance(item, list):
@@ -975,7 +1004,9 @@ class Worker(QThread):
                                             result_details,
                                         )
 
-                                    completed_keys.add(dedupe_key)
+                                    if dedupe_key not in completed_keys:
+                                        completed_keys.add(dedupe_key)
+                                        completed_rows += len(all_rows)
 
                                     status_line = ""
                                     status_suffix = ""
@@ -1010,7 +1041,9 @@ class Worker(QThread):
                                     all_rows = source_to_rows.get(dedupe_key, [row_idx])
                                     for target_row in all_rows:
                                         self.row_failed.emit(target_row, str(error))
-                                    completed_keys.add(dedupe_key)
+                                    if dedupe_key not in completed_keys:
+                                        completed_keys.add(dedupe_key)
+                                        completed_rows += len(all_rows)
                                     if safe_source:
                                         self.rag_debug_ready.emit(safe_source, {
                                             "original_text": safe_source,
@@ -1028,8 +1061,8 @@ class Worker(QThread):
                         if not self.stop_receiving and future_processed_count > 0:
                             processed_count += future_processed_count
                             # 进度基于总项目数而非唯一项目数，以反映实际完成进度
-                            completed_total = sum(len(source_to_rows.get(key, [])) for key in completed_keys)
-                            self.progress.emit(int(completed_total / total * 100))
+                            if total > 0:
+                                self.progress.emit(int(completed_rows / total * 100))
 
                         # After the warm-up completes, fill the entire pool.
                         # During steady state each completed future contributes
@@ -2147,6 +2180,16 @@ class MainWindow(QMainWindow):
     LOG_FLUSH_INTERVAL_MS = 50
     LOG_FLUSH_BATCH_SIZE = 200
     LOG_QUEUE_MAX_LINES = 5000
+    # P0-01: these are referenced by drag&drop, load_xml_to_table and the
+    # paged table fill; keep them here next to the other GUI limits.
+    SUPPORTED_DROP_SUFFIXES = frozenset({".xml", ".txt"})
+    XML_SIZE_WARN_BYTES = 50 * 1024 * 1024
+    XML_SIZE_HARD_LIMIT_BYTES = 200 * 1024 * 1024
+    TRANS_TABLE_PAGE_SIZE = 200
+    # Item role holding the last text committed to the Dest column so a
+    # purely stylistic itemChanged (background/tooltip) cannot flip a
+    # FAILED/WARNING row back to SUCCESS (P1-19).
+    DEST_LAST_TEXT_ROLE = Qt.ItemDataRole.UserRole + 1
     COLOR_MODE_AUTO = "auto"
     COLOR_MODE_LIGHT = "light"
     COLOR_MODE_DARK = "dark"
@@ -2174,6 +2217,12 @@ class MainWindow(QMainWindow):
         self._log_flush_timer.setInterval(self.LOG_FLUSH_INTERVAL_MS)
         self._log_flush_timer.timeout.connect(self._flush_log_buffer)
 
+        # F-02: coalesce status summary label refreshes (100ms).
+        self._summary_timer = QTimer(self)
+        self._summary_timer.setSingleShot(True)
+        self._summary_timer.setInterval(100)
+        self._summary_timer.timeout.connect(self._refresh_status_summary_labels)
+
         self.llm_client = LLMClient(self.config_manager, log_callback=self.log)
         self.rag_engine = RAGEngine(self.config_manager, self.llm_client)
         self.xml_processor = XMLProcessor()
@@ -2192,6 +2241,17 @@ class MainWindow(QMainWindow):
         self.stop_receiving_results = False  # Flag to immediately stop receiving translation results
         self._translation_task_active = False
         self._glossary_task_active = False
+        self._xml_load_worker = None
+        # P0-02: document generation. Worker results from an older generation
+        # are dropped instead of being written into the newly loaded file.
+        self._doc_epoch = 0
+        # Last document generation that actually had a translation worker; used
+        # to reject late queued results after `self.worker` becomes None.
+        self._active_worker_epoch = 0
+        # F-01/F-06: generation token for the paged table fill chain.
+        self._fill_token = 0
+        # F-07: auto-start translation once a requested load finishes filling.
+        self._pending_translate = False
 
         # Cache for RAG debug info to avoid re-running translation for visualization
         # Key: original_text, Value: debug_info dict
@@ -3014,29 +3074,47 @@ class MainWindow(QMainWindow):
         """
 
     def closeEvent(self, a0: Optional[QCloseEvent]) -> None:
-        # Cooperative cancel only: stop workers + close HTTP clients, no terminate.
+        # P0-03: cooperative shutdown. Stop -> wait for threads -> persist the
+        # translation cache -> close HTTP clients -> accept. Everything is
+        # best-effort so a failing worker/client never blocks or crashes close.
+        workers = (
+            ("xml load", getattr(self, "_xml_load_worker", None), "request_stop"),
+            ("glossary", getattr(self, "glossary_worker", None), "stop"),
+            ("translation", getattr(self, "worker", None), "stop"),
+        )
+        for label, worker, stop_method in workers:
+            if worker is None:
+                continue
+            try:
+                if not worker.isRunning():
+                    continue
+            except Exception:
+                continue
+            try:
+                getattr(worker, stop_method)()
+            except Exception:
+                pass
+            try:
+                stopped = bool(worker.wait(3000))
+            except Exception:
+                stopped = False
+            if not stopped:
+                try:
+                    self.log(
+                        f"{label} worker did not stop within 3s; closing anyway."
+                    )
+                except Exception:
+                    pass
+        try:
+            save_cache = getattr(self.translator, "save_translation_cache", None)
+            if callable(save_cache):
+                save_cache()
+        except Exception:
+            pass
         try:
             self.translator.llm_client.close_clients()
         except Exception:
             pass
-        try:
-            if self._xml_load_worker is not None and self._xml_load_worker.isRunning():
-                try:
-                    self._xml_load_worker.request_stop()
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        if self.worker and self.worker.isRunning():
-            try:
-                self.worker.stop()
-            except Exception:
-                pass
-        if self.glossary_worker and self.glossary_worker.isRunning():
-            try:
-                self.glossary_worker.stop()
-            except Exception:
-                pass
         try:
             self._stop_task_completion_audio()
         except Exception:
@@ -3049,6 +3127,27 @@ class MainWindow(QMainWindow):
             pass
         if a0 is not None:
             a0.accept()
+
+    def _document_swap_blocked(self) -> bool:
+        return bool(
+            getattr(self, "_translation_task_active", False)
+            or getattr(self, "_glossary_task_active", False)
+        )
+
+    def _reject_document_swap(self) -> bool:
+        """P0-02: refuse to swap documents while a worker is still writing rows."""
+        if not self._document_swap_blocked():
+            return False
+        message = i18n.t(
+            "msg_cannot_switch_file_while_task_active",
+            "A translation or glossary task is running. Stop it before opening another file.",
+        )
+        try:
+            self.log(message)
+        except Exception:
+            pass
+        QMessageBox.warning(self, i18n.t("title_warning"), message)
+        return True
 
     def _is_supported_drop_file(self, path: str) -> bool:
         return os.path.splitext(str(path or ""))[1].lower() in self.SUPPORTED_DROP_SUFFIXES
@@ -3075,8 +3174,16 @@ class MainWindow(QMainWindow):
             return False, i18n.t("msg_file_not_found")
         if len(p) > 4096 or len(os.path.basename(p)) > 255:
             return False, i18n.t("msg_invalid_path_length")
+        # Windows absolute paths/UNC/extended-length prefixes legitimately
+        # contain ':' after the drive letter and '?' after '\\?\'; reject the
+        # characters only outside those prefixes.
+        probe = p
+        if probe.startswith("\\\\?\\"):
+            probe = probe[4:]
+        if len(probe) >= 2 and probe[1] == ":" and probe[0].isalpha():
+            probe = probe[2:]
         invalid = set('<>:"|?*\x00')
-        if any(ch in invalid for ch in p):
+        if any(ch in invalid for ch in probe):
             return False, i18n.t("msg_invalid_path_chars")
         if not os.path.exists(p):
             return False, i18n.t("msg_file_not_found")
@@ -3122,6 +3229,8 @@ class MainWindow(QMainWindow):
         if not valid:
             QMessageBox.warning(self, i18n.t("title_warning"),
                                 i18n.t("msg_unsupported_translation_file").format(ext="(drop)"))
+            return
+        if self._reject_document_swap():
             return
         if len(paths) > 1:
             QMessageBox.information(
@@ -3307,7 +3416,7 @@ class MainWindow(QMainWindow):
         header: Optional[QHeaderView] = self.trans_table.horizontalHeader()
         # horizontalHeader() can return None according to type stubs; guard for None to satisfy Pylance
         if header is not None:
-            header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
             header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
             header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.trans_table.itemChanged.connect(self.on_table_item_changed)
@@ -3337,8 +3446,25 @@ class MainWindow(QMainWindow):
 
     def _set_status_summary_refresh_suspended(self, suspended: bool) -> None:
         self.status_summary_refresh_suspended = suspended
-        if not suspended:
+        timer = getattr(self, "_summary_timer", None)
+        if suspended:
+            if timer is not None and timer.isActive():
+                timer.stop()
+            return
+        if timer is not None and timer.isActive():
+            timer.stop()
+        self._refresh_status_summary_labels()
+
+    def _schedule_status_summary_refresh(self) -> None:
+        """F-02: coalesce per-row summary refreshes into a single 100ms tick."""
+        if getattr(self, "status_summary_refresh_suspended", False):
+            return
+        timer = getattr(self, "_summary_timer", None)
+        if timer is None:
             self._refresh_status_summary_labels()
+            return
+        if not timer.isActive():
+            timer.start()
 
     def _get_status_filter_bubble_style(self, status: str, selected: bool) -> str:
         is_dark = self._is_dark_palette()
@@ -3466,7 +3592,7 @@ class MainWindow(QMainWindow):
                 count=counts.get(self.ROW_STATUS_SUCCESS, 0)
             )
         )
-        self._update_status_filter_bubble_styles()
+        # Bubble QSS is only refreshed on filter/theme changes (F-02), not per row.
 
     def _set_row_status(self, row: int, status: str, error: str = "") -> None:
         if row < 0:
@@ -3490,7 +3616,7 @@ class MainWindow(QMainWindow):
         self._update_row_visibility(row)
         self._sync_translation_progress_bar()
         if not self.status_summary_refresh_suspended:
-            self._refresh_status_summary_labels()
+            self._schedule_status_summary_refresh()
 
     def _update_row_visibility(self, row: int) -> None:
         if not hasattr(self, "trans_table"):
@@ -3524,15 +3650,21 @@ class MainWindow(QMainWindow):
                 color = QColor("#F5F5F5")
 
         error_text = self.row_error_map.get(row, "")
-        for col in range(self.trans_table.columnCount()):
-            item = self.trans_table.item(row, col)
-            if item is None:
-                continue
-            item.setBackground(color)
-            if error_text and status in {self.ROW_STATUS_FAILED, self.ROW_STATUS_WARNING}:
-                item.setToolTip(error_text)
-            else:
-                item.setToolTip("")
+        # P1-19: styling must not emit itemChanged (which would be mistaken
+        # for a user edit and could downgrade a FAILED/WARNING row).
+        was_blocked = self.trans_table.blockSignals(True)
+        try:
+            for col in range(self.trans_table.columnCount()):
+                item = self.trans_table.item(row, col)
+                if item is None:
+                    continue
+                item.setBackground(color)
+                if error_text and status in {self.ROW_STATUS_FAILED, self.ROW_STATUS_WARNING}:
+                    item.setToolTip(error_text)
+                else:
+                    item.setToolTip("")
+        finally:
+            self.trans_table.blockSignals(was_blocked)
 
     def _sync_translation_progress_bar(self) -> None:
         if not hasattr(self, "progress_bar"):
@@ -4633,6 +4765,8 @@ class MainWindow(QMainWindow):
     # Note: prompts are intentionally not localized; language changes only affect UI (i18n).
 
     def browse_file(self):
+        if self._reject_document_swap():
+            return
         file_filter = i18n.t(
             "filter_translation_files",
             "Translation files (*.xml *.txt);;XML files (xTranslator, ESP-ESM Translator) (*.xml);;MCM text files (*.txt)",
@@ -4742,7 +4876,29 @@ class MainWindow(QMainWindow):
         except Exception:
             return True
 
-        if not status.is_stale or status.reason != "fingerprint_mismatch":
+        if not status.is_stale:
+            return True
+
+        if status.reason != "fingerprint_mismatch":
+            # partial_build / glossary_mismatch / dimension_mismatch /
+            # size_mismatch / vector_unavailable all disable semantic recall.
+            # Ask the user instead of silently degrading to keyword matching.
+            message = i18n.t(
+                "msg_vector_index_stale_prompt",
+                "Vector index is not ready ({reason}): {detail}\n"
+                "Rebuild the index before translating?",
+            ).format(
+                reason=str(status.reason or "unknown"),
+                detail=str(status.detail or ""),
+            )
+            self.log(message)
+            confirm = QMessageBox.question(
+                self, i18n.t("title_vector_index_mismatch"), message,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if confirm == QMessageBox.StandardButton.Yes:
+                self.rebuild_index()
+                return False
             return True
 
         stored = status.stored_fingerprint or {}
@@ -4772,10 +4928,16 @@ class MainWindow(QMainWindow):
                      module='gui_main', func='start_translation')
             return
 
-        # Ensure file is loaded
+        # Ensure file is loaded. F-07: an empty table means "load first, then
+        # translate"; the paged fill auto-starts the task when it completes.
         if self.trans_table.rowCount() == 0:
-            if not self.load_xml_to_table():
+            if self._pending_translate:
+                # A load is already queued and will start the translation.
                 return
+            self._pending_translate = True
+            if not self.load_xml_to_table():
+                self._pending_translate = False
+            return
 
         # Check vector index fingerprint before starting
         if not self._check_index_fingerprint_before_translate():
@@ -4814,6 +4976,9 @@ class MainWindow(QMainWindow):
         num_threads = self.config_manager.get("threads", "translation", 8)
         self.translator.llm_client.reload_config()  # Reinitialize HTTP clients in case they were closed
         self.worker = Worker(items_to_process, self.translator, num_threads)
+        # P0-02: results are only accepted while this document generation is current.
+        self.worker.doc_epoch = getattr(self, "_doc_epoch", 0)
+        self._active_worker_epoch = self.worker.doc_epoch
         self.worker.log.connect(self.log)
         self.worker.progress.connect(self._handle_translation_progress)
         self.worker.result_ready.connect(self.update_table_row)
@@ -4903,7 +5068,14 @@ class MainWindow(QMainWindow):
             "general", "mcm_output_language_suffix", "source")
         output_path = self.mcm_processor.build_output_path(str(suffix_setting))
         if not output_path:
-            raise RuntimeError(i18n.t("msg_file_not_found"))
+            # MCMProcessor returns "" for both "no file loaded" and an invalid
+            # configured suffix; report the actual cause.
+            if not (self.mcm_processor.file_path or ""):
+                raise RuntimeError(i18n.t("msg_file_not_found"))
+            raise RuntimeError(i18n.t(
+                "msg_invalid_mcm_output_suffix",
+                "Invalid MCM output language suffix '{suffix}' in settings; choose a valid language suffix or 'source'.",
+            ).format(suffix=str(suffix_setting or "").strip()))
 
         source_path = self.mcm_processor.file_path or ""
         same_target = False
@@ -4950,6 +5122,9 @@ class MainWindow(QMainWindow):
         return backup_path
 
     def load_xml_to_table(self):
+        # P0-02: never swap the current document while a task is writing into it.
+        if self._reject_document_swap():
+            return False
         raw_path = self.file_path_input.text().strip()
         ok, err = self._validate_translation_path(raw_path)
         if not ok:
@@ -5014,6 +5189,9 @@ class MainWindow(QMainWindow):
             self.log(message)
             QMessageBox.warning(self, i18n.t("title_warning"), message)
             return
+        # P0-02: new document generation; results from the previous worker
+        # (still keyed by row index) must not be applied to this document.
+        self._doc_epoch = getattr(self, "_doc_epoch", 0) + 1
         self._set_active_file_type(file_type)
         # Keep processor produced in background thread.
         if file_type == FILE_TYPE_MCM:
@@ -5029,47 +5207,67 @@ class MainWindow(QMainWindow):
         self._trans_all_rows = display
         self._fill_trans_table_paged(0)
 
-    def _fill_trans_table_paged(self, start: int):
+    def _fill_trans_table_paged(self, start: int, token: Optional[int] = None) -> None:
         # Paged/virtual fill: insert PAGE_SIZE rows per tick to keep UI alive.
+        # F-06: a stale fill chain (from a previously loaded document) stops
+        # silently instead of continuing with the new rows.
         if start == 0:
-            self.trans_table.setRowCount(0)
-            self.trans_table.blockSignals(True)
-            self.row_status_map.clear()
-            self.row_error_map.clear()
-            self._reset_status_summary_counts()
-            self._set_status_summary_refresh_suspended(True)
-            self.progress_bar.setValue(0)
-            self._sync_translation_progress_bar()
-        rows = self._trans_all_rows
-        end = min(len(rows), start + self.TRANS_TABLE_PAGE_SIZE)
-        if start == 0:
-            self.trans_table.setRowCount(len(rows))
-        untranslated_same = 0
-        for i in range(start, end):
-            node, id_text, source, dest = rows[i]
-            id_item = QTableWidgetItem(id_text)
-            id_item.setFlags(id_item.flags() ^ Qt.ItemFlag.ItemIsEditable)
-            self.trans_table.setItem(i, 0, id_item)
-            source_item = QTableWidgetItem(source)
-            source_item.setFlags(source_item.flags() ^ Qt.ItemFlag.ItemIsEditable)
-            self.trans_table.setItem(i, 1, source_item)
-            source_text = str(source) if source is not None else ""
-            dest_text = str(dest) if dest is not None else ""
-            if source_text.strip() and source_text.strip() == dest_text.strip():
-                untranslated_same += 1
-            dest_item = QTableWidgetItem(dest_text)
-            dest_item.setData(Qt.ItemDataRole.UserRole, node)
-            self.trans_table.setItem(i, 2, dest_item)
-            if source_text.strip() and source_text.strip() == dest_text.strip():
-                self._set_row_status(i, self.ROW_STATUS_UNTRANSLATED)
-            elif str(dest_text).strip():
-                self._set_row_status(i, self.ROW_STATUS_SUCCESS)
-            else:
-                self._set_row_status(i, self.ROW_STATUS_UNTRANSLATED)
-        if end < len(rows):
-            QTimer.singleShot(0, lambda: self._fill_trans_table_paged(end))
+            self._fill_token = getattr(self, "_fill_token", 0) + 1
+        if token is None:
+            token = getattr(self, "_fill_token", 0)
+        if token != getattr(self, "_fill_token", 0):
             return
-        self.trans_table.blockSignals(False)
+        table = self.trans_table
+        rows = getattr(self, "_trans_all_rows", []) or []
+        end = min(len(rows), start + self.TRANS_TABLE_PAGE_SIZE)
+        # F-01: keep repaints off while a page is inserted and auto-size column 0
+        # once at the end of the whole fill chain.
+        table.setUpdatesEnabled(False)
+        try:
+            if start == 0:
+                table.setRowCount(0)
+                table.blockSignals(True)
+                self.row_status_map.clear()
+                self.row_error_map.clear()
+                self._reset_status_summary_counts()
+                self._set_status_summary_refresh_suspended(True)
+                self.progress_bar.setValue(0)
+                self._sync_translation_progress_bar()
+                table.setRowCount(len(rows))
+            untranslated_same = 0
+            for i in range(start, end):
+                node, id_text, source, dest = rows[i]
+                id_item = QTableWidgetItem(id_text)
+                id_item.setFlags(id_item.flags() ^ Qt.ItemFlag.ItemIsEditable)
+                table.setItem(i, 0, id_item)
+                source_item = QTableWidgetItem(source)
+                source_item.setFlags(source_item.flags() ^ Qt.ItemFlag.ItemIsEditable)
+                table.setItem(i, 1, source_item)
+                source_text = str(source) if source is not None else ""
+                dest_text = str(dest) if dest is not None else ""
+                if source_text.strip() and source_text.strip() == dest_text.strip():
+                    untranslated_same += 1
+                dest_item = QTableWidgetItem(dest_text)
+                dest_item.setData(Qt.ItemDataRole.UserRole, node)
+                dest_item.setData(self.DEST_LAST_TEXT_ROLE, dest_text)
+                table.setItem(i, 2, dest_item)
+                if source_text.strip() and source_text.strip() == dest_text.strip():
+                    self._set_row_status(i, self.ROW_STATUS_UNTRANSLATED)
+                elif str(dest_text).strip():
+                    self._set_row_status(i, self.ROW_STATUS_SUCCESS)
+                else:
+                    self._set_row_status(i, self.ROW_STATUS_UNTRANSLATED)
+            if end < len(rows):
+                QTimer.singleShot(0, lambda: self._fill_trans_table_paged(end, token))
+                return
+            table.resizeColumnToContents(0)
+        except Exception:
+            table.blockSignals(False)
+            self._set_status_summary_refresh_suspended(False)
+            raise
+        finally:
+            table.setUpdatesEnabled(True)
+        table.blockSignals(False)
         self._set_status_summary_refresh_suspended(False)
         self._apply_status_filter()
         log_emit(self.log, self.config_manager, 'INFO',
@@ -5085,6 +5283,15 @@ class MainWindow(QMainWindow):
                      module='gui_main', func='load_xml_to_table')
         self.rag_debug_cache.clear()
         self.update_translate_buttons_enabled()
+        # F-07: start the translation the user requested while the table was empty.
+        if getattr(self, "_pending_translate", False):
+            self._pending_translate = False
+            if table.rowCount() > 0:
+                QTimer.singleShot(0, self.start_translation)
+            else:
+                log_emit(self.log, self.config_manager, 'WARNING',
+                         i18n.t("msg_nothing_to_translate"),
+                         module='gui_main', func='start_translation')
 
     def _fill_trans_table_sync(self, strings: list):
         # Synchronous fill kept for tests/headless use (no event loop needed).
@@ -5108,6 +5315,8 @@ class MainWindow(QMainWindow):
             self.trans_table.setItem(i, 1, source_item)
             dest_item = QTableWidgetItem(str(dest) if dest is not None else "")
             dest_item.setData(Qt.ItemDataRole.UserRole, node)
+            dest_item.setData(
+                self.DEST_LAST_TEXT_ROLE, str(dest) if dest is not None else "")
             self.trans_table.setItem(i, 2, dest_item)
             source_text = str(source) if source is not None else ""
             dest_text = str(dest) if dest is not None else ""
@@ -5166,7 +5375,39 @@ class MainWindow(QMainWindow):
                 self.log(i18n.t("msg_error_saving").format(error=e))
                 QMessageBox.critical(self, i18n.t("title_error"), i18n.t("msg_failed_save").format(error=e))
 
+    def _is_stale_worker_result(self) -> bool:
+        """P0-02: True when the active worker belongs to an older document."""
+        # Read straight from the instance dict: a half-initialized window (or a
+        # PyQt object built without __init__) raises on missing-attribute lookup.
+        state = getattr(self, "__dict__", None) or {}
+        worker = state.get("worker")
+        epoch = getattr(worker, "doc_epoch", None)
+        if epoch is None:
+            # A late queued result may arrive after on_translation_finished
+            # cleared self.worker; fall back to the last active generation.
+            epoch = state.get("_active_worker_epoch")
+        if epoch is None:
+            return False
+        try:
+            return int(epoch) != int(state.get("_doc_epoch", 0))
+        except (TypeError, ValueError):
+            return False
+
+    def _remember_dest_text(self, item, text) -> None:
+        if item is None:
+            return
+        try:
+            item.setData(
+                self.DEST_LAST_TEXT_ROLE,
+                str(text) if text is not None else "",
+            )
+        except Exception:
+            pass
+
     def update_table_row(self, row, translation, status="success", details=""):
+        # P0-02: ignore results produced for a previously loaded document.
+        if self._is_stale_worker_result():
+            return
         # Check if we should stop receiving results (cancel was clicked)
         if self.stop_receiving_results:
             return
@@ -5182,14 +5423,18 @@ class MainWindow(QMainWindow):
             if status == self.ROW_STATUS_WARNING and not str(display_text).strip():
                 display_text = source_text
 
-            # Update UI
-            self.trans_table.blockSignals(True)
+            # Update UI (restore the previous signal state: the paged fill may
+            # already have signals blocked).
+            was_blocked = self.trans_table.blockSignals(True)
             try:
-                dest_item.setText(display_text if display_text is not None else "")
-            except Exception as e:
-                # Guard against non-string values passed to setText
-                dest_item.setText(str(display_text) if display_text is not None else "")
-            self.trans_table.blockSignals(False)
+                try:
+                    dest_item.setText(display_text if display_text is not None else "")
+                except Exception:
+                    # Guard against non-string values passed to setText
+                    dest_item.setText(str(display_text) if display_text is not None else "")
+                self._remember_dest_text(dest_item, display_text)
+            finally:
+                self.trans_table.blockSignals(was_blocked)
             
             # Update current file node
             node = dest_item.data(Qt.ItemDataRole.UserRole)
@@ -5198,13 +5443,20 @@ class MainWindow(QMainWindow):
                     self.current_processor.update_dest(
                         node, str(display_text) if display_text is not None else "", overwrite=True)
                 except Exception as e:
+                    # P0-04 integration: an illegal XML character aborts the
+                    # node write; never report the row as SUCCESS afterwards.
                     self.log(f"Error updating row {row}: {e}")
+                    self._set_row_status(row, self.ROW_STATUS_FAILED, str(e))
+                    return
             if status == self.ROW_STATUS_WARNING:
                 self._set_row_status(row, self.ROW_STATUS_WARNING, str(details or ""))
             else:
                 self._set_row_status(row, self.ROW_STATUS_SUCCESS)
 
     def update_table_row_failed(self, row, error):
+        # P0-02: ignore failures produced for a previously loaded document.
+        if self._is_stale_worker_result():
+            return
         if self.stop_receiving_results:
             return
 
@@ -5212,25 +5464,50 @@ class MainWindow(QMainWindow):
         self._set_row_status(row, self.ROW_STATUS_FAILED, str(error))
 
     def on_table_item_changed(self, item):
-        # Only care about Dest column (index 2)
-        if item.column() == 2:
-            node = item.data(Qt.ItemDataRole.UserRole)
-            if node is not None:
-                new_text = item.text()
-                source_item = self.trans_table.item(item.row(), 1)
-                source_text = source_item.text() if source_item is not None else ""
+        # P1-19: only the Dest column is user-editable; ignore everything else
+        # without touching the toolbar state.
+        if item is None or item.column() != 2:
+            return
+        node = item.data(Qt.ItemDataRole.UserRole)
+        new_text = item.text()
+        # A purely stylistic data change (background/tooltip/font) leaves the
+        # text unchanged. Never let it downgrade a FAILED/WARNING row.
+        last_text = item.data(self.DEST_LAST_TEXT_ROLE)
+        if last_text is not None and str(last_text) == str(new_text):
+            self.update_translate_buttons_enabled()
+            return
+        if node is not None:
+            source_item = self.trans_table.item(item.row(), 1)
+            source_text = source_item.text() if source_item is not None else ""
+            try:
                 self.current_processor.update_dest(node, new_text, overwrite=True)
-                if str(new_text).strip() and str(new_text).strip() == str(source_text).strip():
-                    self._set_row_status(
-                        item.row(),
-                        self.ROW_STATUS_WARNING,
-                        "Edited entry currently matches source text",
-                    )
-                elif str(new_text).strip():
-                    self._set_row_status(item.row(), self.ROW_STATUS_SUCCESS)
-                else:
-                    self._set_row_status(item.row(), self.ROW_STATUS_UNTRANSLATED)
-                # self.log(f"Updated translation manually for row {item.row()}")
+            except Exception as exc:
+                # P0-04 integration: XMLProcessor.update_dest raises for
+                # XML-illegal characters. Keep the typed text, but surface the
+                # failure on the row instead of pretending the edit was saved.
+                was_blocked = self.trans_table.blockSignals(True)
+                try:
+                    self._remember_dest_text(item, new_text)
+                finally:
+                    self.trans_table.blockSignals(was_blocked)
+                self._set_row_status(item.row(), self.ROW_STATUS_FAILED, str(exc))
+                self.update_translate_buttons_enabled()
+                return
+            was_blocked = self.trans_table.blockSignals(True)
+            try:
+                self._remember_dest_text(item, new_text)
+            finally:
+                self.trans_table.blockSignals(was_blocked)
+            if str(new_text).strip() and str(new_text).strip() == str(source_text).strip():
+                self._set_row_status(
+                    item.row(),
+                    self.ROW_STATUS_WARNING,
+                    "Edited entry currently matches source text",
+                )
+            elif str(new_text).strip():
+                self._set_row_status(item.row(), self.ROW_STATUS_SUCCESS)
+            else:
+                self._set_row_status(item.row(), self.ROW_STATUS_UNTRANSLATED)
         # Update button enabled state (in case manual edit changed content)
         self.update_translate_buttons_enabled()
 
@@ -5346,6 +5623,9 @@ class MainWindow(QMainWindow):
 
     def cache_rag_debug_info(self, original_text, debug_info):
         """缓存RAG调试信息以供可视化使用"""
+        # P0-02: drop debug info produced for a previously loaded document.
+        if self._is_stale_worker_result():
+            return
         if original_text and debug_info:
             self.rag_debug_cache.put(original_text, debug_info)
 
@@ -5516,6 +5796,12 @@ class MainWindow(QMainWindow):
             self.cancel_btn.setEnabled(True)
         
         num_threads = self.config_manager.get("threads", "vectorization", 8)
+        # Clear stop/pause flags left over from a previous cancelled task.
+        try:
+            self.rag_engine.stop_flag = False
+            self.rag_engine.pause_flag = False
+        except Exception:
+            pass
         self.glossary_worker = GlossaryWorker(self.rag_engine, 'rebuild', num_threads=num_threads)
         self.glossary_worker.log.connect(self.log)
         self.glossary_worker.progress.connect(self.glossary_progress.setValue)
@@ -5582,6 +5868,12 @@ class MainWindow(QMainWindow):
             self.cancel_btn.setEnabled(True)
 
         num_threads = self.config_manager.get("threads", "vectorization", 8)
+        # Clear stop/pause flags left over from a previous cancelled task.
+        try:
+            self.rag_engine.stop_flag = False
+            self.rag_engine.pause_flag = False
+        except Exception:
+            pass
         self.glossary_worker = GlossaryWorker(
             self.rag_engine, 'import', data=fname, num_threads=num_threads,
             confirm_deletes=confirm_deletes,
@@ -5837,7 +6129,10 @@ class MainWindow(QMainWindow):
         for name in removed_param_keys:
             search_fallback_params.pop(name, None)
         
-        self.config_manager.save_config()
+        if not self.config_manager.save_config():
+            QMessageBox.critical(
+                self, i18n.t("title_error"), i18n.t("msg_config_save_failed"))
+            return
         self.llm_client.reload_config()
         embedding_changed = previous_embedding_fingerprint != next_embedding_fingerprint
         if embedding_changed:
@@ -5925,6 +6220,9 @@ class MainWindow(QMainWindow):
         num_threads = self.config_manager.get("threads", "translation", 8)
         self.translator.llm_client.reload_config()  # Reinitialize HTTP clients in case they were closed
         self.worker = Worker(items_to_process, self.translator, num_threads)
+        # P0-02: results are only accepted while this document generation is current.
+        self.worker.doc_epoch = getattr(self, "_doc_epoch", 0)
+        self._active_worker_epoch = self.worker.doc_epoch
         self.worker.log.connect(self.log)
         self.worker.progress.connect(self._handle_translation_progress)
         self.worker.result_ready.connect(self.update_table_row)
