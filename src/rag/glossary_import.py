@@ -79,7 +79,7 @@ _PRIORITY_KEYS = {"priority", "weight", "优先级", "权重"}
 _FORBIDDEN_KEYS = {"forbidden", "forbidden_translations", "banned", "禁用", "禁用译法"}
 _EXAMPLES_KEYS = {"examples", "example", "context", "context_example", "例句", "上下文", "语境"}
 _VARIANTS_KEYS = {"variants", "variant", "alt_translations", "多译法", "变体"}
-_META_SOURCE_KEYS = {"meta_source", "origin", "dict_source", "来源", "出处", "数据来源"}
+_META_SOURCE_KEYS = {"meta_source", "origin", "dict_source", "source", "来源", "出处", "数据来源"}
 _CONFIDENCE_KEYS = {"confidence", "置信度", "score"}
 _UPDATED_AT_KEYS = {"updated_at", "updated", "update_time", "更新时间"}
 _NOTE_KEYS = {"note", "notes", "comment", "remark", "备注", "说明"}
@@ -111,6 +111,7 @@ _TRIAL_DELIMITERS = (",", "\t", ";", "|")
 _MIN_CSV_FIELD_SIZE_LIMIT = 1 << 20  # 1 MiB
 
 _LIST_SPLIT_RE = re.compile(r"[;|｜；\n]+")
+_TRANSLATION_SPLIT_RE = re.compile(r"[;|｜；\n]+")
 
 
 def _split_list_field(value: Any) -> list[str]:
@@ -129,11 +130,32 @@ def _split_list_field(value: Any) -> list[str]:
     return [part.strip() for part in _LIST_SPLIT_RE.split(text) if part.strip()]
 
 
-def _coerce_priority(value: Any) -> Optional[int]:
+def _split_translation_variants(value: Any) -> tuple[str, list[str]]:
+    """Split ``主译;副译;副译`` into (main translation, extra variants) (R-30).
+
+    Only explicit multi-value separators are split; commas are left alone
+    because natural translations (e.g. Chinese lists) commonly contain them.
+    """
+    if value is None:
+        return "", []
+    if isinstance(value, (list, tuple)):
+        parts = [str(item or "").strip() for item in value]
+        parts = [part for part in parts if part]
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return "", []
+        parts = [part.strip() for part in _TRANSLATION_SPLIT_RE.split(text) if part.strip()]
+    if not parts:
+        return "", []
+    return parts[0], parts[1:]
+
+
+def _coerce_priority(value: Any) -> Optional[float]:
     try:
         if value is None or (isinstance(value, str) and not value.strip()):
             return None
-        return int(float(str(value).strip()))
+        return float(str(value).strip())
     except Exception:
         return None
 
@@ -174,7 +196,7 @@ def _build_header_map(header: list[str]) -> tuple[dict[str, int], int]:
     claim(_FORBIDDEN_KEYS, "forbidden")
     claim(_EXAMPLES_KEYS, "examples")
     claim(_VARIANTS_KEYS, "variants")
-    claim(_META_SOURCE_KEYS, "meta_source")
+    claim(_META_SOURCE_KEYS, "source")
     claim(_CONFIDENCE_KEYS, "confidence")
     claim(_UPDATED_AT_KEYS, "updated_at")
     claim(_NOTE_KEYS, "note")
@@ -263,12 +285,31 @@ def _detect_delimiter(sample_text: str, extension: str) -> str:
     return best
 
 
-def _read_text_with_encoding(file_path: str) -> tuple[str, str]:
-    """Read full text preferring utf-8-sig; raise explicit error otherwise.
+def _decode_utf16_without_bom(raw: bytes) -> Optional[tuple[str, str]]:
+    """Decode BOM-less UTF-16 by picking the endianness with the NUL pattern."""
+    even_nuls = raw[0::2].count(0)
+    odd_nuls = raw[1::2].count(0)
+    order = ("utf-16-le", "utf-16-be") if odd_nuls >= even_nuls else ("utf-16-be", "utf-16-le")
+    for encoding in order:
+        try:
+            text = raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+        # A successful decode must not leave embedded NUL characters behind.
+        if "\x00" in text:
+            continue
+        return text, encoding
+    return None
 
-    UTF-16 (with or without BOM) and embedded NUL bytes are rejected up front
-    with an actionable message instead of silently importing ``S\\x00w\\x00...``
-    as term surfaces (G-07).
+
+def _read_text_with_encoding(file_path: str) -> tuple[str, str]:
+    """Read full text, tolerating UTF-8 BOM and BOM-less UTF-16 (G-07).
+
+    UTF-16 files (with or without BOM) and NUL-laden content used to be
+    rejected outright; they are now re-decoded so a Notepad "Unicode" export
+    imports instead of failing.  Genuinely non-UTF-8 single-byte encodings
+    (GBK/ANSI) still raise an explicit error: silently guessing them produced
+    mojibake, so the user is asked to convert instead.
     """
     try:
         with open(file_path, "rb") as handle:
@@ -286,15 +327,16 @@ def _read_text_with_encoding(file_path: str) -> tuple[str, str]:
         except UnicodeDecodeError as exc:
             _raise_decode_error(file_path, exc)
     if raw.startswith(codecs.BOM_UTF16_LE) or raw.startswith(codecs.BOM_UTF16_BE):
-        raise GlossaryImportError(
-            f"导入文件 '{file_path}' 是 UTF-16 编码（检测到 UTF-16 BOM）。"
-            "请另存为 UTF-8（含/不含 BOM 均可）后重试，直接导入会被拒绝以避免乱码入库。"
-        )
-    if b"\x00" in raw[:65536]:
-        raise GlossaryImportError(
-            f"导入文件 '{file_path}' 含 NUL 字节（通常是 UTF-16/二进制文件）。"
-            "请另存为 UTF-8 文本后重试，直接导入会被拒绝以避免乱码入库。"
-        )
+        try:
+            return raw.decode("utf-16"), "utf-16"
+        except UnicodeDecodeError as exc:
+            _raise_decode_error(file_path, exc)
+    if b"\x00" in raw[:65536] or (
+        len(raw) >= 4 and (raw[0::2].count(0) or raw[1::2].count(0))
+    ):
+        decoded = _decode_utf16_without_bom(raw)
+        if decoded is not None:
+            return decoded
     try:
         return raw.decode("utf-8"), "utf-8"
     except UnicodeDecodeError as exc:
@@ -357,6 +399,17 @@ def _apply_entry(
     term = (term or "").strip()
     translation = (translation or "").strip()
     op = (raw_op or "").strip().lower()
+    # R-30: multi-translation surfaces ("甲;乙;丙" or a JSON list) become the
+    # primary translation plus explicit variants instead of dropping the rest.
+    translation, derived_variants = _split_translation_variants(translation)
+    if derived_variants:
+        existing_variants = _split_list_field(rich.get("variants"))
+        merged: list[str] = []
+        for candidate in [*existing_variants, *derived_variants]:
+            if candidate and candidate != translation and candidate not in merged:
+                merged.append(candidate)
+        if merged:
+            rich["variants"] = merged
     if op and op not in _DELETE_OPS and op not in _UPSERT_OPS:
         # G-09: unknown operations used to be silently treated as upsert.
         _record_invalid(
@@ -398,6 +451,22 @@ def _apply_entry(
             result.rich_meta.pop(existing, None)
     result.terms[term] = translation
     cleaned = {key: value for key, value in rich.items() if value not in (None, "", [], {})}
+    if max_field_chars:
+        # G-08: rich fields must obey the same size cap as term/translation,
+        # otherwise a 5000-char note slips past max_field_chars unnoticed.
+        for key, value in list(cleaned.items()):
+            too_long = (
+                isinstance(value, str) and len(value) > max_field_chars
+            ) or (
+                isinstance(value, (list, tuple))
+                and any(len(str(item)) > max_field_chars for item in value)
+            )
+            if too_long:
+                cleaned.pop(key, None)
+                _record_limited(
+                    result,
+                    f"{line_hint}富字段 '{key}' 超限（>{max_field_chars}字符）已丢弃：{term[:30]}",
+                )
     if cleaned:
         result.rich_meta[term] = cleaned
 
@@ -485,7 +554,7 @@ def parse_delimited_text(
             term = col("term")
             translation = col("translation")
             rich: dict[str, Any] = {}
-            for key in ("domain", "pos", "meta_source", "updated_at", "note"):
+            for key in ("domain", "pos", "source", "updated_at", "note"):
                 value = col(key)
                 if value:
                     rich[key] = value
@@ -557,11 +626,30 @@ def _entry_from_json_object(obj: Any) -> tuple[str, str, dict[str, Any], str, in
         return None
 
     term = pick(_JSON_TERM_KEYS_ORDER)
+    explicit_term = pick(("term", "source_text", "en", "原文", "英文"))
     if not term:
         term = pick(tuple(sorted(_TERM_KEYS)))
     translation = pick(_JSON_TRANSLATION_KEYS_ORDER)
     if not translation:
         translation = pick(tuple(sorted(_TRANSLATION_KEYS)))
+
+    # R-30: a JSON translation list keeps the first entry as the main
+    # translation and the rest as variants instead of dropping value[1:].
+    extra_variants: list[str] = []
+    raw_translation: Any = None
+    lowered_keys = {str(key).strip().lower(): value for key, value in obj.items()}
+    for key in _JSON_TRANSLATION_KEYS_ORDER:
+        candidate = obj.get(key, lowered_keys.get(key))
+        if isinstance(candidate, (list, tuple)) and candidate:
+            raw_translation = candidate
+            break
+    if raw_translation is not None:
+        parts = [str(item or "").strip() for item in raw_translation]
+        parts = [part for part in parts if part]
+        if parts:
+            translation = parts[0]
+            extra_variants = parts[1:]
+
     op = pick(tuple(sorted(_OP_KEYS)))
 
     rich: dict[str, Any] = {}
@@ -572,6 +660,10 @@ def _entry_from_json_object(obj: Any) -> tuple[str, str, dict[str, Any], str, in
     if pos:
         rich["pos"] = pos
     meta_source = pick(tuple(sorted(_META_SOURCE_KEYS)))
+    if meta_source and not explicit_term and _normalize_import_key(meta_source) == _normalize_import_key(term):
+        # In a legacy entry `source` can be the term surface; do not also store
+        # it as provenance in that case.
+        meta_source = ""
     if meta_source:
         rich["source"] = meta_source
     updated_at = pick(tuple(sorted(_UPDATED_AT_KEYS)))
@@ -595,6 +687,13 @@ def _entry_from_json_object(obj: Any) -> tuple[str, str, dict[str, Any], str, in
         items = _split_list_field(raw)
         if items:
             rich[logical] = items
+    if extra_variants:
+        merged = [v for v in rich.get("variants", []) if v]
+        for variant in extra_variants:
+            if variant and variant != translation and variant not in merged:
+                merged.append(variant)
+        if merged:
+            rich["variants"] = merged
     return term, translation, rich, op, unknown
 
 
@@ -649,7 +748,10 @@ def parse_json_text(
                 merged.setdefault("term", term_key)
                 entries.append(merged)
             elif isinstance(value, (list, tuple)) and len(value) >= 1:
-                entries.append({"term": term_key, "translation": str(value[0] or "")})
+                # Keep the whole list: the first entry is the main translation,
+                # the rest become variants (R-30).
+                entries.append({"term": term_key,
+                                "translation": [str(item or "") for item in value]})
             else:
                 entries.append({"term": str(term_key), "translation": str(value or "")})
         if not isinstance(payload, dict) or "terms" not in payload:

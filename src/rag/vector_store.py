@@ -8,6 +8,7 @@ import re
 import shutil
 import threading
 import time
+import uuid
 from threading import Condition, RLock
 from typing import Optional, Callable, Any, Iterator
 
@@ -27,6 +28,9 @@ class VectorIndexStatus:
     stored_fingerprint: dict[str, Any] = field(default_factory=dict)
     term_count: int = 0
     vector_count: int = 0
+    # R-26: True when the terms file could not be accepted verbatim (empty or
+    # non-string entries).  Such indexes are refused, never silently truncated.
+    terms_mismatch: bool = False
 
 
 @dataclass
@@ -91,6 +95,18 @@ class VectorStore:
         self._active_readers = 0
         self._pending_writers = 0
         self._mutation_lock = RLock()
+        # R-29: serializes metadata read-modify-write cycles (normalization
+        # detection used to race the rebuild/status writers).
+        self._metadata_lock = RLock()
+        # R-29: guards the lexical inverted indexes; readers snapshot references
+        # under the lock so an append can never mutate a set during iteration.
+        self._lexical_lock = RLock()
+        # R-23/R-24: preallocated writable row buffer.  ``self.vectors`` is a
+        # view of its first N rows; appending never reallocates the whole matrix.
+        self._vector_buffer: Optional[np.ndarray] = None
+        self._checkpoint_stats = {"count": 0, "rows": 0, "bytes": 0}
+        # R-26: set when the on-disk terms list had to be rejected.
+        self._terms_mismatch = False
 
         # Lazy glossary-hash providers, registered by RAGEngine (R-21). The key
         # hash only covers the glossary key set so translation-only edits do not
@@ -258,6 +274,106 @@ class VectorStore:
         with self._vector_write_guard():
             self._close_mmap_locked()
             self.vectors = new_vectors
+            buffer = self._vector_buffer
+            if buffer is not None and (
+                new_vectors is None or getattr(new_vectors, "base", None) is not buffer
+            ):
+                # The new matrix is not a view of the writable row buffer.
+                self._vector_buffer = None
+
+    # --- Preallocated row buffer (R-23/R-24) ---
+
+    @staticmethod
+    def _grow_capacity(current: int, required: int) -> int:
+        """Growth policy: 1.5x the current capacity, never below ``required``."""
+        required = max(0, int(required))
+        current = max(0, int(current))
+        grown = int(current * 1.5) + 1
+        return max(required, grown)
+
+    def _ensure_vector_capacity_locked(self, required: int) -> None:
+        """Make sure the writable buffer can hold ``required`` rows.
+
+        Caller must hold the vector write guard.  The buffer grows geometrically
+        (1.5x) so an N-row build performs O(log N) reallocations instead of the
+        two full ``vstack`` copies per batch the old code paid.
+        """
+        required = max(0, int(required))
+        if required <= 0:
+            return
+        dimensions = int(self.embed_dim)
+        current = self.vectors
+        try:
+            current_rows = int(current.shape[0]) if current is not None and int(current.ndim) == 2 else 0
+        except Exception:
+            current_rows = 0
+        buffer = self._vector_buffer
+        buffer_is_current = (
+            buffer is not None
+            and (current is None or getattr(current, "base", None) is buffer)
+        )
+        if (
+            buffer_is_current
+            and int(getattr(buffer, "ndim", 0)) == 2
+            and int(buffer.shape[1]) == dimensions
+            and int(buffer.shape[0]) >= required
+        ):
+            return
+        old_rows = int(buffer.shape[0]) if buffer is not None else current_rows
+        target_rows = self._grow_capacity(old_rows, required)
+        new_buffer = np.empty((target_rows, dimensions), dtype=np.float32)
+        if current is not None and current_rows:
+            new_buffer[:current_rows] = np.asarray(current, dtype=np.float32)
+        # The old matrix may be an mmap; close it while readers are drained.
+        self._close_mmap_locked()
+        self._vector_buffer = new_buffer
+        self.vectors = new_buffer[:current_rows] if current_rows else None
+
+    def _ensure_vector_capacity(self, required: int) -> None:
+        """Public entry point: ensure the row buffer holds ``required`` rows."""
+        with self._vector_write_guard():
+            self._ensure_vector_capacity_locked(required)
+
+    def _append_vectors_preallocated(self, rows: np.ndarray) -> int:
+        """Append rows into the preallocated buffer; return the new row count."""
+        rows = np.asarray(rows, dtype=np.float32)
+        if rows.ndim == 1:
+            rows = rows.reshape(1, -1)
+        if rows.ndim != 2 or rows.shape[0] == 0:
+            return len(self.terms)
+        new_rows = int(rows.shape[0])
+        with self._vector_write_guard():
+            current = self.vectors
+            if current is not None and int(current.shape[1]) != int(rows.shape[1]):
+                raise RuntimeError(
+                    "Refusing to append vectors with a different dimension: "
+                    f"{rows.shape[1]} != {current.shape[1]}"
+                )
+            current_rows = int(current.shape[0]) if current is not None else 0
+            required = current_rows + new_rows
+            self._ensure_vector_capacity_locked(required)
+            buffer = self._vector_buffer
+            if buffer is None or int(buffer.shape[1]) != int(rows.shape[1]):
+                raise RuntimeError("Vector buffer unavailable after capacity growth")
+            buffer[current_rows:required] = rows
+            self.vectors = buffer[:required]
+            self._vectors_are_normalized = True
+            return required
+
+    def get_checkpoint_stats(self) -> dict[str, int]:
+        """Diagnostics: how much full-index writing the build performed (R-23)."""
+        return dict(self._checkpoint_stats)
+
+    def _record_checkpoint(self) -> None:
+        try:
+            rows = int(self.vectors.shape[0]) if self.vectors is not None else 0
+            dims = int(self.vectors.shape[1]) if self.vectors is not None else 0
+        except Exception:
+            rows, dims = 0, 0
+        self._checkpoint_stats["count"] += 1
+        self._checkpoint_stats["rows"] += rows
+        self._checkpoint_stats["bytes"] += rows * dims * 4
+
 
     def set_glossary_hash_provider(self, key_hash_provider=None,
                                    content_hash_provider=None,
@@ -363,6 +479,21 @@ class VectorStore:
                                glossary_hash: Optional[str] = None,
                                complete: Optional[bool] = None,
                                expected_term_count: Optional[int] = None) -> None:
+        """Serialize metadata under a store-level RLock (R-29 read-modify-write)."""
+        with self._metadata_lock:
+            self._save_index_metadata_locked(
+                embedding_fingerprint=embedding_fingerprint,
+                extra=extra,
+                glossary_hash=glossary_hash,
+                complete=complete,
+                expected_term_count=expected_term_count,
+            )
+
+    def _save_index_metadata_locked(self, embedding_fingerprint: Optional[dict[str, Any]] = None,
+                               extra: Optional[dict[str, Any]] = None,
+                               glossary_hash: Optional[str] = None,
+                               complete: Optional[bool] = None,
+                               expected_term_count: Optional[int] = None) -> None:
         parent = os.path.dirname(self.meta_path)
         if parent:
             os.makedirs(parent, exist_ok=True)
@@ -440,22 +571,26 @@ class VectorStore:
 
     def _write_metadata_atomic(self, metadata: dict[str, Any]) -> None:
         # Thread-unique tmp name: two threads must never share a tmp file (R-29).
-        tmp_path = f"{self.meta_path}.tmp.{os.getpid()}.{threading.get_ident()}"
-        try:
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(metadata, f, indent=4, ensure_ascii=False)
-                f.flush()
-                try:
-                    os.fsync(f.fileno())
-                except Exception:
-                    pass
-            self._replace_with_retry(tmp_path, self.meta_path)
-        finally:
-            if os.path.exists(tmp_path):
-                try:
-                    os.remove(tmp_path)
-                except OSError:
-                    pass
+        tmp_path = (
+            f"{self.meta_path}.tmp.{os.getpid()}."
+            f"{threading.get_ident()}.{uuid.uuid4().hex}"
+        )
+        with self._metadata_lock:
+            try:
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump(metadata, f, indent=4, ensure_ascii=False)
+                    f.flush()
+                    try:
+                        os.fsync(f.fileno())
+                    except Exception:
+                        pass
+                self._replace_with_retry(tmp_path, self.meta_path)
+            finally:
+                if os.path.exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
 
     def _metadata_normalization_state(self) -> Optional[bool]:
         normalization = self._index_metadata.get("normalization")
@@ -471,15 +606,20 @@ class VectorStore:
             # A rebuild owns the metadata file; it is rewritten at checkpoints
             # with complete=False and at completion. Do not clobber it (R-29).
             return
-        if not self._index_metadata or self._vectors_are_normalized is None:
+        if self._vectors_are_normalized is None:
             return
-        metadata = dict(self._index_metadata)
-        metadata["normalization"] = {
-            "version": self._NORMALIZATION_VERSION,
-            "unit_l2": self._vectors_are_normalized,
-        }
-        self._write_metadata_atomic(metadata)
-        self._index_metadata = metadata
+        # R-29: read-modify-write of the metadata document must be atomic with
+        # respect to other writers (rebuild checkpoints, status refreshes).
+        with self._metadata_lock:
+            if not self._index_metadata:
+                return
+            metadata = dict(self._index_metadata)
+            metadata["normalization"] = {
+                "version": self._NORMALIZATION_VERSION,
+                "unit_l2": bool(self._vectors_are_normalized),
+            }
+            self._write_metadata_atomic(metadata)
+            self._index_metadata = metadata
 
     def _ensure_normalization_state(self, vectors: Optional[np.ndarray] = None) -> bool:
         if vectors is None:
@@ -594,15 +734,24 @@ class VectorStore:
                 is_stale=True,
                 reason="size_mismatch",
                 detail=(
-                    f"Terms index count {term_count} does not match vector row count {vector_count}."
+                    f"Terms index count {term_count} does not match vector row count {vector_count}. "
+                    "Full rebuild required."
                 ),
                 current_fingerprint=current_fingerprint,
                 stored_fingerprint=stored_fingerprint,
                 term_count=term_count,
                 vector_count=vector_count,
+                terms_mismatch=True,
             )
 
-        if not meta_exists or not stored_fingerprint:
+        # R-27: presence of the stored embedding fingerprint is the real
+        # metadata marker.  ``_normalize_embedding_fingerprint`` always returns
+        # three keys, so ``not stored_fingerprint`` was permanently False and a
+        # legacy metadata file without an ``embedding`` section looked ready.
+        metadata = self._index_metadata if isinstance(self._index_metadata, dict) else {}
+        if not meta_exists or "embedding" not in metadata or not isinstance(
+            metadata.get("embedding"), dict
+        ):
             return VectorIndexStatus(
                 is_ready=False,
                 is_stale=True,
@@ -776,6 +925,82 @@ class VectorStore:
                 return None
         return None
 
+    def _detect_sampled_normalization(self, max_rows: int = 64) -> Optional[bool]:
+        """Sample up to ``max_rows`` rows and classify their L2 norms (R-27).
+
+        Returns True when every sampled row is unit-length, False when none is,
+        and None for an empty/mixed/invalid sample.  A metadata ``unit_l2`` of
+        True is cross-checked against this so a mixed-normalization index can no
+        longer take the dot-product path silently.
+        """
+        with self._vector_read_guard() as vectors:
+            if vectors is None:
+                return None
+            try:
+                if int(getattr(vectors, "ndim", 0)) != 2:
+                    return None
+                total = int(vectors.shape[0])
+                dim = int(vectors.shape[1])
+                if total <= 0 or dim <= 0:
+                    return None
+                max_rows = max(1, int(max_rows))
+                if total <= max_rows:
+                    rows = list(range(total))
+                else:
+                    step = max(1, total // max_rows)
+                    rows = list(range(0, total, step))[:max_rows]
+                    if total - 1 not in rows:
+                        rows.append(total - 1)
+                sample = np.asarray(vectors[np.asarray(rows, dtype=np.intp)], dtype=np.float32)
+                finite = np.all(np.isfinite(sample), axis=1)
+                if not finite.any():
+                    return None
+                sample = sample[finite]
+                norms = np.linalg.norm(sample, axis=1)
+                near_unit = np.isclose(
+                    norms, 1.0, rtol=0.0, atol=self._NORMALIZATION_ATOL
+                )
+                if bool(np.all(near_unit)):
+                    return True
+                if not bool(np.any(near_unit)):
+                    return False
+                return None
+            except Exception:
+                return None
+
+    def _reconcile_normalization_state(self) -> None:
+        """Reconcile stored ``unit_l2`` with a sample of the loaded rows (R-27)."""
+        detected = self._detect_sampled_normalization()
+        stored = self._vectors_are_normalized
+        if detected is None:
+            # Mixed rows: normalizing at query time is always correct.
+            if stored is True:
+                self._vectors_are_normalized = False
+                self._persist_normalization_best_effort()
+            return
+        if stored is None:
+            self._vectors_are_normalized = bool(detected)
+            self._persist_normalization_best_effort()
+        elif stored is True and not detected:
+            log_emit(None, self.config, "WARNING",
+                     "Vector metadata claimed unit-L2 vectors but sampled rows are not "
+                     "normalized; switching to per-query normalization (R-27).",
+                     module="vector_store", func="load")
+            self._vectors_are_normalized = False
+            self._persist_normalization_best_effort()
+        elif stored is False and detected:
+            # All sampled rows are unit-length: safe to take the fast path.
+            self._vectors_are_normalized = True
+            self._persist_normalization_best_effort()
+
+    def _persist_normalization_best_effort(self) -> None:
+        try:
+            self._persist_detected_normalization_state()
+        except Exception as e:
+            log_emit(None, self.config, "WARNING",
+                     f"Failed to persist vector normalization metadata: {e}",
+                     exc=e, module="vector_store", func="load")
+
     def load(self) -> None:
         """Load terms index and vector index from disk."""
         if self._rebuild_active:
@@ -786,31 +1011,101 @@ class VectorStore:
                      module="vector_store", func="load")
             return
         self.terms = []
+        self._terms_mismatch = False
+        terms_corrupt_detail = ""
         if os.path.exists(self.terms_path):
+            loaded_terms: Any = None
             try:
                 with open(self.terms_path, "r", encoding="utf-8") as f:
                     loaded_terms = json.load(f)
-                if isinstance(loaded_terms, list):
-                    # Filter element types: keep only non-empty strings.
-                    self.terms = [t for t in loaded_terms if isinstance(t, str) and t.strip()]
+            except Exception as e:
+                # R-28: rebuild writes *.bak; try it before declaring corruption.
+                backup_path = f"{self.terms_path}.bak"
+                if os.path.exists(backup_path):
+                    try:
+                        with open(backup_path, "r", encoding="utf-8") as f:
+                            loaded_terms = json.load(f)
+                        log_emit(None, self.config, "WARNING",
+                                 f"Terms index unreadable ({e}); loaded .bak fallback.",
+                                 exc=e, module="vector_store", func="load")
+                    except Exception:
+                        loaded_terms = None
+                if loaded_terms is None:
+                    terms_corrupt_detail = f"terms index unreadable ({e})"
+            if loaded_terms is not None:
+                if not isinstance(loaded_terms, list):
+                    terms_corrupt_detail = "terms index root is not a list"
                 else:
-                    self.terms = []
-            except Exception:
-                self.terms = []
+                    # R-26: filtering here (the old code dropped empty/non-string
+                    # entries but kept the .npy untouched) silently shifted every
+                    # following row.  Any malformed entry now rejects the index.
+                    accepted: list[str] = []
+                    for position, term in enumerate(loaded_terms):
+                        if not isinstance(term, str) or not term.strip():
+                            terms_corrupt_detail = (
+                                f"row {position} is not a non-empty string term"
+                            )
+                            break
+                        accepted.append(term)
+                    if not terms_corrupt_detail:
+                        self.terms = accepted
+        if terms_corrupt_detail:
+            self._terms_mismatch = True
 
         self._index_metadata = self._load_index_metadata()
         self._vectors_are_normalized = self._metadata_normalization_state()
 
+        if self._terms_mismatch:
+            # Refuse the index instead of loading a misaligned terms/vectors pair.
+            self._close_mmap()
+            self.terms = []
+            self._rebuild_lexical_index()
+            self._index_status = VectorIndexStatus(
+                is_ready=False,
+                is_stale=True,
+                reason="terms_corrupt",
+                detail=(
+                    f"Terms index rejected: {terms_corrupt_detail}. "
+                    "No rows are filtered or truncated; rebuild required."
+                ),
+                current_fingerprint=self.current_embedding_fingerprint(),
+                stored_fingerprint=self._normalize_embedding_fingerprint(
+                    self._index_metadata.get("embedding")
+                    if isinstance(self._index_metadata, dict) else {}
+                ),
+                term_count=0,
+                vector_count=0,
+                terms_mismatch=True,
+            )
+            log_emit(None, self.config, "ERROR",
+                     f"Vector index refused: {terms_corrupt_detail}. "
+                     "Rebuild required (files preserved).",
+                     module="vector_store", func="load")
+            return
+
         self._close_mmap()
+        # Any writable growth buffer belongs to the previous in-memory matrix.
+        self._vector_buffer = None
         if os.path.exists(self.vector_path):
             try:
                 self.vectors = np.load(self.vector_path, mmap_mode="r")
             except Exception as e:
-                # npy failure: keep terms and metadata, mark stale only.
+                # R-28: fall back to the rebuild backup before giving up.
+                backup_path = f"{self.vector_path}.bak"
                 self.vectors = None
-                log_emit(None, self.config, "WARNING",
-                         f"Failed to load vector index (marked stale, files preserved): {e}",
-                         exc=e, module="vector_store", func="load")
+                if os.path.exists(backup_path):
+                    try:
+                        self.vectors = np.load(backup_path, mmap_mode="r")
+                        log_emit(None, self.config, "WARNING",
+                                 f"Vector index unreadable ({e}); loaded .bak fallback.",
+                                 exc=e, module="vector_store", func="load")
+                    except Exception:
+                        self.vectors = None
+                if self.vectors is None:
+                    # npy failure: keep terms and metadata, mark stale only.
+                    log_emit(None, self.config, "WARNING",
+                             f"Failed to load vector index (marked stale, files preserved): {e}",
+                             exc=e, module="vector_store", func="load")
 
         invalid_row = self._detect_non_finite_rows()
         if invalid_row is not None:
@@ -833,8 +1128,12 @@ class VectorStore:
                 ),
                 term_count=len(self.terms),
                 vector_count=0,
+                terms_mismatch=len(self.terms) == 0 and os.path.exists(self.terms_path),
             )
         else:
+            # R-27: verify the stored normalization claim against real rows.
+            if self.vectors is not None and self.terms:
+                self._reconcile_normalization_state()
             self._index_status = self._evaluate_index_status()
         if self._index_status.is_stale:
             if self.vectors is not None:
@@ -890,31 +1189,45 @@ class VectorStore:
         return trigrams
 
     def _rebuild_lexical_index(self) -> None:
-        self._normalized_terms = []
-        self._token_to_indices = {}
-        self._trigram_to_indices = {}
+        # Build into locals, then swap under the lock: a search thread iterating
+        # the previous snapshot never observes a half-built index (R-29).
+        normalized_terms: list[str] = []
+        token_to_indices: dict[str, list[int]] = {}
+        trigram_to_indices: dict[str, set[int]] = {}
         for idx, term in enumerate(self.terms):
-            self._add_term_to_lexical_index(idx, term)
-        self._lexical_index_dirty = False
+            normalized = self._normalize_term_key(term)
+            normalized_terms.append(normalized)
+            for token in set(t for t in normalized.split() if t):
+                token_to_indices.setdefault(token, []).append(idx)
+            for trigram in self._extract_trigrams(normalized):
+                trigram_to_indices.setdefault(trigram, set()).add(idx)
+        with self._lexical_lock:
+            self._normalized_terms = normalized_terms
+            self._token_to_indices = token_to_indices
+            self._trigram_to_indices = trigram_to_indices
+            self._lexical_index_dirty = False
 
     def _mark_lexical_index_dirty(self) -> None:
-        self._lexical_index_dirty = True
+        with self._lexical_lock:
+            self._lexical_index_dirty = True
 
     def _ensure_lexical_index(self) -> None:
-        if self._lexical_index_dirty or len(self._normalized_terms) != len(self.terms):
-            self._rebuild_lexical_index()
+        with self._lexical_lock:
+            if self._lexical_index_dirty or len(self._normalized_terms) != len(self.terms):
+                self._rebuild_lexical_index()
 
     def _append_terms_to_lexical_index(self, terms: list[str]) -> None:
         if not terms:
             return
-        if self._lexical_index_dirty:
-            return
-        start_idx = len(self.terms) - len(terms)
-        if start_idx < 0 or len(self._normalized_terms) != start_idx:
-            self._mark_lexical_index_dirty()
-            return
-        for offset, term in enumerate(terms):
-            self._add_term_to_lexical_index(start_idx + offset, term)
+        with self._lexical_lock:
+            if self._lexical_index_dirty:
+                return
+            start_idx = len(self.terms) - len(terms)
+            if start_idx < 0 or len(self._normalized_terms) != start_idx:
+                self._mark_lexical_index_dirty()
+                return
+            for offset, term in enumerate(terms):
+                self._add_term_to_lexical_index(start_idx + offset, term)
 
     def _refresh_index_status(self) -> None:
         self._index_status = self._evaluate_index_status()
@@ -987,10 +1300,12 @@ class VectorStore:
         self._save_index_metadata(embedding_fingerprint=embedding_fingerprint, extra=extra,
                                   glossary_hash=glossary_hash, complete=complete,
                                   expected_term_count=expected_term_count)
+        self._record_checkpoint()
         self._refresh_index_status()
 
     def clear_index(self, delete_files: bool = True) -> None:
         self._close_mmap()
+        self._vector_buffer = None
         self._vectors_are_normalized = None
         self.terms = []
         self._rebuild_lexical_index()
@@ -1131,16 +1446,21 @@ class VectorStore:
         """Drop vectors whose terms no longer exist in the glossary (R-22)."""
         if self.vectors is None or not self.terms:
             return 0
-        try:
-            glossary_key_set = {str(term) for term in (glossary_keys or [])}
-        except Exception:
+        if glossary_keys is None:
             return 0
-        if not glossary_key_set:
+        try:
+            glossary_key_set = {str(term) for term in glossary_keys}
+        except Exception:
             return 0
         orphans = [term for term in self.terms if term not in glossary_key_set]
         if not orphans:
             return 0
-        self.delete_vectors_batch(orphans)
+        if len(orphans) == len(self.terms) and not glossary_key_set:
+            # The glossary itself became empty: drop the whole stale index so no
+            # orphan row can win a top-k slot later.
+            self.clear_index(delete_files=True)
+        else:
+            self.delete_vectors_batch(orphans)
         log_emit(None, self.config, "INFO",
                  f"Removed {len(orphans)} orphan vector(s) no longer present in the glossary.",
                  module="vector_store", func="prune_orphan_vectors")
@@ -1395,95 +1715,20 @@ class VectorStore:
         failed_count = 0
         stopped = False
         batch_size = 50
-        new_vectors_batches = []
-        new_terms_added = []
         fingerprint = self._normalize_embedding_fingerprint(
             embedding_fingerprint or self.current_embedding_fingerprint()
         )
+        checkpoint_min = self._configured_checkpoint_min()
+        # R-23: amortize checkpoint writes.  The interval doubles with the index
+        # (1.5x growth per checkpoint), so total bytes written are O(n) instead
+        # of the old fixed-1000-rows full rewrite (≈123 GB at 200k terms).
+        next_checkpoint_at = len(self.terms) + max(checkpoint_min, len(self.terms) // 2)
+        last_saved_rows = len(self.terms)
 
-        for i in range(0, total, batch_size):
-            if stop_check():
-                stopped = True
-                if log_callback:
-                    log_emit(log_callback, self.config, "WARNING",
-                             "Vectorization stopped by user.",
-                             module="vector_store", func="add_vectors_batch")
-                break
-
-            while pause_check():
-                time.sleep(0.1)
-                if stop_check():
-                    stopped = True
-                    break
-            if stopped:
-                break
-
-            batch_terms_input = new_terms[i:i + batch_size]
-            ordered, errors = self._embed_terms_ordered(
-                batch_terms_input, embed_fn, num_threads, should_stop=stop_check
-            )
-
-            batch_results = []
-            batch_terms_confirmed = []
-
-            for term in batch_terms_input:
-                if stop_check():
-                    stopped = True
-                    break
-                vec = ordered.get(term)
-                error = errors.get(term) if isinstance(errors, dict) else None
-                processed_count += 1
-
-                normalized_vec = None
-                if vec is not None:
-                    try:
-                        normalized_vec = self._normalize_vector(vec)
-                    except ValueError as normalize_error:
-                        error = str(normalize_error)
-
-                if normalized_vec is not None and self._check_vector_dimension(
-                        normalized_vec.reshape(1, -1), term):
-                    batch_results.append(normalized_vec)
-                    batch_terms_confirmed.append(term)
-                    if log_callback and processed_count % 10 == 0:
-                        log_emit(log_callback, self.config, "DEBUG",
-                                 f"Vectorized [{processed_count}/{total}]: {term}",
-                                 module="vector_store", func="add_vectors_batch")
-                else:
-                    failed_count += 1
-                    msg = f"Failed to embed term '{term}': {error}"
-                    log_emit(None, self.config, "ERROR", msg,
-                             module="vector_store", func="add_vectors_batch")
-                    if log_callback:
-                        log_emit(log_callback, self.config, "ERROR", msg,
-                                 module="vector_store", func="add_vectors_batch")
-
-                if progress_callback:
-                    progress_callback(int(processed_count / total * 100))
-
-            if batch_results:
-                new_vectors_batches.append(np.vstack(batch_results))
-                new_terms_added.extend(batch_terms_confirmed)
-
-            if stopped:
-                break
-
-        if new_vectors_batches:
-            new_vectors_np = np.vstack(new_vectors_batches)
-            if self.vectors is None:
-                self._set_vectors(new_vectors_np)
-                self._vectors_are_normalized = True
-            else:
-                with self._vector_read_guard() as current:
-                    if current is None:
-                        return
-                    combined_vectors = np.vstack([np.asarray(current), new_vectors_np])
-                self._set_vectors(combined_vectors)
-            self.terms.extend(new_terms_added)
-            self._append_terms_to_lexical_index(new_terms_added)
-            self._assert_vector_term_consistency()
-            # A fresh index interrupted before covering the requested terms must
-            # not be advertised as ready (P0-08).
+        def _flush_checkpoint() -> None:
+            nonlocal next_checkpoint_at, last_saved_rows
+            if self.vectors is None or not self.terms:
+                return
             complete: Optional[bool] = None
             expected: Optional[int] = None
             if started_from_empty and (stopped or failed_count > 0):
@@ -1492,6 +1737,105 @@ class VectorStore:
             self.save_index_state(embedding_fingerprint=fingerprint,
                                   extra=index_extra, glossary_hash=glossary_hash,
                                   complete=complete, expected_term_count=expected)
+            last_saved_rows = len(self.terms)
+            next_checkpoint_at = len(self.terms) + max(checkpoint_min, len(self.terms) // 2)
+
+        try:
+            for i in range(0, total, batch_size):
+                if stop_check():
+                    stopped = True
+                    if log_callback:
+                        log_emit(log_callback, self.config, "WARNING",
+                                 "Vectorization stopped by user.",
+                                 module="vector_store", func="add_vectors_batch")
+                    break
+
+                while pause_check():
+                    time.sleep(0.1)
+                    if stop_check():
+                        stopped = True
+                        break
+                if stopped:
+                    break
+
+                batch_terms_input = new_terms[i:i + batch_size]
+                ordered, errors = self._embed_terms_ordered(
+                    batch_terms_input, embed_fn, num_threads, should_stop=stop_check
+                )
+
+                batch_results = []
+                batch_terms_confirmed = []
+
+                for term in batch_terms_input:
+                    if stop_check():
+                        stopped = True
+                        break
+                    vec = ordered.get(term)
+                    error = errors.get(term) if isinstance(errors, dict) else None
+                    processed_count += 1
+
+                    normalized_vec = None
+                    if vec is not None:
+                        try:
+                            normalized_vec = self._normalize_vector(vec)
+                        except ValueError as normalize_error:
+                            error = str(normalize_error)
+
+                    if normalized_vec is not None and self._check_vector_dimension(
+                            normalized_vec.reshape(1, -1), term):
+                        batch_results.append(normalized_vec)
+                        batch_terms_confirmed.append(term)
+                        if log_callback and processed_count % 10 == 0:
+                            log_emit(log_callback, self.config, "DEBUG",
+                                     f"Vectorized [{processed_count}/{total}]: {term}",
+                                     module="vector_store", func="add_vectors_batch")
+                    else:
+                        failed_count += 1
+                        msg = f"Failed to embed term '{term}': {error}"
+                        log_emit(None, self.config, "ERROR", msg,
+                                 module="vector_store", func="add_vectors_batch")
+                        if log_callback:
+                            log_emit(log_callback, self.config, "ERROR", msg,
+                                     module="vector_store", func="add_vectors_batch")
+
+                    if progress_callback:
+                        progress_callback(int(processed_count / total * 100))
+
+                if batch_results:
+                    # Append straight into the preallocated row buffer; the old
+                    # code kept every batch and did two full vstack copies.
+                    self._append_vectors_preallocated(np.vstack(batch_results))
+                    self.terms.extend(batch_terms_confirmed)
+                    self._append_terms_to_lexical_index(batch_terms_confirmed)
+
+                # Flush after the embedding batch is paid for, at the adaptive
+                # interval: an interruption loses at most one interval of calls.
+                if self.terms and len(self.terms) >= next_checkpoint_at:
+                    _flush_checkpoint()
+
+                if stopped:
+                    break
+
+            if self.terms and len(self.terms) > last_saved_rows:
+                _flush_checkpoint()
+        except BaseException:
+            # Preserve already-paid embeddings even when an unexpected error
+            # interrupts the batch (R-24 / R-39 cost protection).
+            if self.terms and len(self.terms) > last_saved_rows:
+                try:
+                    _flush_checkpoint()
+                except Exception:
+                    pass
+            raise
+
+    def _configured_checkpoint_min(self) -> int:
+        """Smallest checkpoint interval (config), clamped to a sane range."""
+        try:
+            value = int(self.config.get("rag", "vector_index_checkpoint_terms", 1000)) \
+                if self.config is not None else 1000
+        except Exception:
+            value = 1000
+        return max(50, min(value, 10_000))
 
     def build_index(self, glossary_keys: list[str], embed_fn: Callable,
                     num_threads: int = 1,
@@ -1533,33 +1877,9 @@ class VectorStore:
             and self.vectors is not None
         ):
             should_full_rebuild = False
-        # size_mismatch is repaired incrementally (补齐) instead of full rebuild.
-        if status_before.is_stale and status_before.reason == "size_mismatch" and not force_full:
-            should_full_rebuild = False
-            try:
-                if self.vectors is not None:
-                    v_count = int(self.vectors.shape[0])
-                    t_count = len(self.terms)
-                    if v_count != t_count:
-                        keep = min(v_count, t_count)
-                        self.terms = self.terms[:keep]
-                        if v_count > keep:
-                            # Copy while holding a read slot: the old array backs
-                            # the mmap we are about to close.
-                            with self._vector_read_guard() as current:
-                                trimmed = (np.array(current[:keep], dtype=np.float32, copy=True)
-                                           if current is not None else None)
-                            if trimmed is not None:
-                                self._set_vectors(trimmed)
-                        self._rebuild_lexical_index()
-                        log_emit(None, self.config, "WARNING",
-                                 f"Vector size_mismatch repaired incrementally: kept {keep} rows,补齐 missing.",
-                                 module="vector_store", func="build_index")
-            except Exception as e:
-                log_emit(None, self.config, "WARNING",
-                         f"Failed to repair size_mismatch incrementally: {e}",
-                         exc=e, module="vector_store", func="build_index")
-                should_full_rebuild = True
+        # R-26: a terms/vectors row-count mismatch is corruption, not something
+        # to "repair" by truncating one side (that silently mispairs rows).
+        # The only safe repair is a full rebuild from the glossary.
 
         if should_full_rebuild:
             if log_callback:
@@ -1610,11 +1930,12 @@ class VectorStore:
         total = len(terms_to_process)
         if total == 0:
             if log_callback:
-                msg = (
-                    "Glossary is empty. Cleared existing vector index."
-                    if should_full_rebuild
-                    else "All terms are already indexed."
-                )
+                if should_full_rebuild:
+                    msg = "Glossary is empty. Cleared existing vector index."
+                elif not glossary_keys:
+                    msg = "Glossary is empty; existing orphan vectors were removed."
+                else:
+                    msg = "All terms are already indexed."
                 log_emit(log_callback, self.config, "INFO", msg,
                          module="vector_store", func="build_index")
             if should_full_rebuild:
@@ -1628,7 +1949,7 @@ class VectorStore:
                 )
             return VectorIndexBuildResult(
                 mode=mode if not should_full_rebuild or glossary_keys else "skipped",
-                reason="no_terms" if should_full_rebuild and not glossary_keys else "already_indexed",
+                reason="no_terms" if not glossary_keys else "already_indexed",
                 total_terms=0,
                 processed_terms=0,
                 successful_terms=0,
@@ -1648,15 +1969,18 @@ class VectorStore:
         failed_count = 0
         stopped = False
         batch_size = 50
-        try:
-            checkpoint_terms = int(self.config.get(
-                "rag", "vector_index_checkpoint_terms", 1000)) if self.config is not None else 1000
-        except Exception:
-            checkpoint_terms = 1000
-        checkpoint_terms = max(batch_size, min(checkpoint_terms, 10_000))
-        pending_vector_batches: list[np.ndarray] = []
-        pending_terms: list[str] = []
-        pending_count = 0
+        checkpoint_min = self._configured_checkpoint_min()
+        next_checkpoint_at = len(self.terms) + max(checkpoint_min, len(self.terms) // 2)
+        last_saved_rows = len(self.terms)
+
+        def _flush_checkpoint() -> None:
+            nonlocal next_checkpoint_at, last_saved_rows
+            if self.vectors is None or not self.terms:
+                return
+            self.save_index_state(embedding_fingerprint=current_fingerprint,
+                                  glossary_hash=glossary_hash)
+            last_saved_rows = len(self.terms)
+            next_checkpoint_at = len(self.terms) + max(checkpoint_min, len(self.terms) // 2)
 
         try:
             for i in range(0, total, batch_size):
@@ -1721,41 +2045,35 @@ class VectorStore:
                         progress_callback(int(processed_count / total * 100))
 
                 if batch_vectors:
-                    pending_vector_batches.append(np.vstack(batch_vectors))
-                    pending_terms.extend(batch_valid_terms)
-                    pending_count += len(batch_valid_terms)
+                    # R-23/R-24: append into the preallocated buffer (no vstack
+                    # of the whole matrix, no per-batch full-file rewrite).
+                    self._append_vectors_preallocated(np.vstack(batch_vectors))
+                    self.terms.extend(batch_valid_terms)
+                    self._append_terms_to_lexical_index(batch_valid_terms)
 
-                should_checkpoint = bool(
-                    pending_vector_batches
-                    and (
-                        pending_count >= checkpoint_terms
-                        or i + batch_size >= total
-                        or stopped
-                        or stop_check()
-                    )
-                )
-                if should_checkpoint:
-                    new_vectors_np = np.vstack(pending_vector_batches)
-                    if self.vectors is None:
-                        self._set_vectors(new_vectors_np)
-                        self._vectors_are_normalized = True
-                    else:
-                        with self._vector_read_guard() as current:
-                            if current is None:
-                                break
-                            combined_vectors = np.vstack([np.asarray(current), new_vectors_np])
-                        self._set_vectors(combined_vectors)
-                    self.terms.extend(pending_terms)
-                    self._append_terms_to_lexical_index(pending_terms)
-                    self.save_index_state(embedding_fingerprint=current_fingerprint,
-                                          glossary_hash=glossary_hash)
-                    pending_vector_batches.clear()
-                    pending_terms.clear()
-                    pending_count = 0
+                # Checkpoint after the embedding batch is paid for.  The interval
+                # adapts to the current index size (max(min, n/2)), amortizing
+                # the full rewrite so an interruption loses at most one interval.
+                if self.terms and (
+                    len(self.terms) >= next_checkpoint_at or stopped or stop_check()
+                ):
+                    _flush_checkpoint()
+
+            # Final flush: covers the tail rows and keeps the on-disk index in
+            # sync if the build stopped between checkpoints.
+            if self.terms and len(self.terms) > last_saved_rows:
+                _flush_checkpoint()
         except BaseException as exc:
             if self._rebuild_active:
                 self._abort_rebuild(reason=f"failed ({type(exc).__name__})")
+            else:
+                if self.terms and len(self.terms) > last_saved_rows:
+                    try:
+                        _flush_checkpoint()
+                    except Exception:
+                        pass
             raise
+
 
         completed_ok = (not stopped) and failed_count == 0 and len(self.terms) >= expected_term_count
         if should_full_rebuild:
@@ -1796,6 +2114,64 @@ class VectorStore:
 
     # --- Search ---
 
+    def score_queries_batch(self, queries: np.ndarray, block_rows: int = 8192) -> np.ndarray:
+        """Score k query vectors against every indexed term (contract R-24).
+
+        Returns a ``(k, n)`` float32 cosine-similarity matrix, one row per
+        query and one column per vector row.  Each query is L2-normalized
+        independently; non-finite or zero queries yield an all-zero row.  The
+        computation walks the vector matrix in ``block_rows`` chunks so peak
+        memory stays bounded instead of materializing a second full copy.
+
+        Results match :meth:`search_cosine_full` per query (atol < 1e-5).
+        """
+        try:
+            query_matrix = np.asarray(queries, dtype=np.float32)
+        except Exception:
+            return np.zeros((0, 0), dtype=np.float32)
+        if query_matrix.ndim == 1:
+            query_matrix = query_matrix.reshape(1, -1)
+        if query_matrix.ndim != 2:
+            return np.zeros((0, 0), dtype=np.float32)
+        query_count = int(query_matrix.shape[0])
+        if query_count == 0:
+            return np.zeros((0, 0), dtype=np.float32)
+
+        with self._vector_read_guard() as vectors:
+            if vectors is None or not self.terms or int(getattr(vectors, "ndim", 0)) != 2:
+                return np.zeros((query_count, 0), dtype=np.float32)
+            vector_count = int(vectors.shape[0])
+            vector_dim = int(vectors.shape[1])
+            if int(query_matrix.shape[1]) != vector_dim:
+                return np.zeros((query_count, 0), dtype=np.float32)
+
+            normalized_queries = np.array(query_matrix, dtype=np.float32, copy=True)
+            finite = np.all(np.isfinite(normalized_queries), axis=1)
+            norms = np.linalg.norm(normalized_queries, axis=1)
+            usable = finite & np.isfinite(norms) & (norms > 0)
+            normalized_queries[usable] = (
+                normalized_queries[usable] / norms[usable, None]
+            )
+            normalized_queries[~usable] = 0.0
+
+            vectors_are_normalized = self._ensure_normalization_state(vectors)
+            try:
+                chunk = max(1, int(block_rows))
+            except Exception:
+                chunk = 8192
+            # Interval overlap needs a bound; 64M rows would already be 256 GB.
+            chunk = min(chunk, 1_000_000)
+            similarities = np.zeros((query_count, vector_count), dtype=np.float32)
+            for start in range(0, vector_count, chunk):
+                end = min(start + chunk, vector_count)
+                block = np.asarray(vectors[start:end], dtype=np.float32)
+                if not vectors_are_normalized:
+                    block_norms = np.linalg.norm(block, axis=1, keepdims=True)
+                    block_norms[block_norms == 0] = 1.0
+                    block = block / block_norms
+                similarities[:, start:end] = normalized_queries @ block.T
+            return similarities
+
     def search_cosine(self, query_vec: np.ndarray, top_k: int = 10) -> list[tuple[str, float]]:
         """Return [(term, similarity_score), ...] sorted by score desc."""
         if not isinstance(top_k, int) or top_k <= 0:
@@ -1825,31 +2201,40 @@ class VectorStore:
         if not query_norm:
             return []
 
-        self._ensure_lexical_index()
+        # R-29: take a consistent snapshot of the inverted indexes under the
+        # lexical lock, then scan outside it.  Appends copy candidate lists, so
+        # a write can never raise "Set changed size during iteration".
+        with self._lexical_lock:
+            self._ensure_lexical_index()
+            normalized_terms = self._normalized_terms
+            token_to_indices = self._token_to_indices
+            trigram_to_indices = self._trigram_to_indices
 
-        candidate_indices = None
-        query_tokens = [t for t in query_norm.split() if t]
-        if len(query_tokens) > 1:
-            # Multi-token: use token inverted index (narrowest posting list).
-            indexed_hits = [self._token_to_indices[t] for t in set(query_tokens) if t in self._token_to_indices]
-            if indexed_hits:
-                candidate_indices = min(indexed_hits, key=len)
-        elif len(query_norm) >= 3:
-            # Single token >= 3 chars: use trigram index for substring matching.
-            trigrams = self._extract_trigrams(query_norm)
-            trigram_hits = [self._trigram_to_indices[tg] for tg in trigrams if tg in self._trigram_to_indices]
-            if trigram_hits:
-                candidate_indices = set.intersection(*trigram_hits)
-        else:
-            # Very short single-token queries are too broad for substring scans.
-            # Restrict them to exact token-index hits; otherwise return no hits.
-            candidate_indices = self._token_to_indices.get(query_norm, [])
+            candidate_indices = None
+            query_tokens = [t for t in query_norm.split() if t]
+            if len(query_tokens) > 1:
+                # Multi-token: use token inverted index (narrowest posting list).
+                indexed_hits = [list(token_to_indices[t]) for t in set(query_tokens)
+                                if t in token_to_indices]
+                if indexed_hits:
+                    candidate_indices = min(indexed_hits, key=len)
+            elif len(query_norm) >= 3:
+                # Single token >= 3 chars: use trigram index for substring matching.
+                trigrams = self._extract_trigrams(query_norm)
+                trigram_hits = [trigram_to_indices[tg] for tg in trigrams
+                                if tg in trigram_to_indices]
+                if trigram_hits:
+                    candidate_indices = list(set.intersection(*trigram_hits))
+            else:
+                # Very short single-token queries are too broad for substring scans.
+                # Restrict them to exact token-index hits; otherwise return no hits.
+                candidate_indices = list(token_to_indices.get(query_norm, ()))
         if candidate_indices is None:
             return []
 
         indices = [
             i for i in candidate_indices
-            if i < len(self._normalized_terms) and query_norm in self._normalized_terms[i]
+            if i < len(normalized_terms) and query_norm in normalized_terms[i]
         ]
         if similarities is not None and len(indices) > 0:
             indices.sort(key=lambda i: similarities[i] if i < len(similarities) else 0, reverse=True)

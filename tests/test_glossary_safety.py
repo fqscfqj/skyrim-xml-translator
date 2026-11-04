@@ -5,7 +5,7 @@ Covers the verified audit findings handled in this pass:
 - P0-09: process-wide lock, unique tmp files, batch rollback, WinError retry.
 - P0-10: csv strict parsing, 1 MiB field limit, trial-parse delimiters.
 - G-01/G-04/G-07/G-09: BOM-tolerant glossary load, two-column header,
-  UTF-16/NUL rejection and the op whitelist.
+  BOM-less UTF-16/NUL re-decoding and the op whitelist.
 - R-02: Russian/Japanese terms survive normalization and lookup.
 """
 
@@ -164,12 +164,14 @@ class CsvImportSafetyTests(unittest.TestCase):
         self.assertIn("行", message)
         self.assertIn("引号", message)
 
-    def test_semicolons_inside_translation_keep_two_columns(self):
+    def test_semicolons_inside_translation_become_variants(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = self._write(temp_dir, "terms.csv", "Sword,剑;刀;刃;锋\n".encode("utf-8"))
             result = parse_glossary_file(path)
         self.assertEqual(",", result.delimiter)
-        self.assertEqual({"Sword": "剑;刀;刃;锋"}, result.terms)
+        # R-30: first translation is canonical, the rest are variants.
+        self.assertEqual({"Sword": "剑"}, result.terms)
+        self.assertEqual(result.rich_meta["Sword"]["variants"], ["刀", "刃", "锋"])
 
     def test_utf8_bom_csv_imports(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -177,19 +179,27 @@ class CsvImportSafetyTests(unittest.TestCase):
             result = parse_glossary_file(path)
         self.assertEqual({"Sword": "剑"}, result.terms)
 
-    def test_utf16_without_bom_is_rejected_with_hint(self):
+    def test_utf16_without_bom_is_redecoded(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = self._write(temp_dir, "terms.csv", "Sword,剑\n".encode("utf-16-le"))
-            with self.assertRaises(GlossaryImportError) as ctx:
-                parse_glossary_file(path)
-        self.assertIn("NUL", str(ctx.exception))
+            result = parse_glossary_file(path)
+        # G-07: BOM-less UTF-16 is re-decoded instead of rejected.
+        self.assertEqual({"Sword": "剑"}, result.terms)
+        self.assertEqual(result.encoding, "utf-16-le")
 
-    def test_utf16_with_bom_is_rejected_with_hint(self):
+    def test_utf16_with_bom_is_redecoded(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = self._write(temp_dir, "terms.csv", "Sword,剑\n".encode("utf-16"))
-            with self.assertRaises(GlossaryImportError) as ctx:
-                parse_glossary_file(path)
-        self.assertIn("UTF-16", str(ctx.exception))
+            result = parse_glossary_file(path)
+        self.assertEqual({"Sword": "剑"}, result.terms)
+        self.assertEqual(result.encoding, "utf-16")
+
+    def test_nul_laden_utf16_content_is_redecoded(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = self._write(temp_dir, "terms.csv", "原文,译文\nSword,剑\n".encode("utf-16-le"))
+            result = parse_glossary_file(path)
+        self.assertEqual(result.format_kind, "csv_header")
+        self.assertEqual({"Sword": "剑"}, result.terms)
 
     def test_field_larger_than_stdlib_default_parses(self):
         translation = "剑" * 200_000

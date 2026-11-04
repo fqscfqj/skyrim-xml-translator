@@ -2,6 +2,7 @@
 
 import glob
 import json
+import codecs
 import datetime
 import hashlib
 import os
@@ -99,6 +100,10 @@ class GlossaryManager:
         self._last_backup_path: Optional[str] = None
         self._glossary_corrupt = False
         self._sidecar_corrupt = False
+        # G-01: structured corruption report the GUI can surface instead of
+        # silently running on an empty glossary.
+        self._corruption_status: Dict[str, Any] = {"glossary": None, "sidecar": None}
+        self._last_load_encoding: str = ""
 
         self.load()
 
@@ -333,39 +338,139 @@ class GlossaryManager:
         except Exception:
             return None
 
-    def _load_sidecar(self) -> None:
-        self.rich_meta = {}
+    def _load_sidecar(self, envelope_meta: Optional[Dict[str, Dict[str, Any]]] = None) -> None:
+        """Load the rich-metadata sidecar, merging envelope values (G-06).
+
+        The JSONv2 envelope itself can carry domain/priority for a term.  The
+        old code parsed those and then ``_load_sidecar`` unconditionally reset
+        ``rich_meta`` to ``{}`` (or to the sidecar), losing them whenever no
+        sidecar file existed.  Envelope values are now the base layer and the
+        sidecar wins only for the fields it actually defines.
+        """
+        merged: Dict[str, Dict[str, Any]] = {}
+        for key, value in (envelope_meta or {}).items():
+            normalized = self.normalize_term_key(str(key))
+            if normalized and isinstance(value, dict):
+                merged[normalized] = dict(value)
         if not os.path.exists(self.sidecar_path):
+            self.rich_meta = merged
             return
         try:
             with open(self.sidecar_path, "r", encoding="utf-8-sig") as handle:
                 data = json.load(handle)
             if isinstance(data, dict):
-                cleaned: Dict[str, Dict[str, Any]] = {}
                 for key, value in data.items():
                     if isinstance(value, dict):
                         normalized = self.normalize_term_key(str(key))
                         if normalized:
-                            cleaned[normalized] = dict(value)
-                self.rich_meta = cleaned
+                            combined = dict(merged.get(normalized, {}))
+                            combined.update(value)
+                            merged[normalized] = combined
+            self.rich_meta = merged
+            self._sidecar_corrupt = False
+            self._corruption_status["sidecar"] = None
         except Exception as exc:
             corrupt_path = self._quarantine_corrupt_file(self.sidecar_path, exc)
             self._sidecar_corrupt = True
-            self.rich_meta = {}
+            self._corruption_status["sidecar"] = {
+                "path": self.sidecar_path,
+                "quarantined_to": corrupt_path,
+                "error": str(exc),
+            }
+            # Keep envelope values: a broken sidecar must not erase them.
+            self.rich_meta = merged
             log_emit(None, self.config, "WARNING",
                      f"Glossary sidecar corrupt, quarantined to {corrupt_path}: {exc}", exc=exc,
                      module="glossary_manager", func="_load_sidecar")
 
+    def get_corruption_status(self) -> Dict[str, Any]:
+        """Return the last load's corruption/quarantine state (G-01)."""
+        return {
+            "glossary_corrupt": bool(self._glossary_corrupt),
+            "sidecar_corrupt": bool(self._sidecar_corrupt),
+            "glossary": dict(self._corruption_status.get("glossary") or {}),
+            "sidecar": dict(self._corruption_status.get("sidecar") or {}),
+            "encoding": self._last_load_encoding,
+        }
+
     def _save_sidecar(self) -> None:
         self._atomic_write_json(self.sidecar_path, self.rich_meta)
 
+    # --- Rich metadata normalization (R-30) ---
+
+    _RICH_DEFAULT_PRIORITY = 0.5
+    _RICH_LIST_SPLIT_RE = re.compile(r"[,;|｜；，、\n]+")
+
+    @classmethod
+    def _coerce_rich_priority(cls, value: Any) -> float:
+        try:
+            if value is None or (isinstance(value, str) and not value.strip()):
+                return float(cls._RICH_DEFAULT_PRIORITY)
+            return float(str(value).strip())
+        except Exception:
+            return float(cls._RICH_DEFAULT_PRIORITY)
+
+    @classmethod
+    def _coerce_rich_list(cls, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, (list, tuple, set)):
+            items = [str(item or "").strip() for item in value]
+        else:
+            items = [part.strip() for part in cls._RICH_LIST_SPLIT_RE.split(str(value))]
+        out: list[str] = []
+        for item in items:
+            if item and item not in out:
+                out.append(item)
+        return out
+
+    @classmethod
+    def normalize_rich_meta(cls, meta: Any) -> Dict[str, Any]:
+        """Return the canonical rich-meta shape with tolerant type coercion.
+
+        ``priority`` becomes a float (default 0.5), ``forbidden``/``variants``
+        accept a list, a single string or a delimited string, and the scalar
+        text fields are trimmed strings.  Extra fields (pos/examples/...) are
+        preserved so storage remains lossless.
+        """
+        if not isinstance(meta, dict) or not meta:
+            return {}
+        result: Dict[str, Any] = {
+            "priority": cls._coerce_rich_priority(meta.get("priority")),
+            "forbidden": cls._coerce_rich_list(meta.get("forbidden")),
+            "variants": cls._coerce_rich_list(meta.get("variants")),
+        }
+        for field_name in ("domain", "note", "source"):
+            value = meta.get(field_name)
+            result[field_name] = "" if value is None else str(value).strip()
+        for extra in ("pos", "examples", "confidence", "updated_at"):
+            if extra in meta:
+                value = meta.get(extra)
+                if extra == "examples":
+                    result[extra] = cls._coerce_rich_list(value)
+                elif extra == "confidence":
+                    try:
+                        result[extra] = float(value)
+                    except Exception:
+                        pass
+                else:
+                    result[extra] = str(value or "").strip()
+        return result
+
     def get_rich_meta(self, term: str) -> Dict[str, Any]:
-        """Return stored rich metadata for a term (empty dict if none)."""
+        """Return canonical rich metadata for a term (empty dict if none).
+
+        Unknown terms return ``{}``; known terms with stored metadata always
+        come back with ``priority`` (float, default 0.5), ``forbidden`` and
+        ``variants`` (lists), plus ``domain``/``note``/``source`` strings.
+        """
         normalized = self.normalize_term_key(term or "")
         if not normalized:
             return {}
         stored = self.rich_meta.get(normalized)
-        return dict(stored) if isinstance(stored, dict) else {}
+        if not isinstance(stored, dict) or not stored:
+            return {}
+        return self.normalize_rich_meta(stored)
 
     def set_rich_meta_batch(self, rich_meta: Dict[str, Dict[str, Any]]) -> int:
         """Upsert rich metadata keyed by any term spelling. Returns stored count."""
@@ -398,38 +503,79 @@ class GlossaryManager:
     def last_backup_path(self) -> Optional[str]:
         return self._last_backup_path
 
+    @staticmethod
+    def _glossary_encoding_candidates(raw: bytes) -> list[str]:
+        if raw.startswith(codecs.BOM_UTF16_LE) or raw.startswith(codecs.BOM_UTF16_BE):
+            return ["utf-16", "utf-16-le", "utf-16-be", "utf-8-sig", "gbk"]
+        if raw.startswith(codecs.BOM_UTF8):
+            return ["utf-8-sig", "utf-16", "gbk"]
+        if b"\x00" in raw[:4096]:
+            return ["utf-16-le", "utf-16-be", "utf-16", "utf-8-sig", "gbk"]
+        # G-01: BOM-less UTF-16 and GBK files are retried instead of being
+        # quarantined after the first UTF-8 failure.
+        return ["utf-8-sig", "utf-16", "gbk"]
+
+    def _read_glossary_payload(self) -> tuple[Any, str]:
+        """Decode + parse the glossary file, retrying non-UTF-8 encodings (G-01)."""
+        with open(self.glossary_path, "rb") as handle:
+            raw = handle.read()
+        if not raw.strip():
+            return {}, "utf-8-sig"
+        last_error: Optional[BaseException] = None
+        attempts: list[str] = []
+        for encoding in self._glossary_encoding_candidates(raw):
+            try:
+                text = raw.decode(encoding)
+            except (UnicodeDecodeError, LookupError) as exc:
+                last_error = exc
+                attempts.append(f"{encoding}: 解码失败")
+                continue
+            try:
+                return json.loads(text), encoding
+            except json.JSONDecodeError as exc:
+                last_error = exc
+                attempts.append(f"{encoding}: {exc.msg} (行 {exc.lineno})")
+        raise ValueError(
+            "无法解码/解析词汇文件（尝试：" + "；".join(attempts) + "）"
+        ) from last_error
+
     def load(self) -> None:
         """Load glossary from disk."""
         with _GLOSSARY_WRITE_LOCK:
+            envelope_meta: Dict[str, Dict[str, Any]] = {}
             if os.path.exists(self.glossary_path):
                 try:
-                    # utf-8-sig tolerates a BOM written by Notepad (G-01).
-                    with open(self.glossary_path, "r", encoding="utf-8-sig") as f:
-                        loaded = json.load(f)
+                    loaded, encoding = self._read_glossary_payload()
+                    self._last_load_encoding = encoding
                     # Tolerate both the canonical dict and a JSONv2 envelope on disk.
                     if isinstance(loaded, dict) and isinstance(loaded.get("terms"), (dict, list)) and "glossary" not in loaded:
                         from src.rag.glossary_import import parse_json_text
                         parsed = parse_json_text(json.dumps(loaded, ensure_ascii=False))
                         self.glossary = dict(parsed.terms)
-                        if parsed.rich_meta:
-                            self.rich_meta = {
-                                self.normalize_term_key(term): dict(meta)
-                                for term, meta in parsed.rich_meta.items()
-                                if self.normalize_term_key(term) and isinstance(meta, dict)
-                            }
+                        for term, meta in (parsed.rich_meta or {}).items():
+                            normalized = self.normalize_term_key(term)
+                            if normalized and isinstance(meta, dict):
+                                envelope_meta[normalized] = dict(meta)
                     elif isinstance(loaded, dict):
                         self.glossary = {str(k): str(v) for k, v in loaded.items()}
                     else:
                         self.glossary = {}
                     self._glossary_corrupt = False
+                    self._corruption_status["glossary"] = None
                 except Exception as e:
                     corrupt_path = self._quarantine_corrupt_file(self.glossary_path, e)
                     self._glossary_corrupt = True
+                    self._corruption_status["glossary"] = {
+                        "path": self.glossary_path,
+                        "quarantined_to": corrupt_path,
+                        "error": str(e),
+                    }
                     log_emit(None, self.config, "ERROR",
                              f"Glossary corrupt, quarantined to {corrupt_path}: {e}", exc=e,
                              module="glossary_manager", func="load")
                     self.glossary = {}
-            self._load_sidecar()
+            # G-06: envelope rich_meta is the base layer; the sidecar overlays it.
+            self._load_sidecar(envelope_meta)
             self.rebuild_lookup()
 
     def save(self) -> None:

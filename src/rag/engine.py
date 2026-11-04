@@ -1,6 +1,7 @@
 """RAG Engine facade - backward-compatible API delegating to sub-modules."""
 
 import hashlib
+import json
 import os
 
 from src.logging_helper import emit as log_emit
@@ -80,7 +81,16 @@ class RAGEngine:
 
         self._keyword_cache = LRUCache(max_size=max(1000, self._coerce_positive_int(kw_cache_size, 50000) // 10),
                                        ttl_seconds=cache_ttl_seconds)
-        self._embedding_cache = EmbeddingCache(max_size=embed_cache_size, ttl_seconds=cache_ttl_seconds)
+        # R-39: persist embeddings under a fingerprint-namespaced npz so a
+        # restart does not re-pay every embedding call, and a model/dimension
+        # change cannot mix incompatible vectors.
+        embedding_cache_path, embedding_fingerprint = self._embedding_cache_location(vector_path)
+        self._embedding_cache = EmbeddingCache(
+            max_size=embed_cache_size,
+            ttl_seconds=cache_ttl_seconds,
+            persist_path=embedding_cache_path,
+            fingerprint=embedding_fingerprint,
+        )
 
         self._keyword_extractor = KeywordExtractor(
             llm_client, self.prompt_manager, config_manager,
@@ -89,6 +99,10 @@ class RAGEngine:
         self._searcher = RAGSearcher(
             self._vector_store, self._glossary_mgr, config_manager,
             llm_client, embedding_cache=self._embedding_cache,
+            # R-20: live flag lambdas; stop_flag/pause_flag are initialized below,
+            # and both are read lazily at interrupt checkpoints.
+            should_stop=lambda: self.stop_flag,
+            should_pause=lambda: self.pause_flag,
         )
 
         # Preserved flags for GUI pause/stop
@@ -105,6 +119,21 @@ class RAGEngine:
         except Exception:
             parsed = default
         return max(1, parsed)
+
+    def _embedding_cache_location(self, vector_path: str):
+        try:
+            fingerprint = self._vector_store.current_embedding_fingerprint()
+        except Exception:
+            fingerprint = {}
+        try:
+            fingerprint_json = json.dumps(
+                fingerprint, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            )
+            fingerprint_hash = hashlib.sha256(fingerprint_json.encode("utf-8")).hexdigest()[:12]
+        except Exception:
+            fingerprint_hash = "default"
+        directory = os.path.dirname(vector_path) or "."
+        return os.path.join(directory, f"embed_cache_{fingerprint_hash}.npz"), fingerprint
 
     @classmethod
     def _effective_embedding_cache_size(cls, requested_size, dimensions,
@@ -182,6 +211,36 @@ class RAGEngine:
     def get_vector_index_status(self) -> VectorIndexStatus:
         return self._vector_store.get_index_status()
 
+    # --- Rich metadata (R-30 / contract) ---
+
+    def get_rich_meta(self, term: str) -> dict:
+        """Return canonical rich metadata for one term; ``{}`` when unknown."""
+        try:
+            meta = self._glossary_mgr.get_rich_meta(term)
+        except Exception:
+            return {}
+        if not isinstance(meta, dict) or not meta:
+            return {}
+        try:
+            return GlossaryManager.normalize_rich_meta(meta)
+        except Exception:
+            return dict(meta)
+
+    def get_rich_meta_batch(self, terms) -> dict[str, dict]:
+        """Return ``{term: canonical rich meta}`` for many terms; never raises."""
+        results: dict[str, dict] = {}
+        try:
+            iterable = list(terms or [])
+        except Exception:
+            return results
+        for term in iterable:
+            try:
+                key = str(term)
+            except Exception:
+                continue
+            results[key] = self.get_rich_meta(key)
+        return results
+
     @property
     def _glossary_lookup(self):
         return self._glossary_mgr._glossary_lookup
@@ -213,6 +272,14 @@ class RAGEngine:
         self._vector_store.load()
         if clear_embedding_cache:
             self.clear_embedding_cache()
+        # R-39: follow the new embedding fingerprint namespace after a model change.
+        try:
+            cache_path, fingerprint = self._embedding_cache_location(self.vector_path)
+            self._embedding_cache.reconfigure(cache_path, fingerprint)
+        except Exception as e:
+            log_emit(None, self.config, "WARNING",
+                     f"Failed to reconfigure embedding cache: {e}", exc=e,
+                     module="rag_engine", func="reload_embedding_runtime")
         return self._vector_store.get_index_status()
 
     def add_term(self, term, translation, rich_meta=None):
