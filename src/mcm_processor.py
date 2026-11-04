@@ -7,7 +7,7 @@ import re
 import shutil
 import tempfile
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from src.config.manager import ConfigManager
 from src.logging_helper import emit as log_emit
@@ -19,10 +19,12 @@ class MCMEntry:
     source_text: str
     dest_text: str
     cleared: bool = False  # 显式清空译文：写回空值而不是回退原文
+    prefix: str = ""  # M-07 行首缩进（空格/Tab），写回时原样保留
+    eol: str = ""  # M-06 该行原始行尾（\r\n / \r / \n；最后一行可能为空）
 
 
 _SUFFIX_RE = re.compile(r"^[A-Z0-9-]+$")  # suffix白名单，拒绝/\.等路径字符
-_LINE_SPLIT_RE = re.compile(r"\r\n|\r|\n")  # M-05 不把U+2028等当换行
+_LINE_SPLIT_RE = re.compile(r"(\r\n|\r|\n)")  # M-05 不把U+2028等当换行；捕获分隔符以逐行保留
 _BOM_UTF8 = b"\xef\xbb\xbf"
 _BOM_UTF16_LE = b"\xff\xfe"
 _BOM_UTF16_BE = b"\xfe\xff"
@@ -68,18 +70,23 @@ class MCMProcessor:
         "INDONESIAN",
     }
 
-    def __init__(self):
+    def __init__(self, load_failed: Optional[Callable[[str], None]] = None):
         self.file_path: Optional[str] = None
         self.encoding: str = "utf-8"
         self.bom: bytes = b""  # 读入时记录的BOM，写回原样补回
         self.newline: str = "\n"
         self.trailing_newline: bool = False
-        self._records: list[tuple[str, Any]] = []
+        self.last_load_error: str = ""
+        self.load_failed = load_failed  # X-10 失败原因回调，可由GUI接线
+        self._records: list[tuple[str, Any, str]] = []
 
-    def load_file(self, file_path: str) -> bool:
+    def load_file(self, file_path: str, load_failed: Optional[Callable[[str], None]] = None) -> bool:
+        """Load *file_path*; on failure expose the reason via ``load_failed``."""
         cleaned = str(file_path or "").strip()  # 路径strip
         self.file_path = cleaned or None
         self._records = []
+        self.last_load_error = ""
+        callback = load_failed if load_failed is not None else self.load_failed
         try:
             with open(cleaned, "rb") as f:
                 raw = f.read()
@@ -99,31 +106,34 @@ class MCMProcessor:
             self.trailing_newline = text.endswith(("\n", "\r"))
             self._records = []
 
-            lines = _LINE_SPLIT_RE.split(text)  # M-05 只按CR/LF族分行
-            if self.trailing_newline and lines and lines[-1] == "":
-                lines.pop()
+            parts = _LINE_SPLIT_RE.split(text)  # M-05 只按CR/LF族分行（捕获分隔符）
+            if self.trailing_newline and parts and parts[-1] == "":
+                parts.pop()  # 末尾换行由上一行的eol表示，不额外造空行
 
             missing_tab = 0  # \t缺失计数
-            for line in lines:
+            for index in range(0, len(parts), 2):
+                line = parts[index]
+                eol = parts[index + 1] if index + 1 < len(parts) else ""  # M-06 逐行保留原行尾
                 if line.strip() == "" or line.lstrip().startswith(";"):
-                    self._records.append(("raw", line))  # 空行/注释原样保留
+                    self._records.append(("raw", line, eol))  # 空行/注释原样保留
                     continue
                 parsed = self._parse_entry_line(line)
                 if parsed is None:
                     if "\t" not in line:
                         missing_tab += 1
-                    self._records.append(("raw", line))
+                    self._records.append(("raw", line, eol))
                     continue
-                key, value = parsed
-                entry = MCMEntry(key=key, source_text=value, dest_text=value)
-                self._records.append(("entry", entry))
+                prefix, key, value = parsed
+                entry = MCMEntry(key=key, source_text=value, dest_text=value,
+                                 prefix=prefix, eol=eol)
+                self._records.append(("entry", entry, eol))
             try:
                 cfg = ConfigManager()
             except Exception:
                 cfg = None
             if missing_tab:  # \t缺失警告
                 log_emit(None, cfg, "WARNING", f"MCM skipped {missing_tab} lines without TAB", module="mcm_processor", func="load_file")
-            entry_count = sum(1 for t, _ in self._records if t == "entry")
+            entry_count = sum(1 for record in self._records if record[0] == "entry")
             if entry_count == 0:  # 0条WARNING
                 log_emit(None, cfg, "WARNING", "MCM file has 0 entries", module="mcm_processor", func="load_file")
             self.file_path = cleaned
@@ -133,20 +143,33 @@ class MCMProcessor:
                 cfg = ConfigManager()
             except Exception:
                 cfg = None
-            log_emit(None, cfg, "ERROR", f"Error loading MCM text: {e}", exc=e,
+            message = str(e).strip() or e.__class__.__name__
+            self.last_load_error = message
+            log_emit(None, cfg, "ERROR", f"Error loading MCM text: {message}", exc=e,
                      module="mcm_processor", func="load_file")
             self.file_path = None
             self._records = []
+            if callback is not None:  # X-10 失败原因交给上层展示
+                try:
+                    callback(message)
+                except Exception:
+                    pass
             return False
 
     def get_strings(self):
-        for record_type, payload in self._records:
+        for record_type, payload, _eol in self._records:
             if record_type != "entry":
                 continue
             entry: MCMEntry = payload
             yield entry, entry.key, entry.source_text, entry.dest_text
 
     def update_dest(self, entry: MCMEntry, translation: str, overwrite: bool = False) -> None:
+        """Set the entry's translation; without *overwrite* only empty rows change.
+
+        The default ``overwrite=False`` is the historical "fill empty rows only"
+        behaviour.  Callers that always want to replace should use
+        :meth:`set_dest` (M-09).
+        """
         if entry is None:
             return
         if isinstance(translation, bytes):  # bytes先decode
@@ -159,6 +182,10 @@ class MCMProcessor:
         if not existing.strip() or overwrite:  # 空白统一视为空
             entry.dest_text = safe_translation
             entry.cleared = not safe_translation.strip()  # M-08 空译文视为显式清空
+
+    def set_dest(self, entry: MCMEntry, translation: str, overwrite: bool = True) -> None:
+        """M-09 explicit API: replace by default instead of only filling empties."""
+        self.update_dest(entry, translation, overwrite=overwrite)
 
     def build_output_path(self, language_suffix: str = "source") -> str:
         if not self.file_path:
@@ -230,10 +257,10 @@ class MCMProcessor:
             return False
 
     def _build_content(self) -> str:
-        lines: list[str] = []
-        for record_type, payload in self._records:
+        chunks: list[str] = []
+        for record_type, payload, eol in self._records:
             if record_type == "raw":
-                lines.append(str(payload))
+                chunks.append(str(payload) + eol)
                 continue
             entry: MCMEntry = payload
             dest = "" if entry.dest_text is None else str(entry.dest_text)
@@ -242,12 +269,10 @@ class MCMProcessor:
                 final_text = ""  # M-08 显式清空：写空值而非回退原文
             else:
                 final_text = dest if dest.strip() else src  # 空白语义统一
-            lines.append(f"{entry.key}\t{final_text}")
+            prefix = getattr(entry, "prefix", "") or ""  # M-07 保留行首缩进
+            chunks.append(f"{prefix}{entry.key}\t{final_text}{eol}")  # M-06 逐行原样行尾
 
-        content = self.newline.join(lines)
-        if self.trailing_newline:
-            content += self.newline
-        return content
+        return "".join(chunks)
 
     @staticmethod
     def _write_bytes_atomic(target: str, data: bytes) -> None:
@@ -290,18 +315,25 @@ class MCMProcessor:
                 pass
 
     @staticmethod
-    def _parse_entry_line(line: str) -> Optional[tuple[str, str]]:
+    def _parse_entry_line(line: str) -> Optional[tuple[str, str, str]]:
+        """Split an entry line into ``(prefix, key, value)``.
+
+        M-07: the whitespace before the key (spaces/tabs) is part of the line
+        layout used by some MCM formatting and is kept in *prefix*.
+        """
         if not line or not line.strip():  # 空白行非条目
             return None
         if line.lstrip().startswith(";"):  # ;开头为注释
             return None
-        if "\t" not in line:  # 缺TAB非条目
+        stripped_line = line.lstrip(" \t")  # 行首Tab也是缩进而非分隔符
+        if "\t" not in stripped_line:  # 缺TAB非条目
             return None
-        key, value = line.split("\t", 1)
-        key = key.strip()  # key策略：去首尾空白后判空
+        key_part, value = stripped_line.split("\t", 1)
+        key = key_part.strip()
         if not key:
             return None
-        return key, value  # value原样保留，空白由调用方统一判
+        prefix = line[:len(line) - len(stripped_line)]  # 行首缩进
+        return prefix, key, value  # value原样保留，空白由调用方统一判
 
     @classmethod
     def _decode_bytes(cls, raw: bytes, path_for_log: str = "") -> tuple[str, str, bytes]:

@@ -53,6 +53,58 @@ class _TempFixtureTestCase(unittest.TestCase):
         return path
 
 
+class MCMIndentationAndOverwriteTests(_TempFixtureTestCase):
+    def test_leading_indentation_of_keys_is_preserved_on_save(self):
+        # M-07: "  $OptionD\t..." keeps two spaces and "\t$OptionE" keeps a tab.
+        original = b"  $OptionD\tHello\r\n\t$OptionE\tWorld\r\n$OptionF\tPlain\r\n"
+        path = self._write_bytes("indent.txt", original)
+
+        processor = MCMProcessor()
+        self.assertTrue(processor.load_file(str(path)))
+        rows = list(processor.get_strings())
+        self.assertEqual(["  ", "\t", ""], [row[0].prefix for row in rows])
+
+        self.assertTrue(processor.save_file())
+        self.assertEqual(original, path.read_bytes())
+
+    def test_indentation_survives_a_changed_translation(self):
+        original = b"  $OptionD\tHello\r\n$OptionE\tWorld\r\n"
+        path = self._write_bytes("indent-change.txt", original)
+
+        processor = MCMProcessor()
+        self.assertTrue(processor.load_file(str(path)))
+        entry = next(processor.get_strings())[0]
+        processor.set_dest(entry, "译文")
+
+        self.assertTrue(processor.save_file())
+        self.assertEqual(b"  $OptionD\t\xe8\xaf\x91\xe6\x96\x87\r\n$OptionE\tWorld\r\n", path.read_bytes())
+
+    def test_mixed_line_endings_are_preserved_line_by_line(self):
+        # M-06: each line keeps its own CRLF/LF/CR ending on write-back.
+        original = b"$A\tone\r\n$B\ttwo\n$C\tthree\r"
+        path = self._write_bytes("mixed.txt", original)
+
+        processor = MCMProcessor()
+        self.assertTrue(processor.load_file(str(path)))
+        self.assertTrue(processor.save_file())
+        self.assertEqual(original, path.read_bytes())
+
+    def test_set_dest_overwrites_while_update_dest_keeps_fill_blanks_default(self):
+        # M-09: update_dest defaults to "only fill empty rows", set_dest to replace.
+        path = self._write_bytes("overwrite.txt", b"$A\tHello\r\n")
+        processor = MCMProcessor()
+        self.assertTrue(processor.load_file(str(path)))
+        entry = next(processor.get_strings())[0]
+
+        processor.update_dest(entry, "ignored")
+        self.assertEqual("Hello", entry.dest_text)
+
+        processor.set_dest(entry, "replaced")
+        self.assertEqual("replaced", entry.dest_text)
+        self.assertTrue(processor.save_file())
+        self.assertEqual(b"$A\treplaced\r\n", path.read_bytes())
+
+
 class MCMAtomicSaveTests(_TempFixtureTestCase):
     def test_encode_failure_leaves_target_intact(self):
         original = "$OptionA\tCafé\r\n".encode("cp1252")
@@ -382,11 +434,26 @@ class SafeXMLPrecheckTests(_TempFixtureTestCase):
         processor = XMLProcessor()
         self.assertFalse(processor.load_file(str(path)))
 
-    def test_parser_capability_probe_is_a_bool(self):
-        from src.safe_xml import _build_parser, _supports_forbid_dtd
+    def test_parser_builder_no_longer_probes_forbid_dtd(self):
+        # X-07: lxml 6 has no forbid_dtd keyword; the dead probe branch is gone
+        # and the real defence is the pre-parse scan plus parser hardening.
+        from src.safe_xml import _build_parser
 
-        self.assertIsInstance(_supports_forbid_dtd(), bool)
-        self.assertIsNotNone(_build_parser())
+        class _RecordingParser:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        class _FakeEtree:
+            XMLParser = _RecordingParser
+
+        with patch("src.safe_xml.etree", _FakeEtree):
+            parser = _build_parser()
+
+        self.assertIsInstance(parser, _RecordingParser)
+        self.assertNotIn("forbid_dtd", parser.kwargs)
+        self.assertFalse(parser.kwargs["resolve_entities"])
+        self.assertTrue(parser.kwargs["no_network"])
+        self.assertFalse(parser.kwargs["recover"])
 
 
 class SanitizeXMLTextHelperTests(unittest.TestCase):

@@ -16,6 +16,7 @@ _TAG_TOKEN_RE = re.compile(
 _XML_ILLEGAL_CHARS_RE = re.compile(
     "[\u0000-\u0008\u000b\u000c\u000e-\u001f\ud800-\udfff\ufffe\uffff]"
 )
+_MARKUP_LIKE_RE = re.compile(r"</?[A-Za-z_][\w:.-]*(?:\s[^<>]*)?/?>")  # 只把真标签当markup
 
 
 class IllegalXMLCharacterError(ValueError):
@@ -72,6 +73,50 @@ def node_has_child_elements(node: Any) -> bool:
     return bool(list(node))
 
 
+def insert_child_like_siblings(parent: Any, tag_name: str, etree_module: Any) -> Any:
+    """Append a new child element that follows its siblings' indentation (X-06).
+
+    The element is appended after the last element child.  When the parent is
+    pretty printed (the text before its first child is pure indentation) the
+    new element reuses that indentation and takes over the previous sibling's
+    tail (the closing-tag indent), so the surrounding whitespace is unchanged
+    in shape and a compact document stays compact.
+    """
+    if parent is None or etree_module is None:
+        raise ValueError("cannot insert a child element without a parent")
+    last_element = None
+    for child in parent:
+        if isinstance(getattr(child, "tag", None), str):
+            last_element = child
+    if last_element is None:
+        return etree_module.SubElement(parent, tag_name)
+
+    prefix = ""
+    if parent.text and not parent.text.strip():
+        prefix = parent.text  # 父节点首个子元素前的缩进即兄弟缩进
+    new_child = etree_module.SubElement(parent, tag_name)
+    new_child.tail = last_element.tail
+    last_element.tail = prefix
+    return new_child
+
+
+def _warn_cdata_text_semantics(content: str) -> None:
+    # X-05: CDATA 只能承载文本，带标签译文会变成字面量，明确提示
+    try:
+        from src.logging_helper import emit as _emit
+
+        _emit(
+            None,
+            None,
+            "WARNING",
+            "CDATA node keeps text semantics: markup in the translation is stored as literal CDATA text, not as XML elements",
+            module="xml_content",
+            func="set_node_inner_content",
+        )
+    except Exception:
+        pass
+
+
 def set_node_text_content(node: Any, value: str, etree_module: Any = None) -> None:
     """Replace node content as plain text, preserving literal angle-bracket text."""
     if node is None:
@@ -88,6 +133,13 @@ def set_node_inner_content(node: Any, value: str, etree_module: Any) -> None:
 
     Unbalanced angle-bracket tokens such as ``<mag>`` are treated as literal text,
     while balanced XML fragments such as ``<p>...</p>`` are restored as children.
+
+    CDATA consistency (X-05): a node whose text is a CDATA section has *text*
+    semantics, not element semantics.  A CDATA section cannot contain elements,
+    so a translation such as ``<font color="fff">x</font>`` is written as
+    literal text inside the CDATA section (and a WARNING is logged), while the
+    same translation on an ordinary node becomes a real child element.  Callers
+    should therefore not expect identical serialized shapes for the two cases.
     """
     if node is None:
         return
@@ -98,6 +150,8 @@ def set_node_inner_content(node: Any, value: str, etree_module: Any) -> None:
         # CDATA标记只存在于节点自身，直接赋值才能保留CDATA段
         _clear_node_children(node)
         node.text = None
+        if _MARKUP_LIKE_RE.search(content):
+            _warn_cdata_text_semantics(content)
         _assign_node_text(node, content, etree_module, preserve_cdata=True)
         return
 

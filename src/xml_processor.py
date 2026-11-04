@@ -2,12 +2,22 @@ import os
 import re
 import shutil
 import tempfile
-from typing import Optional, Any
+from typing import Any, Callable, Optional
+
 from src.logging_helper import emit as log_emit
 from src.config.manager import ConfigManager
-from src.safe_xml import etree, parse_xml_file
+from src.safe_xml import (
+    StaleNodeError,
+    XmlDocumentLayout,
+    assert_node_current,
+    build_document_payload,
+    capture_xml_layout,
+    etree,
+    parse_xml_file,
+)
 from src.xml_content import (
     get_node_inner_content,
+    insert_child_like_siblings,
     set_node_inner_content,
     set_node_text_content,
 )
@@ -92,49 +102,26 @@ def _extract_id_text(string_node: Any) -> str:
     return ""
 
 
-_BOM_UTF8 = b"\xef\xbb\xbf"
-_BOM_UTF16_LE = b"\xff\xfe"
-_BOM_UTF16_BE = b"\xfe\xff"
-
-
-def _read_source_bom(path: Optional[str]) -> bytes:
-    if not path:
-        return b""
+def _config_manager():
     try:
-        with open(path, "rb") as f:
-            head = f.read(3)
+        return ConfigManager()
     except Exception:
-        return b""
-    for bom in (_BOM_UTF8, _BOM_UTF16_LE, _BOM_UTF16_BE):
-        if head.startswith(bom):
-            return bom
-    return b""
+        return None
 
 
-def _bom_matches_encoding(bom: bytes, encoding: str) -> bool:
-    # 只在编码族与BOM一致时回填，避免把UTF-16 BOM写到UTF-8字节前
-    enc = str(encoding or "").strip().lower().replace("_", "-")
-    if bom == _BOM_UTF8:
-        return enc in ("utf-8", "utf8", "utf-8-sig")
-    if bom in (_BOM_UTF16_LE, _BOM_UTF16_BE):
-        return enc.startswith("utf-16") or enc.startswith("utf16")
-    return False
-
-
-def _serialize_tree_bytes(tree: Any, encoding: str) -> bytes:
+def _same_path(left: Optional[str], right: Optional[str]) -> bool:
+    if not left or not right:
+        return False
     try:
-        return etree.tostring(tree, encoding=encoding, xml_declaration=True, pretty_print=False)
-    except TypeError:
-        return etree.tostring(tree, encoding=encoding, xml_declaration=True)
+        return os.path.normcase(os.path.abspath(left)) == os.path.normcase(os.path.abspath(right))
+    except Exception:
+        return False
 
 
-def _write_tree_atomic(tree: Any, target: str, source_path: Optional[str] = None) -> bool:
+def _write_payload_atomic(target: str, payload: bytes) -> bool:
     # 原子写tmp+fsync+replace；.bak只保留一代且仅在tmp写完后创建
     directory = os.path.dirname(os.path.abspath(target)) or "."
-    try:
-        cfg = ConfigManager()
-    except Exception:
-        cfg = None
+    cfg = _config_manager()
     try:
         os.makedirs(directory, exist_ok=True)
     except Exception:
@@ -142,19 +129,6 @@ def _write_tree_atomic(tree: Any, target: str, source_path: Optional[str] = None
     fd, tmp_path = tempfile.mkstemp(suffix=".tmp", dir=directory)
     os.close(fd)
     try:
-        docinfo = getattr(tree, "docinfo", None)
-        encoding = str(getattr(docinfo, "encoding", "") or "").strip() if docinfo is not None else ""
-        if not encoding:
-            encoding = "utf-8"
-        payload: bytes
-        try:
-            payload = _serialize_tree_bytes(tree, encoding)  # X-01 复用源文件声明编码
-        except (LookupError, ValueError):
-            encoding = "utf-8"
-            payload = _serialize_tree_bytes(tree, encoding)
-        bom = _read_source_bom(source_path or target)  # 源文件有BOM则回填
-        if bom and _bom_matches_encoding(bom, encoding) and not payload.startswith(bom):
-            payload = bom + payload
         with open(tmp_path, "wb") as f:  # 先完整写tmp，失败不碰目标/.bak
             f.write(payload)
             f.flush()
@@ -190,33 +164,69 @@ def _write_tree_atomic(tree: Any, target: str, source_path: Optional[str] = None
         except Exception:
             pass
 
+
 class XMLProcessor:
-    def __init__(self):
+    """Skyrim ``<String><Source/><Dest/></String>`` XML processor.
+
+    Byte fidelity (X-01): ``load_file`` records the original file's sha256,
+    declaration bytes, BOM, newline style, trailing-newline flag and encoding.
+    When no ``<Dest>`` was changed, ``save_file`` does not rewrite the document
+    at all (the original bytes stay on disk); when something changed it
+    re-serializes the tree and puts the recorded declaration/BOM/EOLs back.
+
+    Known limits that are *not* preserved on a modified save: ``<Dest></Dest>``
+    is written as ``<Dest/>``, character references such as ``&#160;`` become
+    literal characters, and attribute quote style is normalized by lxml.
+    """
+
+    def __init__(self, load_failed: Optional[Callable[[str], None]] = None):
         self.tree: Optional[Any] = None
         self.root: Optional[Any] = None
         self.file_path: Optional[str] = None
+        self.layout: Optional[XmlDocumentLayout] = None
+        self.original_sha256: str = ""
+        self.last_load_error: str = ""
+        self.last_save_warnings: list[str] = []  # X-01 编码回退等提示，供GUI展示
+        self._dirty = False
+        self.load_failed = load_failed  # X-10 失败原因回调，可由GUI接线
 
-    def load_file(self, file_path: str) -> bool:
+    def load_file(self, file_path: str, load_failed: Optional[Callable[[str], None]] = None) -> bool:
+        """Parse *file_path* and record its byte layout; False on any failure.
+
+        X-10: the exception text (for example a missing lxml install) is stored
+        in ``last_load_error`` and handed to the ``load_failed`` callback so the
+        GUI can show the real reason instead of "load_file returned False".
+        """
         cleaned = str(file_path or "").strip()  # 路径strip
         self.tree = None  # 先清空防旧状态污染
         self.root = None
         self.file_path = None
+        self.layout = None
+        self.original_sha256 = ""
+        self.last_load_error = ""
+        self._dirty = False
+        callback = load_failed if load_failed is not None else self.load_failed
         try:
-            self.tree = parse_xml_file(cleaned)
-            self.root = self.tree.getroot()
-            self.file_path = cleaned
-            return True
+            tree = parse_xml_file(cleaned)
+            root = tree.getroot()
         except Exception as e:
-            # Use a local config manager for logging if available
-            try:
-                cfg = ConfigManager()
-            except Exception:
-                cfg = None
-            log_emit(None, cfg, 'ERROR', f"Error loading XML: {e}", exc=e, module='xml_processor', func='load_file')
-            self.tree = None  # 失败时清空不污染旧状态
-            self.root = None
-            self.file_path = None
+            message = str(e).strip() or e.__class__.__name__
+            self.last_load_error = message
+            log_emit(None, _config_manager(), 'ERROR', f"Error loading XML: {message}", exc=e,
+                     module='xml_processor', func='load_file')
+            if callback is not None:
+                try:
+                    callback(message)  # X-10 传可读原因而非只说False
+                except Exception:
+                    pass
             return False
+        self.tree = tree
+        self.root = root
+        self.file_path = cleaned
+        self.layout = capture_xml_layout(cleaned)  # X-01 记录原始字节特征
+        if self.layout is not None:
+            self.original_sha256 = self.layout.sha256
+        return True
 
     def get_strings(self):
         """
@@ -240,24 +250,37 @@ class XMLProcessor:
             dest_text = get_node_inner_content(dest_node, etree) if dest_node is not None else ""
             yield string_node, id_text, source_text, dest_text
         if missing_source:  # 缺Source记WARNING
-            try:
-                cfg = ConfigManager()
-            except Exception:
-                cfg = None
-            log_emit(None, cfg, "WARNING", f"Skipped {missing_source} <String> without <Source>", module="xml_processor", func="get_strings")
+            log_emit(None, _config_manager(), "WARNING", f"Skipped {missing_source} <String> without <Source>", module="xml_processor", func="get_strings")
 
-    def update_dest(self, string_node, translation: str, overwrite: bool = False) -> None:
+    def update_dest(self, string_node, translation: str, overwrite: bool = False) -> bool:
+        """Write *translation* into the node's ``<Dest>``; return True if changed.
+
+        Semantics:
+
+        * Ordinary ``<Dest>`` receives real child elements for whitelisted
+          inline markup (``<font>``, ``<i>``, ...) and escaped literal text for
+          anything else.
+        * CDATA ``<Dest>`` keeps *text* semantics: inline markup is stored as
+          literal CDATA text and a WARNING is logged (X-05), because a CDATA
+          section cannot contain elements.
+        * X-06: no ``<Dest>`` is created for an empty translation; a missing
+          node is inserted with the indentation of its siblings.
+        * X-11: a node from a previously loaded tree raises ``StaleNodeError``
+          instead of silently writing into a document that is no longer saved.
+        """
+        assert_node_current(string_node, self.root)  # X-11 旧树节点拒绝
         dest_node = _find_child(string_node, "Dest")
+        safe_translation = _decode_translation_text(translation)
         created = False
         if dest_node is None:
-            dest_node = etree.SubElement(string_node, "Dest")
+            if not safe_translation.strip():
+                return False  # X-06 空译文不建节点
+            dest_node = insert_child_like_siblings(string_node, "Dest", etree)
             created = True
 
-        # Normalize translation to string and guard against None
-        safe_translation = _decode_translation_text(translation)
         existing_content = get_node_inner_content(dest_node, etree)
         if not (overwrite or not str(existing_content or "").strip()):  # 空白统一视为空
-            return
+            return False
         try:
             if _has_whitelisted_markup(safe_translation):  # 以译文白名单标签为准
                 set_node_inner_content(dest_node, safe_translation, etree)
@@ -271,13 +294,61 @@ class XMLProcessor:
                     pass
             raise  # P0-04 向上抛错，由调用方标记该行失败
 
-    def save_file(self, output_path=None):
+        changed = created or get_node_inner_content(dest_node, etree) != existing_content
+        if changed:
+            self._dirty = True
+        return changed
+
+    def set_dest(self, string_node, translation: str) -> bool:
+        """M-09 alias with explicit overwrite semantics: always replace."""
+        return self.update_dest(string_node, translation, overwrite=True)
+
+    def mark_dirty(self) -> None:
+        """Flag the tree as modified when it was edited outside ``update_dest``."""
+        self._dirty = True
+
+    def save_file(self, output_path=None) -> bool:
+        """Save the document, byte-for-byte unchanged when nothing was edited.
+
+        X-01: with no modified ``<Dest>`` the original bytes are kept (same path
+        means no write at all, a save-as copies the bytes).  Modified documents
+        keep their declaration, BOM, newline style and trailing newline.
+        X-03: a successful save-as switches the write target.
+        """
         target = str(output_path or self.file_path or "").strip() or None
         if target is None:
             return False
-        if not self.tree:
+        if self.tree is None:
             return False
-        if not _write_tree_atomic(self.tree, target, self.file_path):
+        source = self.file_path
+        same_target = _same_path(target, source)
+        cfg = _config_manager()
+        self.last_save_warnings = []
+
+        payload: Optional[bytes] = None
+        if not self._dirty:
+            if same_target:
+                return True  # X-01 无修改：不写盘，原始字节天然一致
+            if source:
+                try:
+                    with open(source, "rb") as f:  # 另存为且无修改：整文件字节复制
+                        payload = f.read()
+                except OSError as e:
+                    log_emit(None, cfg, "DEBUG", f"Byte-copy fallback failed: {e}",
+                             module="xml_processor", func="save_file")
+                    payload = None
+        if payload is None:
+            payload, warnings = build_document_payload(self.tree, self.layout)
+            self.last_save_warnings = list(warnings)
+            for message in warnings:
+                log_emit(None, cfg, "WARNING", message, module="xml_processor", func="save_file")
+
+        if not _write_payload_atomic(target, payload):
             return False
         self.file_path = target  # X-03 另存为后切换写回目标
+        self._dirty = False
+        new_layout = capture_xml_layout(target)  # 后续保存以新文件为基准
+        if new_layout is not None:
+            self.layout = new_layout
+            self.original_sha256 = new_layout.sha256
         return True
