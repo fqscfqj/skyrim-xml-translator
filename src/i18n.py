@@ -3,6 +3,7 @@ import os
 import locale
 import sys
 import threading
+import warnings
 
 _warned_missing: set[str] = set()
 
@@ -32,20 +33,58 @@ class I18n:
             print(f"Error loading language file {file_path}: {e}")
             return {}
 
-    def _detect_system_lang(self) -> str:
+    @staticmethod
+    def _is_chinese_locale_name(name) -> bool:
+        """Accept both POSIX (zh_CN) and Windows display names (Chinese ...)."""
+        lowered = str(name or "").strip().lower().replace("-", "_")
+        if not lowered:
+            return False
+        if "chinese" in lowered:
+            return True
+        return "zh" in lowered
+
+    @staticmethod
+    def _get_windows_ui_language() -> int | None:
+        """Return the Windows UI LCID, or None when unavailable."""
+        if os.name != "nt":
+            return None
         try:
-            sys_lang = (locale.getlocale()[0] or "")
+            import ctypes
+            return int(ctypes.windll.kernel32.GetUserDefaultUILanguage())
         except Exception:
-            sys_lang = ""
-        if not sys_lang:
+            return None
+
+    def _detect_system_lang(self) -> str:
+        """Best-effort UI language detection across POSIX and Windows.
+
+        ``locale.getlocale()`` returns display names such as
+        ``'Chinese (Simplified)_China'`` on Chinese Windows (C-04), so matching
+        ``startswith('zh')`` alone is not enough.
+        """
+        sys_lang = ""
+        getters = (
+            getattr(locale, "getdefaultlocale", None),
+            getattr(locale, "getlocale", None),
+        )
+        for getter in getters:
+            if not callable(getter):
+                continue
             try:
-                sys_lang = (locale.getdefaultlocale()[0] or "")
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", DeprecationWarning)
+                    value = getter()
             except Exception:
-                sys_lang = ""
-        low = sys_lang.lower().replace("-", "_")
-        if low.startswith("zh"):
-            return 'zh'
-        return 'en'
+                continue
+            if isinstance(value, tuple) and value and value[0]:
+                sys_lang = str(value[0])
+                break
+        if self._is_chinese_locale_name(sys_lang):
+            return "zh"
+        # Windows exposes the real UI language even when the C locale is C/en.
+        ui_lang = self._get_windows_ui_language()
+        if ui_lang is not None and (ui_lang & 0xFFFF) in (0x0804, 0x0404):
+            return "zh"
+        return "en"
 
     def _validate_key_parity(self) -> None:
         try:

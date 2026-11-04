@@ -306,5 +306,18 @@
     "btn_reset_rag_advanced": "Reset RAG Advanced",
     "title_confirm_reset_rag_advanced": "Confirm Reset",
     "msg_confirm_reset_rag_advanced": "Reset all RAG advanced settings to default values?",
-    "msg_rag_advanced_reset_done": "RAG advanced settings were reset. Click Save Config to persist."
+    "msg_rag_advanced_reset_done": "RAG advanced settings were reset. Click Save Config to persist.",
+    "msg_cannot_switch_file_while_task_active": "A translation or glossary task is running. Stop it before opening another file.",
+    "msg_invalid_mcm_output_suffix": "Invalid MCM output language suffix '{suffix}' in settings; choose a valid language suffix or 'source'.",
+    "msg_vector_index_stale_prompt": "Vector index is not ready ({reason}): {detail}\nRebuild the index before translating?",
+    "msg_file_too_large": "The file is too large ({size} bytes).",
+    "msg_large_file_confirm": "This file is large ({size} bytes). Continue loading?",
+    "msg_drop_directory_rejected": "Directories cannot be loaded; choose a translation file.",
+    "msg_drop_multi_files": "Please drop a single file ({count} were dropped).",
+    "msg_invalid_path_length": "The file path is too long or the file name exceeds 255 characters.",
+    "msg_invalid_path_chars": "The file path contains characters that are not allowed: < > : \" | ? *",
+    "msg_translation_already_in_progress": "A translation task is already running.",
+    "msg_glossary_task_already_running": "A glossary task is already running.",
+    "msg_loading_in_progress": "A file is still loading; please wait.",
+    "msg_config_save_failed": "Could not save the configuration file. Check that the folder is writable and try again."
 }
