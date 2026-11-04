@@ -1,6 +1,8 @@
 import unittest
 from typing import Any, cast
+from unittest import mock
 
+from src.cache.lru_cache import LRUCache
 from src.prompt.prompt_manager import PromptManager
 from src.rag.keyword_extractor import KeywordExtractor
 
@@ -18,6 +20,16 @@ class _StaticLLMClient:
     def chat_completion_search(self, *args, **kwargs):
         self.calls.append((args, kwargs))
         return self.response
+
+
+class _FailingLLMClient:
+    def __init__(self, message="search backend down"):
+        self.message = message
+        self.calls = []
+
+    def chat_completion_search(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        raise RuntimeError(self.message)
 
 
 class _DummyPromptManager:
@@ -56,9 +68,11 @@ class _DummyGlossaryManager:
     @staticmethod
     def normalize_term_key(value: str) -> str:
         import re
+        import unicodedata
 
-        cleaned = str(value or "").strip().lower()
-        cleaned = re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]+", " ", cleaned)
+        cleaned = unicodedata.normalize("NFKC", str(value or "")).casefold()
+        cleaned = re.sub(r"[^\w\u4e00-\u9fff]+", " ", cleaned)
+        cleaned = cleaned.replace("_", " ")
         return re.sub(r"\s+", " ", cleaned).strip()
 
     def lookup_normalized(self, normalized: str):
@@ -159,8 +173,35 @@ class KeywordExtractorPromptStructureTests(unittest.TestCase):
             messages,
         )
 
-    def test_empty_llm_output_falls_back_to_lowercase_title_term(self):
+    def test_successful_empty_llm_output_is_authoritative(self):
+        # R-35: a successful [] must NOT be overridden by the regex fallback.
         extractor = self._make_extracting_extractor("[]")
+
+        keywords, debug = cast(
+            tuple[list[str], dict[str, Any]],
+            extractor.extract(
+                "Wow, my thane. Did you need a break from me?",
+                return_debug=True,
+            ),
+        )
+
+        self.assertEqual([], keywords)
+        self.assertEqual("primary_llm", debug["result_source"])
+        self.assertNotIn(
+            "regex",
+            {step["phase"] for step in debug["finalization_steps"]},
+        )
+
+    def test_llm_failure_still_falls_back_to_regex(self):
+        extractor = KeywordExtractor(
+            llm_client=_FailingLLMClient(),
+            prompt_manager=_DummyPromptManager('原文："{text}"'),
+            config_manager=_DummyConfig(),
+            glossary_manager=_DummyGlossaryManager(
+                glossary={"Thane": "武卫"},
+                signal_terms={"thane"},
+            ),
+        )
 
         keywords, debug = cast(
             tuple[list[str], dict[str, Any]],
@@ -254,6 +295,13 @@ class KeywordExtractorPromptStructureTests(unittest.TestCase):
             **base_config,
             "rag": {"keyword_llm_max_tokens": 512},
         }
+        changed_post_config = {
+            **base_config,
+            "rag": {
+                "keyword_task_keep_original": True,
+                "keyword_max_queries": 64,
+            },
+        }
 
         base = KeywordExtractor(
             llm_client=_DummyLLMClient(),
@@ -279,10 +327,198 @@ class KeywordExtractorPromptStructureTests(unittest.TestCase):
             config_manager=_DummyConfig(changed_budget_config),
             glossary_manager=_DummyGlossaryManager(),
         )
+        changed_post = KeywordExtractor(
+            llm_client=_DummyLLMClient(),
+            prompt_manager=_DummyPromptManager('原文："{text}"'),
+            config_manager=_DummyConfig(changed_post_config),
+            glossary_manager=_DummyGlossaryManager(),
+        )
 
         self.assertNotEqual(base._keyword_cache_fingerprint(), changed_parameter._keyword_cache_fingerprint())
         self.assertNotEqual(base._keyword_cache_fingerprint(), changed_fallback._keyword_cache_fingerprint())
         self.assertEqual(base._keyword_cache_fingerprint(), changed_budget._keyword_cache_fingerprint())
+        self.assertNotEqual(base._keyword_cache_fingerprint(), changed_post._keyword_cache_fingerprint())
+
+
+class KeywordRecallAndCacheTests(unittest.TestCase):
+    def _make(
+        self,
+        response="[]",
+        *,
+        glossary=None,
+        signal_terms=None,
+        config=None,
+        cache=None,
+        client=None,
+    ):
+        return KeywordExtractor(
+            llm_client=client if client is not None else _StaticLLMClient(response),
+            prompt_manager=_DummyPromptManager('原文："{text}"'),
+            config_manager=_DummyConfig(config),
+            glossary_manager=_DummyGlossaryManager(
+                glossary={"Thane": "武卫"} if glossary is None else glossary,
+                signal_terms={"thane"} if signal_terms is None else signal_terms,
+            ),
+            cache=cache,
+        )
+
+    def test_russian_keyword_survives_source_match_and_glossary_lookup(self):
+        extractor = self._make(
+            '["Мёртвый"]',
+            glossary={"Мёртвый": "亡灵"},
+            signal_terms={"мёртвый"},
+        )
+        keywords = extractor.extract("Мёртвый дракон проснулся.")
+        self.assertEqual(["Мёртвый"], keywords)
+
+    def test_japanese_keyword_survives_source_match_and_glossary_lookup(self):
+        extractor = self._make(
+            '["ホワイトラン"]',
+            glossary={"ホワイトラン": "白漫城"},
+            signal_terms={"ホワイトラン"},
+        )
+        keywords = extractor.extract("ホワイトランへ向かう。")
+        self.assertEqual(["ホワイトラン"], keywords)
+
+    def test_exact_glossary_phrase_is_never_decomposed(self):
+        extractor = self._make(
+            '["Erik the Slayer"]',
+            glossary={"Erik the Slayer": "埃里克·杀者"},
+            signal_terms={"erik", "slayer"},
+        )
+        keywords = extractor.extract("Erik the Slayer")
+        self.assertEqual(["Erik the Slayer"], keywords)
+
+    def test_direct_glossary_hit_survives_ly_and_common_word_filters(self):
+        # "Rally" ends in -ly but is an exact glossary term (R-03).
+        extractor = self._make(
+            '["Rally"]',
+            glossary={"Rally": "集结"},
+            signal_terms={"rally"},
+        )
+        self.assertEqual(["Rally"], extractor.extract("Rally the troops!"))
+
+    def test_plain_line_list_response_is_parsed(self):
+        extractor = self._make("[]", glossary={}, signal_terms=set())
+        keywords = extractor.extract("Erik met Whiterun by nightfall.")
+        # static client returns "[]"; feed the line parser directly instead
+        target = {}
+        parsed = extractor._parse_keyword_response(
+            "Erik\nWhiterun", None, debug_target=target
+        )
+        self.assertEqual(["Erik", "Whiterun"], parsed)
+        self.assertEqual("line_list", target["parse_method"])
+        self.assertEqual([], keywords)
+
+    def test_bulleted_response_skips_prose_header(self):
+        extractor = self._make("[]", glossary={}, signal_terms=set())
+        target = {}
+        parsed = extractor._parse_keyword_response(
+            "Keywords (see [1]):\n- Erik\n- Whiterun",
+            None,
+            debug_target=target,
+        )
+        self.assertEqual(["Erik", "Whiterun"], parsed)
+        self.assertEqual("line_list", target["parse_method"])
+
+    def test_inline_bracket_note_is_not_a_keyword_and_parse_fails(self):
+        extractor = self._make("[]", glossary={}, signal_terms=set())
+        target = {}
+        parsed = extractor._parse_keyword_response(
+            "Keywords (see [1]):", None, debug_target=target
+        )
+        self.assertEqual([], parsed)
+        self.assertEqual("parse_failed", target["parse_method"])
+
+    def test_non_string_items_are_dropped(self):
+        extractor = self._make("[]", glossary={}, signal_terms=set())
+        target = {}
+        parsed = extractor._parse_keyword_response(
+            '[1, "Erik"]', None, debug_target=target
+        )
+        self.assertEqual(["Erik"], parsed)
+        self.assertEqual("json_list", target["parse_method"])
+
+    def test_numeric_only_array_is_a_parse_failure(self):
+        extractor = self._make("[]", glossary={}, signal_terms=set())
+        target = {}
+        parsed = extractor._parse_keyword_response("[1]", None, debug_target=target)
+        self.assertEqual([], parsed)
+        self.assertEqual("parse_failed", target["parse_method"])
+
+    def test_english_refusal_tries_fallback_model(self):
+        client = _StaticLLMClient("I'm sorry, I cannot help with that.")
+        extractor = self._make(
+            "",
+            glossary={"Thane": "武卫"},
+            signal_terms={"thane"},
+            client=client,
+        )
+        keywords, debug = cast(
+            tuple[list[str], dict[str, Any]],
+            extractor.extract("Wow, my thane.", return_debug=True),
+        )
+        self.assertEqual(2, len(client.calls))
+        self.assertEqual(["thane"], keywords)
+        self.assertEqual("regex_fallback", debug["result_source"])
+        self.assertTrue(
+            extractor._is_refusal_response_text("I cannot assist with this request.")
+        )
+
+    def test_cache_normalizes_key_and_returns_copies(self):
+        cache = LRUCache(max_size=32)
+        client = _StaticLLMClient('["Thane"]')
+        extractor = self._make(
+            '["Thane"]',
+            glossary={"Thane": "武卫"},
+            signal_terms={"thane"},
+            cache=cache,
+            client=client,
+        )
+        first = extractor.extract("Thane")
+        self.assertEqual(["Thane"], first)
+        first.append("mutated-by-caller")
+        self.assertEqual(1, len(client.calls))
+
+        second = extractor.extract("  thane  ")
+        self.assertEqual(["Thane"], second)
+        self.assertEqual(1, len(client.calls), "whitespace/case variant must hit the cache")
+
+        second.append("mutated-too")
+        third = extractor.extract("THANE")
+        self.assertEqual(["Thane"], third)
+        self.assertEqual(1, len(client.calls))
+
+    def test_successful_empty_result_is_cached(self):
+        cache = LRUCache(max_size=32)
+        client = _StaticLLMClient("[]")
+        extractor = self._make(
+            "[]",
+            glossary={"Thane": "武卫"},
+            signal_terms={"thane"},
+            cache=cache,
+            client=client,
+        )
+        self.assertEqual([], extractor.extract("Wow, my thane."))
+        self.assertEqual(1, len(client.calls))
+        self.assertEqual([], extractor.extract("wow,  my thane."))
+        self.assertEqual(1, len(client.calls))
+
+    def test_failed_result_is_not_cached(self):
+        cache = LRUCache(max_size=32)
+        client = _FailingLLMClient()
+        extractor = self._make(
+            "",
+            glossary={"Thane": "武卫"},
+            signal_terms={"thane"},
+            cache=cache,
+            client=client,
+        )
+        first = extractor.extract("my thane")
+        second = extractor.extract("my thane")
+        self.assertEqual(first, second)
+        # primary + fallback per call, no cache short-circuit on failures.
+        self.assertEqual(4, len(client.calls))
 
 
 if __name__ == "__main__":

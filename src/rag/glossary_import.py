@@ -18,10 +18,13 @@ unit-tested in isolation.
 
 from __future__ import annotations
 
+import codecs
 import csv
+import io
 import json
 import os
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
@@ -100,6 +103,12 @@ _KNOWN_JSON_KEYS = (
 )
 
 _DELETE_OPS = {"delete", "del", "remove", "删除"}
+# Explicit upsert whitelist (G-09).  Empty op is the legacy two-column default.
+_UPSERT_OPS = {"", "upsert", "add", "update", "replace"}
+# Candidate delimiters for trial parsing (P0-10).
+_TRIAL_DELIMITERS = (",", "\t", ";", "|")
+# Never let a legitimate long field explode as a raw csv.Error (P0-10/G-08).
+_MIN_CSV_FIELD_SIZE_LIMIT = 1 << 20  # 1 MiB
 
 _LIST_SPLIT_RE = re.compile(r"[;|｜；\n]+")
 
@@ -183,71 +192,123 @@ def _build_header_map(header: list[str]) -> tuple[dict[str, int], int]:
     return mapping, unknown
 
 
-def _looks_like_header(row: list[str]) -> bool:
+def _looks_like_header(row: list[str], following_rows: Optional[list[list[str]]] = None) -> bool:
     lowered = {_normalize_header_cell(cell) for cell in row}
     has_term = bool(lowered & _TERM_KEYS)
     has_translation = bool(lowered & _TRANSLATION_KEYS)
     if not (has_term and has_translation):
         return False
-    # "Term,Translation" as a data row is the canonical legacy fixture.
-    # Only treat the first row as a header when it declares at least one
-    # extra known column (domain/pos/priority/...). Unknown columns alone
-    # never promote a row to header.
-    known_names = (
-        _DOMAIN_KEYS | _POS_KEYS | _PRIORITY_KEYS | _FORBIDDEN_KEYS
-        | _EXAMPLES_KEYS | _VARIANTS_KEYS | _META_SOURCE_KEYS
-        | _CONFIDENCE_KEYS | _UPDATED_AT_KEYS | _NOTE_KEYS | _OP_KEYS
-    )
-    if len(row) > 2:
-        return True
-    return any(name in known_names for name in lowered if name)
+    # G-04: a first row that is exactly "<term key>,<translation key>"
+    # (e.g. "Term,Translation" / "原文,译文") is a header, not a glossary entry.
+    if len(row) == 2:
+        if not (
+            _normalize_header_cell(row[0]) in _TERM_KEYS
+            and _normalize_header_cell(row[1]) in _TRANSLATION_KEYS
+        ):
+            return False
+        # Keep the canonical legacy two-column fixture working: when no later
+        # row has 2+ columns there is no evidence of a real table, so treat the
+        # row as data.  Callers without lookahead context assume a header.
+        if following_rows is None:
+            return True
+        return any(len(next_row) >= 2 for next_row in following_rows)
+    return True
+
+
+def _score_delimiter(sample_text: str, delimiter: str) -> float:
+    """Fraction of non-empty rows that agree on a >=2-column width.
+
+    Trial parsing (not raw character counts) prevents semicolons inside a
+    translation from being mistaken for the column separator (P0-10).
+    """
+    if not sample_text or not delimiter:
+        return 0.0
+    try:
+        rows = list(csv.reader(io.StringIO(sample_text), delimiter=delimiter))
+    except csv.Error:
+        return 0.0
+    counts = [len(row) for row in rows if any(str(cell or "").strip() for cell in row)]
+    if not counts:
+        return 0.0
+    multi = [count for count in counts if count >= 2]
+    if not multi:
+        return 0.0
+    modal = Counter(multi).most_common(1)[0][0]
+    return multi.count(modal) / float(len(counts))
+
+
+def _default_delimiter(extension: str) -> str:
+    return "\t" if extension == ".tsv" else ","
 
 
 def _detect_delimiter(sample_text: str, extension: str) -> str:
-    if extension == ".tsv":
-        return "\t"
-    if extension == ".csv":
-        # CSV keeps comma even if content contains tabs; sniff only for ';' edge.
-        if ";" in sample_text and sample_text.count(";") > sample_text.count(","):
-            return ";"
-        return ","
-    try:
-        sniffer = csv.Sniffer()
-        dialect = sniffer.sniff(sample_text, delimiters=",\t;|")
-        if dialect.delimiter in (",", "\t", ";", "|"):
-            return dialect.delimiter
-    except Exception:
-        pass
-    tab_count = sample_text.count("\t")
-    comma_count = sample_text.count(",")
-    semi_count = sample_text.count(";")
-    pipe_count = sample_text.count("|")
-    if pipe_count > comma_count and pipe_count >= tab_count and pipe_count >= semi_count:
-        return "|"
-    if tab_count > comma_count and tab_count >= semi_count:
-        return "\t"
-    if semi_count > comma_count and semi_count > tab_count:
-        return ";"
-    return ","
+    """Pick the delimiter whose trial parse yields the most consistent rows.
+
+    Candidates are tried starting with the extension default, so ties (e.g.
+    "Sword,剑;刀;刃;锋" parses to 2 columns with ',' and 4 with ';') keep the
+    extension-based default.  When no candidate yields a >=2-column parse the
+    default is kept as well.
+    """
+    default = _default_delimiter(extension)
+    best = default
+    best_score = -1.0
+    ordered = [default] + [d for d in _TRIAL_DELIMITERS if d != default]
+    for candidate in ordered:
+        score = _score_delimiter(sample_text, candidate)
+        if score > best_score + 1e-9:
+            best = candidate
+            best_score = score
+    if best_score <= 0.0:
+        return default
+    return best
 
 
 def _read_text_with_encoding(file_path: str) -> tuple[str, str]:
-    """Read full text preferring utf-8-sig; raise explicit error otherwise."""
+    """Read full text preferring utf-8-sig; raise explicit error otherwise.
+
+    UTF-16 (with or without BOM) and embedded NUL bytes are rejected up front
+    with an actionable message instead of silently importing ``S\\x00w\\x00...``
+    as term surfaces (G-07).
+    """
     try:
-        with open(file_path, "r", encoding="utf-8-sig") as handle:
-            return handle.read(), "utf-8-sig"
-    except UnicodeDecodeError as exc:
-        reason = (
-            f"无法以 UTF-8 解码导入文件 '{file_path}'"
-            f"（字节 {exc.start}-{exc.end}，原因：{exc.reason}）。"
-            "请将其另存为 UTF-8 编码（含/不含 BOM 均可）后重试；"
-            "GBK/ANSI 编码需先转换，直接导入会被拒绝以避免乱码入库。"
-        )
-        raise GlossaryImportError(reason) from exc
+        with open(file_path, "rb") as handle:
+            raw = handle.read()
     except FileNotFoundError as exc:
         raise GlossaryImportError(f"导入文件不存在 '{file_path}'：{exc}") from exc
     except OSError as exc:
         raise GlossaryImportError(f"无法读取导入文件 '{file_path}'：{exc}") from exc
+
+    if not raw:
+        return "", "utf-8-sig"
+    if raw.startswith(codecs.BOM_UTF8):
+        try:
+            return raw.decode("utf-8-sig"), "utf-8-sig"
+        except UnicodeDecodeError as exc:
+            _raise_decode_error(file_path, exc)
+    if raw.startswith(codecs.BOM_UTF16_LE) or raw.startswith(codecs.BOM_UTF16_BE):
+        raise GlossaryImportError(
+            f"导入文件 '{file_path}' 是 UTF-16 编码（检测到 UTF-16 BOM）。"
+            "请另存为 UTF-8（含/不含 BOM 均可）后重试，直接导入会被拒绝以避免乱码入库。"
+        )
+    if b"\x00" in raw[:65536]:
+        raise GlossaryImportError(
+            f"导入文件 '{file_path}' 含 NUL 字节（通常是 UTF-16/二进制文件）。"
+            "请另存为 UTF-8 文本后重试，直接导入会被拒绝以避免乱码入库。"
+        )
+    try:
+        return raw.decode("utf-8"), "utf-8"
+    except UnicodeDecodeError as exc:
+        _raise_decode_error(file_path, exc)
+
+
+def _raise_decode_error(file_path: str, exc: UnicodeDecodeError):
+    reason = (
+        f"无法以 UTF-8 解码导入文件 '{file_path}'"
+        f"（字节 {exc.start}-{exc.end}，原因：{exc.reason}）。"
+        "请将其另存为 UTF-8 编码（含/不含 BOM 均可）后重试；"
+        "GBK/ANSI 编码需先转换，直接导入会被拒绝以避免乱码入库。"
+    )
+    raise GlossaryImportError(reason) from exc
 
 
 def _record_invalid(result: ParsedGlossaryImport, message: str) -> None:
@@ -296,6 +357,14 @@ def _apply_entry(
     term = (term or "").strip()
     translation = (translation or "").strip()
     op = (raw_op or "").strip().lower()
+    if op and op not in _DELETE_OPS and op not in _UPSERT_OPS:
+        # G-09: unknown operations used to be silently treated as upsert.
+        _record_invalid(
+            result,
+            f"{line_hint}未知操作 op='{str(raw_op).strip()}'"
+            "（支持 upsert/add/update/replace/delete/remove），已跳过",
+        )
+        return
     if op in _DELETE_OPS:
         if not term:
             _record_invalid(result, f"{line_hint}删除行缺少词面，已跳过")
@@ -333,6 +402,20 @@ def _apply_entry(
         result.rich_meta[term] = cleaned
 
 
+def _ensure_csv_field_size_limit(max_field_chars: int = 0) -> None:
+    """Raise the stdlib csv field cap to at least 1 MiB (P0-10/G-08)."""
+    target = max(_MIN_CSV_FIELD_SIZE_LIMIT, int(max_field_chars or 0) + 1024)
+    target = min(target, 2 ** 31 - 1)
+    try:
+        if csv.field_size_limit() < target:
+            csv.field_size_limit(target)
+    except (OverflowError, ValueError, csv.Error):
+        try:
+            csv.field_size_limit(_MIN_CSV_FIELD_SIZE_LIMIT)
+        except (OverflowError, ValueError, csv.Error):
+            pass
+
+
 def parse_delimited_text(
     text: str,
     *,
@@ -343,22 +426,31 @@ def parse_delimited_text(
     progress_callback: Optional[Callable[[int], None]] = None,
     should_stop: Optional[Callable[[], bool]] = None,
 ) -> ParsedGlossaryImport:
-    import io
+    _ensure_csv_field_size_limit(max_field_chars)
 
     result = ParsedGlossaryImport(
         source_file=source_file,
         encoding="utf-8-sig",
         delimiter=delimiter,
     )
-    reader = csv.reader(io.StringIO(text), delimiter=delimiter)
-    rows = list(reader)
+    # strict=True turns malformed rows (unclosed quotes, stray quote inside an
+    # unquoted field) into csv.Error instead of silently merging/dropping rows.
+    reader = csv.reader(io.StringIO(text), delimiter=delimiter, strict=True)
+    try:
+        rows = list(reader)
+    except csv.Error as exc:
+        line_no = max(1, int(getattr(reader, "line_num", 0) or 0))
+        raise GlossaryImportError(
+            f"CSV 解析失败（分隔符 {delimiter!r}，约第 {line_no} 行）：{exc}。"
+            "请检查是否存在未闭合的引号或跨行字段，修正后重试。"
+        ) from exc
     if not rows:
         result.format_kind = "csv_legacy"
         return result
 
     header_map: dict[str, int] = {}
     data_start = 0
-    if _looks_like_header(rows[0]):
+    if _looks_like_header(rows[0], rows[1:]):
         header_map, unknown = _build_header_map(rows[0])
         result.unknown_fields += unknown
         data_start = 1
@@ -623,6 +715,8 @@ def parse_glossary_file(
     """Parse CSV/TSV/TXT/JSON glossary import files with a unified report."""
     max_rows = max(0, int(max_rows or 0))
     max_field_chars = max(0, int(max_field_chars or 0))
+    # Ensure delimiter trial parsing sees the same field cap as the real parse.
+    _ensure_csv_field_size_limit(max_field_chars)
     extension = os.path.splitext(str(file_path or ""))[1].strip().lower()
     text, encoding = _read_text_with_encoding(file_path)
     if extension == ".json":

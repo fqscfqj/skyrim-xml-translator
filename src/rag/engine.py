@@ -1,5 +1,6 @@
 """RAG Engine facade - backward-compatible API delegating to sub-modules."""
 
+import hashlib
 import os
 
 from src.logging_helper import emit as log_emit
@@ -39,6 +40,12 @@ class RAGEngine:
         # Initialize sub-modules
         self._glossary_mgr = GlossaryManager(glossary_path, config_manager)
         self._vector_store = VectorStore(vector_path, terms_path, embed_dim, config_manager)
+        # R-21: let the status machine compare the live glossary key set lazily.
+        self._vector_store.set_glossary_hash_provider(
+            self.get_glossary_content_hash,
+            self.get_glossary_fingerprint,
+            lambda: len(self._glossary_mgr.glossary),
+        )
 
         # Caches
         kw_cache_size = self.config.get("cache", "translation_cache_size", 50000)
@@ -160,6 +167,18 @@ class RAGEngine:
     def get_glossary_fingerprint(self) -> str:
         return self._glossary_mgr.get_content_fingerprint()
 
+    def get_glossary_content_hash(self) -> str:
+        """Hash of the glossary key set only (R-21).
+
+        Translation-only edits must not invalidate the vector index, so this is
+        the value the index status machine compares against.
+        """
+        try:
+            keys = sorted(str(key) for key in self._glossary_mgr.glossary.keys())
+        except Exception:
+            return ""
+        return hashlib.sha256("\n".join(keys).encode("utf-8")).hexdigest()
+
     def get_vector_index_status(self) -> VectorIndexStatus:
         return self._vector_store.get_index_status()
 
@@ -210,6 +229,13 @@ class RAGEngine:
             log_emit(None, self.config, "ERROR",
                      f"Error adding term vector: {e}", exc=e,
                      module="rag_engine", func="add_term")
+        finally:
+            # A failed embedding leaves the index missing a glossary key; expose
+            # that immediately instead of showing a stale "ready" (R-21/F-10).
+            try:
+                self._vector_store.refresh_index_status()
+            except Exception:
+                pass
 
     def delete_term(self, term):
         self._glossary_mgr.delete_term(term)
@@ -227,6 +253,12 @@ class RAGEngine:
         """
         self._sync_stop_flags()
         self._glossary_mgr.add_terms_batch(terms_dict, rich_meta=rich_meta)
+        try:
+            # Expose "index does not cover the glossary key set" immediately
+            # (e.g. vectorization refused/stopped below) instead of a stale ready.
+            self._vector_store.refresh_index_status()
+        except Exception:
+            pass
 
         applied_deletes = 0
         if deletes:
@@ -234,18 +266,29 @@ class RAGEngine:
             glossary_norms = {self._glossary_mgr.normalize_term_key(t): t for t in self._glossary_mgr.glossary.keys()}
             vector_norms = {self._glossary_mgr.normalize_term_key(t): t for t in self._vector_store.terms}
             vector_term_set = set(self._vector_store.terms)
+            # R-25: resolve every delete first, then apply them in one batch call
+            # (per-term delete_vector rewrites the whole .npy for each row).
+            delete_targets: list[str] = []
+            seen_targets: set[str] = set()
             for term in list(deletes):
                 term_norm = self._glossary_mgr.normalize_term_key(term)
                 if term_norm in norm_terms:
                     continue
                 target_glossary = term if term in self._glossary_mgr.glossary else glossary_norms.get(term_norm)
                 target_vector = term if term in vector_term_set else vector_norms.get(term_norm)
-                if target_glossary is not None or target_vector is not None:
-                    if target_glossary is not None:
-                        self._glossary_mgr.delete_term(target_glossary)
-                    if target_vector is not None:
-                        self._vector_store.delete_vector(target_vector)
-                    applied_deletes += 1
+                if target_glossary is None and target_vector is None:
+                    continue
+                applied_deletes += 1
+                for target in (target_glossary, target_vector):
+                    if target is not None and target not in seen_targets:
+                        seen_targets.add(target)
+                        delete_targets.append(target)
+            if delete_targets:
+                deleted_glossary = self.delete_terms_batch(delete_targets)
+                if deleted_glossary == 0:
+                    # Pure vector-only orphans: delete_terms_batch skips the
+                    # vector layer when no glossary key matched.
+                    self._vector_store.delete_vectors_batch(delete_targets)
             if applied_deletes and log_callback:
                 log_emit(log_callback, self.config, "INFO",
                          f"Applied {applied_deletes} explicit delete operations from import.",
@@ -279,6 +322,8 @@ class RAGEngine:
             index_extra={"source": dict(import_source) if isinstance(import_source, dict) else {}},
             embedding_fingerprint=self.get_embedding_fingerprint(),
             glossary_hash=self.get_glossary_fingerprint(),
+            should_stop=lambda: self.stop_flag,
+            should_pause=lambda: self.pause_flag,
         )
 
     def delete_terms_batch(self, terms_list):
@@ -299,6 +344,8 @@ class RAGEngine:
             force_full=force_full,
             embedding_fingerprint=self.get_embedding_fingerprint(),
             glossary_hash=self.get_glossary_fingerprint(),
+            should_stop=lambda: self.stop_flag,
+            should_pause=lambda: self.pause_flag,
         )
 
     def extract_keywords(self, text, log_callback=None, return_debug: bool = False):

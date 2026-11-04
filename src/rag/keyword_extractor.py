@@ -3,8 +3,9 @@
 import hashlib
 import json
 import re
+import unicodedata
 from collections import Counter
-from typing import Optional, Callable, List
+from typing import Any, Optional, Callable, List
 
 from src.logging_helper import emit as log_emit
 from src.llm.retry import ErrorType, classify_error
@@ -17,11 +18,22 @@ class KeywordExtractor:
     _POSSESSIVE_S_RE = re.compile(r"['\u2019]\s*s\s+")
     _PROPER_NOUN_RE = re.compile(r"\b([A-Z][a-z]{2,})\b")
     _MARKDOWN_CODE_RE = re.compile(r"```(?:json)?")
-    _NORMALIZE_TERM_RE = re.compile(r"[^0-9a-zA-Z\u4e00-\u9fff]+")
+    # Unicode-aware: keep Cyrillic/kana/etc. instead of erasing non-Latin text
+    # (R-02).  NFKC + casefold are applied by _normalize_for_source_match.
+    _NORMALIZE_TERM_RE = re.compile(r"[^\w\u4e00-\u9fff]+", re.UNICODE)
     _WHITESPACE_RE = re.compile(r"\s+")
     _WORD_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9'\-]*")
     _STRIP_PUNCT_RE = re.compile(r"^[^\w\u4e00-\u9fff]+|[^\w\u4e00-\u9fff]+$")
-    _KW_CACHE_VERSION = "kw_v18"
+    _KW_CACHE_VERSION = "kw_v19"
+    # Result sources that are degraded/failed paths: these must never be cached
+    # and may fall back to the deterministic regex extractor (R-36).
+    _DEGRADED_RESULT_SOURCES = frozenset({
+        "llm_error_regex",
+        "fallback_failed_regex",
+        "primary_sensitive_block",
+        "fallback_sensitive_block",
+        "regex_fallback",
+    })
     _LOW_SIGNAL_SINGLE_TOKENS = frozenset({
         "honestly", "kinda", "kindof", "sorta", "sortof",
         "really", "actually", "basically", "seriously", "literally",
@@ -43,6 +55,16 @@ class KeywordExtractor:
         "无法协助",
         "不便提供",
         "无法满足",
+        # English refusal wording: without these the fallback model never ran
+        # on an English refusal (R-37).
+        "i'm sorry",
+        "i am sorry",
+        "i cannot help",
+        "i can't help",
+        "i cannot assist",
+        "i can't assist",
+        "cannot assist",
+        "unable to assist",
     )
 
     def __init__(self, llm_client, prompt_manager, config_manager,
@@ -66,31 +88,38 @@ class KeywordExtractor:
                 return [], debug_info
             return []
 
+        # Cache key ignores insignificant whitespace/case so that three
+        # whitespace variants of the same line do not pay three LLM calls
+        # (R-36).  This changes lookup only, never the extraction semantics.
+        normalized_text = self._normalize_cache_text(text)
         if self._cache is not None:
             cache_fingerprint = self._keyword_cache_fingerprint()
-            cache_key = LRUCache.make_key(self._KW_CACHE_VERSION, cache_fingerprint, text)
+            cache_key = LRUCache.make_key(self._KW_CACHE_VERSION, cache_fingerprint, normalized_text)
             cached = self._cache.get(cache_key)
             if cached is not None:
+                cached_list = list(cached) if isinstance(cached, (list, tuple)) else []
                 try:
                     log_emit(log_callback, self.config, "DEBUG",
-                             f"[RAG] Keyword cache hit ({len(cached)} keywords)",
+                             f"[RAG] Keyword cache hit ({len(cached_list)} keywords)",
                              module="keyword_extractor", func="extract")
                 except Exception:
                     pass
                 debug_info["cache_hit"] = True
                 debug_info["result_source"] = "cache"
-                debug_info["final_keywords"] = list(cached)
+                debug_info["final_keywords"] = list(cached_list)
                 self._record_keyword_step(
                     debug_info,
                     phase="cache",
                     name="cache_hit",
                     before=[],
-                    after=cached,
+                    after=cached_list,
                     note=f"cache_version={self._KW_CACHE_VERSION}; fingerprint={cache_fingerprint[:12]}",
                 )
+                # Return a copy: callers mutate the list (append/sort) and used
+                # to corrupt the cached entry (R-36).
                 if return_debug:
-                    return cached, debug_info
-                return cached
+                    return list(cached_list), debug_info
+                return list(cached_list)
 
         try:
             log_emit(log_callback, self.config, "DEBUG",
@@ -99,12 +128,14 @@ class KeywordExtractor:
         except Exception:
             pass
 
+        llm_call_failed = False
         try:
             keywords = self._extract_via_llm(text, log_callback, debug_info=debug_info)
         except ValueError:
             raise
         except Exception as e:
             # LLM outage degrades to deterministic regex fallback.
+            llm_call_failed = True
             try:
                 log_emit(log_callback, self.config, "WARNING",
                          f"[RAG] keyword_extract LLM failed, degrading to regex: {e}",
@@ -122,8 +153,14 @@ class KeywordExtractor:
             phase="llm",
         )
 
-        # Minimal deterministic fallback only when LLM output is empty/invalid.
-        if not keywords:
+        result_source = str(debug_info.get("result_source") or "")
+        degraded = llm_call_failed or result_source in self._DEGRADED_RESULT_SOURCES
+
+        # R-35: only a failed/degraded extraction may fall back to the regex
+        # proper-noun scan.  A successful LLM answer of [] is authoritative:
+        # "Arrive at Whiterun by nightfall." used to become
+        # ['Arrive', 'Whiterun', 'nightfall'] despite the model returning [].
+        if not keywords and degraded:
             regex_keywords = self._extract_proper_nouns_regex(text)
             if regex_keywords:
                 debug_info["raw_keywords"] = list(regex_keywords)
@@ -134,7 +171,7 @@ class KeywordExtractor:
                     name="raw_extraction",
                     before=[],
                     after=regex_keywords,
-                    note="LLM output empty or invalid; using regex proper-noun fallback.",
+                    note="LLM call/parse failed; using regex proper-noun fallback.",
                 )
             keywords = self._finalize_keywords(
                 regex_keywords,
@@ -155,8 +192,16 @@ class KeywordExtractor:
             pass
 
         if self._cache is not None:
-            cache_key = LRUCache.make_key(self._KW_CACHE_VERSION, self._keyword_cache_fingerprint(), text)
-            self._cache.put(cache_key, keywords)
+            final_source = str(debug_info.get("result_source") or "")
+            # Never cache degraded/failed results; cache successful empty
+            # results so repeated [] answers stay free (R-35/R-36).
+            if final_source not in self._DEGRADED_RESULT_SOURCES:
+                cache_key = LRUCache.make_key(
+                    self._KW_CACHE_VERSION,
+                    self._keyword_cache_fingerprint(),
+                    normalized_text,
+                )
+                self._cache.put(cache_key, list(keywords))
 
         debug_info["final_keywords"] = list(keywords)
         if not debug_info.get("result_source"):
@@ -165,6 +210,12 @@ class KeywordExtractor:
         if return_debug:
             return keywords, debug_info
         return keywords
+
+    def _normalize_cache_text(self, text: str) -> str:
+        """Normalize a cache key without changing extraction meaning."""
+        cleaned = str(text or "").strip()
+        cleaned = self._WHITESPACE_RE.sub(" ", cleaned)
+        return cleaned.casefold()
 
     def extract_titlecase_phrases(self, text: str) -> List[str]:
         """Extract title-cased phrases from source text."""
@@ -229,10 +280,23 @@ class KeywordExtractor:
             glossary_fp = self.glossary_manager.get_content_fingerprint()
         except Exception:
             glossary_fp = ""
+        # Post-processing switches change the final task list, so stale cache
+        # entries must not survive a config change (R-36).
+        post_config: dict[str, Any] = {}
+        for key in (
+            "keyword_task_keep_original",
+            "keyword_task_decompose_enabled",
+            "keyword_max_queries",
+        ):
+            try:
+                post_config[key] = self.config.get("rag", key, "")
+            except Exception:
+                post_config[key] = ""
         payload = {
             "prompt": prompt_config,
             "model": model_config,
             "glossary": str(glossary_fp or ""),
+            "post": post_config,
         }
         raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -446,8 +510,14 @@ class KeywordExtractor:
     def _normalize_for_source_match(cls, text: str) -> str:
         if not text:
             return ""
-        cleaned = text.strip().lower()
+        try:
+            cleaned = unicodedata.normalize("NFKC", str(text))
+        except Exception:
+            cleaned = str(text)
+        # ``\w`` keeps Cyrillic/kana/accents (R-02); casefold is Unicode-aware.
+        cleaned = cleaned.casefold()
         cleaned = cls._NORMALIZE_TERM_RE.sub(" ", cleaned)
+        cleaned = cleaned.replace("_", " ")
         cleaned = cls._WHITESPACE_RE.sub(" ", cleaned).strip()
         return cleaned
 
@@ -570,6 +640,7 @@ class KeywordExtractor:
             primary_error = e
             primary_attempt["error"] = self._format_error_summary(e)
 
+        primary_parse_failed = False
         if not self._is_search_call_failed(primary_response_text, primary_error):
             primary_attempt["status"] = "success"
             keywords = self._parse_keyword_response(
@@ -577,14 +648,30 @@ class KeywordExtractor:
                 log_callback,
                 debug_target=primary_attempt,
             )
-            primary_attempt["parsed_keywords"] = self._clone_keyword_list(keywords)
-            processed = self._process_keywords(keywords)
-            primary_attempt["processed_keywords"] = self._clone_keyword_list(processed)
-            if isinstance(debug_info, dict):
-                debug_info["raw_keywords"] = list(primary_attempt["parsed_keywords"])
-                debug_info["processed_keywords"] = list(primary_attempt["processed_keywords"])
-                debug_info["result_source"] = "primary_llm"
-            return processed
+            if not keywords and primary_attempt.get("parse_method") == "parse_failed":
+                # R-37: a non-empty but unparseable response is a failed call,
+                # not a successful empty answer; try the fallback model.
+                primary_parse_failed = True
+                primary_attempt["status"] = "failed"
+                primary_attempt["failure_reason"] = "parse_failed"
+                log_emit(
+                    log_callback,
+                    self.config,
+                    "WARNING",
+                    "[RAG] keyword_extract primary response was not parseable as a keyword list; "
+                    "action=fallback_to_search_fallback_model",
+                    module="keyword_extractor",
+                    func="_extract_via_llm",
+                )
+            else:
+                primary_attempt["parsed_keywords"] = self._clone_keyword_list(keywords)
+                processed = self._process_keywords(keywords)
+                primary_attempt["processed_keywords"] = self._clone_keyword_list(processed)
+                if isinstance(debug_info, dict):
+                    debug_info["raw_keywords"] = list(primary_attempt["parsed_keywords"])
+                    debug_info["processed_keywords"] = list(primary_attempt["processed_keywords"])
+                    debug_info["result_source"] = "primary_llm"
+                return processed
 
         if primary_error is not None:
             status = self._extract_status_code(primary_error)
@@ -612,7 +699,10 @@ class KeywordExtractor:
                     debug_info["result_source"] = "primary_sensitive_block"
                 return []
         else:
-            reason = "refusal_text" if self._is_refusal_response_text(primary_response_text) else "blank_response"
+            if primary_parse_failed:
+                reason = "parse_failed"
+            else:
+                reason = "refusal_text" if self._is_refusal_response_text(primary_response_text) else "blank_response"
             primary_attempt["status"] = "failed"
             primary_attempt["failure_reason"] = reason
             log_emit(
@@ -702,6 +792,23 @@ class KeywordExtractor:
             log_callback,
             debug_target=fallback_attempt,
         )
+        if not keywords and fallback_attempt.get("parse_method") == "parse_failed":
+            # Non-empty but unparseable fallback answer: degrade to the local
+            # regex extractor (R-37), and never cache this path.
+            fallback_attempt["status"] = "failed"
+            fallback_attempt["failure_reason"] = "parse_failed"
+            log_emit(
+                log_callback,
+                self.config,
+                "WARNING",
+                "[RAG] keyword_extract fallback response was not parseable as a keyword list; "
+                "result=local_regex_fallback",
+                module="keyword_extractor",
+                func="_extract_via_llm",
+            )
+            if isinstance(debug_info, dict):
+                debug_info["result_source"] = "fallback_failed_regex"
+            return []
         fallback_attempt["parsed_keywords"] = self._clone_keyword_list(keywords)
         processed = self._process_keywords(keywords)
         fallback_attempt["processed_keywords"] = self._clone_keyword_list(processed)
@@ -711,74 +818,163 @@ class KeywordExtractor:
             debug_info["result_source"] = "fallback_llm"
         return processed
 
+    @staticmethod
+    def _coerce_keyword_strings(values: Any) -> list[str]:
+        """Keep only non-empty strings from a parsed list (R-37)."""
+        if not isinstance(values, (list, tuple)):
+            return []
+        result: list[str] = []
+        for value in values:
+            if not isinstance(value, str):
+                continue
+            text = value.strip()
+            if text:
+                result.append(text)
+        return result
+
+    @staticmethod
+    def _set_parse_method(debug_target: Optional[dict], method: str, note: str = "") -> None:
+        if isinstance(debug_target, dict):
+            debug_target["parse_method"] = method
+            if note:
+                debug_target["parse_note"] = note
+
+    def _parse_keyword_line_list(self, response: str) -> Optional[list[str]]:
+        """Parse a plain/bulleted line list ("Erik\\nWhiterun", "- Erik").
+
+        Returns ``None`` when the text does not look like a keyword list, so
+        the caller can mark the response as unparseable instead of importing
+        prose.
+        """
+        lines = [line.strip() for line in str(response or "").splitlines() if line.strip()]
+        if not lines:
+            return None
+        bullet_re = re.compile(r"^(?:[-*•·>]+|\d{1,3}[.)、])\s*")
+        bullet_items: list[str] = []
+        plain_items: list[str] = []
+        for line in lines:
+            match = bullet_re.match(line)
+            if match:
+                item = line[match.end():].strip()
+                if item:
+                    bullet_items.append(item)
+            else:
+                plain_items.append(line)
+        # A prose header followed by bullets: keep only the bullets.
+        items = bullet_items if bullet_items else plain_items
+        cleaned: list[str] = []
+        for item in items:
+            text = item.strip().strip('"').strip("'").strip()
+            text = text.rstrip(",").strip()
+            if text.startswith("[") and text.endswith("]"):
+                text = text[1:-1].strip()
+            if not text:
+                continue
+            if len(text) > 80:
+                return None
+            if text.endswith((":", "：")):
+                return None
+            if re.search(r"[.!?;。！？；]", text):
+                return None
+            if any(ch in text for ch in "[]{}"):
+                return None
+            if len(text.split()) > 8:
+                return None
+            cleaned.append(text)
+        return cleaned or None
+
     def _parse_keyword_response(self, response: str, log_callback,
                                 debug_target: Optional[dict] = None) -> list:
         """Parse LLM response into a list of keyword strings."""
+        response_text = str(response or "")
+        stripped = response_text.strip()
         parsed = None
         try:
-            decoder = json.JSONDecoder()
-            stripped = (response or "").strip()
             if stripped:
-                parsed, _ = decoder.raw_decode(stripped)
+                parsed, _ = json.JSONDecoder().raw_decode(stripped)
         except json.JSONDecodeError:
             try:
                 decoder = json.JSONDecoder()
-                start = (response or "").find("[")
+                start = response_text.find("[")
                 if start >= 0:
-                    parsed, _ = decoder.raw_decode(response[start:])
+                    parsed, _ = decoder.raw_decode(response_text[start:])
                 else:
                     parsed = None
             except json.JSONDecodeError:
                 parsed = None
 
         if isinstance(parsed, list):
-            if isinstance(debug_target, dict):
-                debug_target["parse_method"] = "json_list"
-            return parsed
+            result = self._coerce_keyword_strings(parsed)
+            # An explicit [] is a successful empty answer; a non-empty list
+            # with no string items (e.g. "[1]") is garbage that must keep
+            # trying other parse strategies.
+            if result or not parsed:
+                note = ""
+                if len(result) != len(parsed):
+                    note = f"Dropped {len(parsed) - len(result)} non-string keyword item(s)."
+                self._set_parse_method(debug_target, "json_list", note)
+                return result
         if isinstance(parsed, str):
-            if isinstance(debug_target, dict):
-                debug_target["parse_method"] = "json_string"
-            return [parsed]
+            text = parsed.strip()
+            self._set_parse_method(debug_target, "json_string")
+            return [text] if text else []
         if isinstance(parsed, dict):
             for key in ("keywords", "terms", "entities"):
                 value = parsed.get(key)
                 if isinstance(value, list):
-                    if isinstance(debug_target, dict):
-                        debug_target["parse_method"] = f"json_object.{key}"
-                    return value
+                    result = self._coerce_keyword_strings(value)
+                    if result or not value:
+                        self._set_parse_method(debug_target, f"json_object.{key}")
+                        return result
 
-        array_match = re.search(r"\[[\s\S]*?\]", response)
+        array_match = re.search(r"\[[\s\S]*?\]", response_text)
         if array_match:
             try:
-                result = json.loads(array_match.group(0))
-                if isinstance(debug_target, dict):
-                    debug_target["parse_method"] = "regex_array"
-                return result
+                candidate = json.loads(array_match.group(0))
             except json.JSONDecodeError:
-                pass
+                candidate = None
+            if isinstance(candidate, list):
+                result = self._coerce_keyword_strings(candidate)
+                if result:
+                    self._set_parse_method(debug_target, "regex_array")
+                    return result
 
-        if response.startswith("["):
-            matches = list(self._JSON_STRING_RE.finditer(response))
+        if stripped.startswith("["):
+            matches = list(self._JSON_STRING_RE.finditer(response_text))
             if matches:
                 last_match = matches[-1]
-                truncated = response[:last_match.end()] + "]"
+                truncated = response_text[:last_match.end()] + "]"
                 try:
-                    result = json.loads(truncated)
-                    if isinstance(debug_target, dict):
-                        debug_target["parse_method"] = "truncated_json_recovery"
-                        debug_target["parse_note"] = f"Recovered {len(result)} keyword(s) from truncated JSON."
-                    log_emit(log_callback, self.config, "WARNING",
-                             f"[RAG] JSON was truncated, recovered {len(result)} keywords",
-                             module="keyword_extractor", func="_parse_keyword_response")
-                    return result
+                    candidate = json.loads(truncated)
                 except json.JSONDecodeError:
-                    pass
+                    candidate = None
+                if isinstance(candidate, list):
+                    result = self._coerce_keyword_strings(candidate)
+                    if result:
+                        self._set_parse_method(
+                            debug_target,
+                            "truncated_json_recovery",
+                            f"Recovered {len(result)} keyword(s) from truncated JSON.",
+                        )
+                        log_emit(log_callback, self.config, "WARNING",
+                                 f"[RAG] JSON was truncated, recovered {len(result)} keywords",
+                                 module="keyword_extractor", func="_parse_keyword_response")
+                        return result
+
+        # R-37: many models answer with a plain or bulleted line list.
+        # A bracket-wrapped response was already attempted as JSON; never
+        # re-interpret its inner text (that turned "[1]" into a "1" keyword).
+        line_result = None
+        if not (stripped.startswith("[") and stripped.endswith("]")):
+            line_result = self._parse_keyword_line_list(response_text)
+        if line_result:
+            self._set_parse_method(debug_target, "line_list")
+            return line_result
 
         log_emit(log_callback, self.config, "WARNING",
                  "[RAG] Could not parse keyword extraction response",
                  module="keyword_extractor", func="_parse_keyword_response")
-        if isinstance(debug_target, dict):
-            debug_target["parse_method"] = "parse_failed"
+        self._set_parse_method(debug_target, "parse_failed")
         return []
 
     def _process_keywords(self, keywords: list) -> list[str]:
@@ -987,8 +1183,14 @@ class KeywordExtractor:
             signal_count = sum(1 for t in non_common_tokens if self.glossary_manager.is_signal_token(t))
             has_possessive_token = any(t in self._LOW_SIGNAL_LEADING_TOKENS for t in tokens)
 
-            # Single-token discourse fillers/adverbs are usually poor term queries.
+            # Single-token discourse fillers/adverbs are usually poor term
+            # queries.  Exact glossary hits are checked first: "Rally"/"Watch"
+            # are real terms and must not be killed by -ly/common-word rules
+            # (R-03).
             if len(tokens) == 1:
+                if direct_glossary_hit:
+                    kept.append(raw)
+                    continue
                 t = tokens[0]
                 if (
                     t in self.glossary_manager._COMMON_WORDS
@@ -996,9 +1198,6 @@ class KeywordExtractor:
                     or (t.endswith("ly") and len(t) >= 5)
                 ):
                     dropped.append(raw)
-                    continue
-                if direct_glossary_hit:
-                    kept.append(raw)
                     continue
                 kept.append(raw)
                 continue
@@ -1062,6 +1261,17 @@ class KeywordExtractor:
 
             norm = self.glossary_manager.normalize_term_key(raw)
             norm_tokens = [t for t in norm.split() if t]
+
+            # R-01: an exact (normalized) glossary phrase is a retrieval unit of
+            # its own.  Decomposing "Erik the Slayer" into 'Erik'/'Slayer' loses
+            # the whole-phrase direct match, so keep the original task even when
+            # keyword_task_keep_original=False.
+            try:
+                if norm and self.glossary_manager.lookup_normalized(norm) is not None:
+                    expanded.append(raw)
+                    continue
+            except Exception:
+                pass
 
             # Keep as-is if this phrase is not suitable for decomposition.
             if len(norm_tokens) < 2:

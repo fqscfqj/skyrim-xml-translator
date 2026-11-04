@@ -15,6 +15,14 @@ from src.rag.glossary_import import (
 
 
 class DelimitedImportTests(unittest.TestCase):
+    def test_two_column_header_is_detected(self):
+        # G-04: "Term,Translation" followed by real data is a header.
+        result = parse_delimited_text(
+            '"Term","Translation"\nSword,剑\nShield,盾\n', delimiter=","
+        )
+        self.assertEqual(result.format_kind, "csv_header")
+        self.assertEqual(result.terms, {"Sword": "剑", "Shield": "盾"})
+
     def test_legacy_two_column_csv_is_preserved(self):
         result = parse_delimited_text('"Term","Translation"\ninvalid-only\n', delimiter=",")
         self.assertEqual(result.format_kind, "csv_legacy")
@@ -127,9 +135,9 @@ class FileImportTests(unittest.TestCase):
     def test_bom_file_parses(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "terms.csv"
-            path.write_bytes("﻿Term,译文\n".encode("utf-8"))
+            path.write_bytes("\ufeffDragonborn,龙裔\n".encode("utf-8"))
             result = parse_glossary_file(str(path))
-        self.assertEqual(result.terms, {"Term": "译文"})
+        self.assertEqual(result.terms, {"Dragonborn": "龙裔"})
 
     def test_gbk_file_raises_explicit_error(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -7,16 +7,26 @@ import hashlib
 import os
 import re
 import shutil
+import threading
 import time
 import unicodedata
+import uuid
 from typing import Any, Dict, Optional
 
 from src.logging_helper import emit as log_emit
 
+# Process-wide lock serializing glossary mutations and disk writes.  All
+# GlossaryManager instances in this process share it: two managers pointed at
+# the same path must not interleave tmp-file writes (P0-09).  RLock because
+# public mutators call save()/_save_sidecar() while already holding it.
+_GLOSSARY_WRITE_LOCK = threading.RLock()
+
 
 class GlossaryManager:
-    # Compile regex patterns once
-    _NORMALIZE_TERM_RE = re.compile(r"[^0-9a-zA-Z\u4e00-\u9fff]+")
+    # Compile regex patterns once.  ``\w`` is Unicode-aware on ``str`` patterns,
+    # so Cyrillic/kana/CJK/accents survive normalization instead of being
+    # stripped (R-02).  NFKC + casefold are applied before substitution.
+    _NORMALIZE_TERM_RE = re.compile(r"[^\w\u4e00-\u9fff]+", re.UNICODE)
     _WHITESPACE_RE = re.compile(r"\s+")
 
     # Use frozenset for O(1) lookup
@@ -104,15 +114,24 @@ class GlossaryManager:
     # --- Normalization ---
 
     def normalize_term_key(self, text: str) -> str:
-        """Normalize term for case/punctuation-insensitive comparison."""
+        """Normalize term for case/punctuation-insensitive comparison.
+
+        NFKC folds compatibility forms, casefold handles Unicode casing, then
+        every non-word run becomes a single space.  Non-Latin scripts are kept
+        (R-02): the previous ASCII+CJK whitelist erased Cyrillic/kana, making
+        Russian/Japanese glossary lookups unreachable.
+        """
         if not text:
             return ""
         try:
             cleaned = unicodedata.normalize("NFKC", str(text))
         except Exception:
             cleaned = str(text)
-        cleaned = cleaned.strip().lower()
+        cleaned = cleaned.casefold()
         cleaned = self._NORMALIZE_TERM_RE.sub(" ", cleaned)
+        # ``\w`` keeps underscores; preserve the old Latin punctuation-splitting
+        # semantics (Foo_Bar used to normalize to "foo bar", not "foo_bar").
+        cleaned = cleaned.replace("_", " ")
         cleaned = self._WHITESPACE_RE.sub(" ", cleaned).strip()
         return cleaned
 
@@ -229,8 +248,32 @@ class GlossaryManager:
 
     # --- Load / Save ---
 
+    @staticmethod
+    def _replace_with_retry(src: str, dst: str, attempts: int = 3) -> None:
+        """os.replace with bounded retry for Windows sharing violations.
+
+        Antivirus/indexers briefly open freshly written files, producing
+        WinError 5 (access denied) or 32 (sharing violation).  Retry a few
+        times instead of losing the whole save.
+        """
+        attempts = max(1, int(attempts))
+        last_error: Optional[BaseException] = None
+        for attempt_index in range(attempts):
+            try:
+                os.replace(src, dst)
+                return
+            except OSError as exc:
+                last_error = exc
+                winerror = getattr(exc, "winerror", None)
+                retryable = winerror in (5, 32) or isinstance(exc, PermissionError)
+                if not retryable or attempt_index + 1 >= attempts:
+                    raise
+                time.sleep(0.02 * (attempt_index + 1))
+        if last_error is not None:  # pragma:noreachable - defensive
+            raise last_error
+
     def _atomic_write_json(self, path: str, payload: Any) -> Optional[str]:
-        """Write JSON atomically (tmp+pid + fsync + replace). Returns backup path."""
+        """Write JSON atomically (unique tmp + fsync + replace). Returns backup path."""
         parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, exist_ok=True)
@@ -247,7 +290,9 @@ class GlossaryManager:
                          f"Failed to backup {path}: {exc}", exc=exc,
                          module="glossary_manager", func="_atomic_write_json")
                 backup_path = None
-        tmp_path = f"{path}.tmp.{os.getpid()}"
+        # Unique tmp name per write: a pid-only suffix made concurrent writers
+        # overwrite/delete each other's tmp file (P0-09).
+        tmp_path = f"{path}.tmp.{os.getpid()}.{uuid.uuid4().hex}"
         try:
             with open(tmp_path, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle, indent=4, ensure_ascii=False)
@@ -256,7 +301,7 @@ class GlossaryManager:
                     os.fsync(handle.fileno())
                 except Exception:
                     pass
-            os.replace(tmp_path, path)
+            self._replace_with_retry(tmp_path, path)
         finally:
             if os.path.exists(tmp_path):
                 try:
@@ -293,7 +338,7 @@ class GlossaryManager:
         if not os.path.exists(self.sidecar_path):
             return
         try:
-            with open(self.sidecar_path, "r", encoding="utf-8") as handle:
+            with open(self.sidecar_path, "r", encoding="utf-8-sig") as handle:
                 data = json.load(handle)
             if isinstance(data, dict):
                 cleaned: Dict[str, Dict[str, Any]] = {}
@@ -324,68 +369,73 @@ class GlossaryManager:
 
     def set_rich_meta_batch(self, rich_meta: Dict[str, Dict[str, Any]]) -> int:
         """Upsert rich metadata keyed by any term spelling. Returns stored count."""
-        stored = 0
-        for term, meta in (rich_meta or {}).items():
-            if not isinstance(meta, dict) or not meta:
-                continue
-            normalized = self.normalize_term_key(str(term or ""))
-            if not normalized:
-                continue
-            self.rich_meta[normalized] = dict(meta)
-            stored += 1
-        if stored:
-            self._save_sidecar()
-        return stored
+        with _GLOSSARY_WRITE_LOCK:
+            stored = 0
+            for term, meta in (rich_meta or {}).items():
+                if not isinstance(meta, dict) or not meta:
+                    continue
+                normalized = self.normalize_term_key(str(term or ""))
+                if not normalized:
+                    continue
+                self.rich_meta[normalized] = dict(meta)
+                stored += 1
+            if stored:
+                self._save_sidecar()
+            return stored
 
     def prune_rich_meta(self, valid_terms: Optional[set] = None) -> int:
         """Drop sidecar entries whose normalized term no longer exists."""
-        if valid_terms is None:
-            valid_terms = {self.normalize_term_key(term) for term in self.glossary.keys()}
-        stale = [key for key in self.rich_meta.keys() if key not in valid_terms]
-        for key in stale:
-            self.rich_meta.pop(key, None)
-        if stale:
-            self._save_sidecar()
-        return len(stale)
+        with _GLOSSARY_WRITE_LOCK:
+            if valid_terms is None:
+                valid_terms = {self.normalize_term_key(term) for term in self.glossary.keys()}
+            stale = [key for key in self.rich_meta.keys() if key not in valid_terms]
+            for key in stale:
+                self.rich_meta.pop(key, None)
+            if stale:
+                self._save_sidecar()
+            return len(stale)
 
     def last_backup_path(self) -> Optional[str]:
         return self._last_backup_path
 
     def load(self) -> None:
         """Load glossary from disk."""
-        if os.path.exists(self.glossary_path):
-            try:
-                with open(self.glossary_path, "r", encoding="utf-8") as f:
-                    loaded = json.load(f)
-                # Tolerate both the canonical dict and a JSONv2 envelope on disk.
-                if isinstance(loaded, dict) and isinstance(loaded.get("terms"), (dict, list)) and "glossary" not in loaded:
-                    from src.rag.glossary_import import parse_json_text
-                    parsed = parse_json_text(json.dumps(loaded, ensure_ascii=False))
-                    self.glossary = dict(parsed.terms)
-                    if parsed.rich_meta:
-                        self.rich_meta = {
-                            self.normalize_term_key(term): dict(meta)
-                            for term, meta in parsed.rich_meta.items()
-                            if self.normalize_term_key(term) and isinstance(meta, dict)
-                        }
-                elif isinstance(loaded, dict):
-                    self.glossary = {str(k): str(v) for k, v in loaded.items()}
-                else:
+        with _GLOSSARY_WRITE_LOCK:
+            if os.path.exists(self.glossary_path):
+                try:
+                    # utf-8-sig tolerates a BOM written by Notepad (G-01).
+                    with open(self.glossary_path, "r", encoding="utf-8-sig") as f:
+                        loaded = json.load(f)
+                    # Tolerate both the canonical dict and a JSONv2 envelope on disk.
+                    if isinstance(loaded, dict) and isinstance(loaded.get("terms"), (dict, list)) and "glossary" not in loaded:
+                        from src.rag.glossary_import import parse_json_text
+                        parsed = parse_json_text(json.dumps(loaded, ensure_ascii=False))
+                        self.glossary = dict(parsed.terms)
+                        if parsed.rich_meta:
+                            self.rich_meta = {
+                                self.normalize_term_key(term): dict(meta)
+                                for term, meta in parsed.rich_meta.items()
+                                if self.normalize_term_key(term) and isinstance(meta, dict)
+                            }
+                    elif isinstance(loaded, dict):
+                        self.glossary = {str(k): str(v) for k, v in loaded.items()}
+                    else:
+                        self.glossary = {}
+                    self._glossary_corrupt = False
+                except Exception as e:
+                    corrupt_path = self._quarantine_corrupt_file(self.glossary_path, e)
+                    self._glossary_corrupt = True
+                    log_emit(None, self.config, "ERROR",
+                             f"Glossary corrupt, quarantined to {corrupt_path}: {e}", exc=e,
+                             module="glossary_manager", func="load")
                     self.glossary = {}
-                self._glossary_corrupt = False
-            except Exception as e:
-                corrupt_path = self._quarantine_corrupt_file(self.glossary_path, e)
-                self._glossary_corrupt = True
-                log_emit(None, self.config, "ERROR",
-                         f"Glossary corrupt, quarantined to {corrupt_path}: {e}", exc=e,
-                         module="glossary_manager", func="load")
-                self.glossary = {}
-        self._load_sidecar()
-        self.rebuild_lookup()
+            self._load_sidecar()
+            self.rebuild_lookup()
 
     def save(self) -> None:
         """Save glossary to disk (atomic + timestamped backup)."""
-        self._atomic_write_json(self.glossary_path, self.glossary)
+        with _GLOSSARY_WRITE_LOCK:
+            self._atomic_write_json(self.glossary_path, self.glossary)
 
     # --- CRUD ---
 
@@ -409,71 +459,113 @@ class GlossaryManager:
 
     def add_term(self, term: str, translation: str, rich_meta: Optional[Dict[str, Any]] = None) -> None:
         """Add a term to the glossary (glossary-only, no vector)."""
-        self._warn_normalized_collision(term)
-        self.glossary[term] = translation
-        if isinstance(rich_meta, dict) and rich_meta:
-            normalized = self.normalize_term_key(term)
-            if normalized:
-                self.rich_meta[normalized] = dict(rich_meta)
-                self._save_sidecar()
-        self.save()
-        self.rebuild_lookup()
+        with _GLOSSARY_WRITE_LOCK:
+            glossary_snapshot = dict(self.glossary)
+            rich_snapshot = {key: dict(value) for key, value in self.rich_meta.items()}
+            try:
+                self._warn_normalized_collision(term)
+                self.glossary[term] = translation
+                if isinstance(rich_meta, dict) and rich_meta:
+                    normalized = self.normalize_term_key(term)
+                    if normalized:
+                        self.rich_meta[normalized] = dict(rich_meta)
+                        self._save_sidecar()
+                self.save()
+            except Exception:
+                self.glossary = glossary_snapshot
+                self.rich_meta = rich_snapshot
+                raise
+            finally:
+                self.rebuild_lookup()
 
     def delete_term(self, term: str) -> bool:
         """Delete a term from the glossary. Returns True if found."""
-        if term in self.glossary:
-            norm = self.normalize_term_key(term)
-            del self.glossary[term]
-            self._drop_rich_meta_if_unreferenced(norm)
-            self.save()
-            self._save_sidecar()
-            self.rebuild_lookup()
+        with _GLOSSARY_WRITE_LOCK:
+            if term not in self.glossary:
+                return False
+            glossary_snapshot = dict(self.glossary)
+            rich_snapshot = {key: dict(value) for key, value in self.rich_meta.items()}
+            try:
+                norm = self.normalize_term_key(term)
+                del self.glossary[term]
+                self._drop_rich_meta_if_unreferenced(norm)
+                self.save()
+                self._save_sidecar()
+            except Exception:
+                self.glossary = glossary_snapshot
+                self.rich_meta = rich_snapshot
+                raise
+            finally:
+                self.rebuild_lookup()
             return True
-        return False
 
     def add_terms_batch(self, terms_dict: dict[str, str], rich_meta: Optional[Dict[str, Dict[str, Any]]] = None) -> None:
-        """Batch add terms to glossary (glossary-only, no vectors)."""
-        seen_norms: Dict[str, str] = {}
-        for term in (terms_dict or {}).keys():
-            norm = self.normalize_term_key(str(term or ""))
-            if not norm:
-                continue
-            if norm in seen_norms and seen_norms[norm] != term:
-                log_emit(None, self.config, "WARNING",
-                         f"Glossary batch normalized dedup '{norm}': '{term}' overwrites '{seen_norms[norm]}' in same import",
-                         module="glossary_manager", func="add_terms_batch")
-            else:
-                canonical = self._glossary_lookup.get(norm)
-                if canonical is not None and canonical != term and canonical not in (terms_dict or {}):
-                    log_emit(None, self.config, "WARNING",
-                             f"Glossary normalized dedup '{norm}': '{term}' overwrites alias of '{canonical}'",
-                             module="glossary_manager", func="add_terms_batch")
-            seen_norms[norm] = term
-        self.glossary.update(terms_dict or {})
-        if isinstance(rich_meta, dict) and rich_meta:
-            for term, meta in rich_meta.items():
-                if not isinstance(meta, dict) or not meta:
-                    continue
-                normalized = self.normalize_term_key(str(term or ""))
-                if normalized:
-                    self.rich_meta[normalized] = dict(meta)
-            self._save_sidecar()
-        self.save()
-        self.rebuild_lookup()
+        """Batch add terms to glossary (glossary-only, no vectors).
+
+        The whole batch is one write transaction: on any failure the in-memory
+        glossary/rich_meta snapshot is restored and the normalized lookup is
+        rebuilt in ``finally`` so the manager is never left half-updated
+        (P0-09).  The on-disk JSON shape is unchanged.
+        """
+        with _GLOSSARY_WRITE_LOCK:
+            glossary_snapshot = dict(self.glossary)
+            rich_snapshot = {key: dict(value) for key, value in self.rich_meta.items()}
+            try:
+                seen_norms: Dict[str, str] = {}
+                for term in (terms_dict or {}).keys():
+                    norm = self.normalize_term_key(str(term or ""))
+                    if not norm:
+                        continue
+                    if norm in seen_norms and seen_norms[norm] != term:
+                        log_emit(None, self.config, "WARNING",
+                                 f"Glossary batch normalized dedup '{norm}': '{term}' overwrites '{seen_norms[norm]}' in same import",
+                                 module="glossary_manager", func="add_terms_batch")
+                    else:
+                        canonical = self._glossary_lookup.get(norm)
+                        if canonical is not None and canonical != term and canonical not in (terms_dict or {}):
+                            log_emit(None, self.config, "WARNING",
+                                     f"Glossary normalized dedup '{norm}': '{term}' overwrites alias of '{canonical}'",
+                                     module="glossary_manager", func="add_terms_batch")
+                    seen_norms[norm] = term
+                self.glossary.update(terms_dict or {})
+                if isinstance(rich_meta, dict) and rich_meta:
+                    for term, meta in rich_meta.items():
+                        if not isinstance(meta, dict) or not meta:
+                            continue
+                        normalized = self.normalize_term_key(str(term or ""))
+                        if normalized:
+                            self.rich_meta[normalized] = dict(meta)
+                    self._save_sidecar()
+                self.save()
+            except Exception:
+                self.glossary = glossary_snapshot
+                self.rich_meta = rich_snapshot
+                raise
+            finally:
+                self.rebuild_lookup()
 
     def delete_terms_batch(self, terms_list: list[str]) -> int:
         """Batch delete terms from glossary. Returns count of deleted terms."""
-        deleted = 0
-        touched_norms: set[str] = set()
-        for term in terms_list or []:
-            if term in self.glossary:
-                touched_norms.add(self.normalize_term_key(term))
-                del self.glossary[term]
-                deleted += 1
-        for norm in touched_norms:
-            self._drop_rich_meta_if_unreferenced(norm)
-        if deleted > 0:
-            self.save()
-            self._save_sidecar()
-            self.rebuild_lookup()
-        return deleted
+        with _GLOSSARY_WRITE_LOCK:
+            glossary_snapshot = dict(self.glossary)
+            rich_snapshot = {key: dict(value) for key, value in self.rich_meta.items()}
+            deleted = 0
+            touched_norms: set[str] = set()
+            try:
+                for term in terms_list or []:
+                    if term in self.glossary:
+                        touched_norms.add(self.normalize_term_key(term))
+                        del self.glossary[term]
+                        deleted += 1
+                for norm in touched_norms:
+                    self._drop_rich_meta_if_unreferenced(norm)
+                if deleted > 0:
+                    self.save()
+                    self._save_sidecar()
+            except Exception:
+                self.glossary = glossary_snapshot
+                self.rich_meta = rich_snapshot
+                raise
+            finally:
+                self.rebuild_lookup()
+            return deleted
