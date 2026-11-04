@@ -17,6 +17,7 @@ class KeywordExtractor:
     _JSON_STRING_RE = re.compile(r'"[^"]*"(?=\s*[,\]])')
     _POSSESSIVE_S_RE = re.compile(r"['\u2019]\s*s\s+")
     _PROPER_NOUN_RE = re.compile(r"\b([A-Z][a-z]{2,})\b")
+    _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
     _MARKDOWN_CODE_RE = re.compile(r"```(?:json)?")
     # Unicode-aware: keep Cyrillic/kana/etc. instead of erasing non-Latin text
     # (R-02).  NFKC + casefold are applied by _normalize_for_source_match.
@@ -40,6 +41,34 @@ class KeywordExtractor:
         "maybe", "perhaps", "probably", "hopefully",
         "wow", "whoa", "woah",
     })
+    # Real English adverbs only.  A blanket ``-ly`` rule misclassified nouns
+    # such as "family"/"reply" as filler (R-09).
+    _LOW_SIGNAL_ADVERBS = _LOW_SIGNAL_SINGLE_TOKENS | frozenset({
+        "quickly", "slowly", "finally", "suddenly", "usually", "always",
+        "never", "often", "sometimes", "truly", "simply", "nearly",
+        "barely", "hardly", "mostly", "clearly", "certainly", "definitely",
+        "obviously", "apparently", "eventually", "immediately", "recently",
+        "currently", "previously", "generally", "specifically", "exactly",
+        "absolutely", "completely", "entirely", "quietly", "loudly",
+    })
+    # Fallback proper-noun noise filters (R-04).
+    _COMMON_ABBREVIATIONS = frozenset({
+        "mr", "mrs", "ms", "dr", "prof", "st", "jr", "sr", "vs", "etc",
+        "eg", "ie", "vol", "fig", "approx", "dept", "aka", "npc", "ui",
+        "hp", "mp", "xp", "mcm", "dps",
+    })
+    _COMMON_VERBS = frozenset({
+        "press", "open", "close", "use", "take", "talk", "speak", "read",
+        "look", "wait", "follow", "come", "go", "get", "give", "find",
+        "kill", "steal", "buy", "sell", "drop", "equip", "unequip", "cast",
+        "activate", "enter", "exit", "leave", "return", "meet", "help",
+        "need", "want", "know", "think", "say", "tell", "ask", "answer",
+        "hear", "listen", "watch", "see", "show", "hide", "start", "stop",
+        "begin", "end", "save", "load", "quit", "select", "choose", "click",
+    })
+    _ROMAN_NUMERAL_RE = re.compile(
+        r"^M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$"
+    )
     _LOW_SIGNAL_LEADING_TOKENS = frozenset({
         "my", "your", "his", "her", "its", "our", "their",
     })
@@ -92,34 +121,46 @@ class KeywordExtractor:
         # whitespace variants of the same line do not pay three LLM calls
         # (R-36).  This changes lookup only, never the extraction semantics.
         normalized_text = self._normalize_cache_text(text)
+        cache_fingerprint = ""
+        cache_key = ""
         if self._cache is not None:
             cache_fingerprint = self._keyword_cache_fingerprint()
             cache_key = LRUCache.make_key(self._KW_CACHE_VERSION, cache_fingerprint, normalized_text)
             cached = self._cache.get(cache_key)
             if cached is not None:
-                cached_list = list(cached) if isinstance(cached, (list, tuple)) else []
+                cached_raw = self._clone_keyword_list(
+                    list(cached) if isinstance(cached, (list, tuple)) else []
+                )
                 try:
                     log_emit(log_callback, self.config, "DEBUG",
-                             f"[RAG] Keyword cache hit ({len(cached_list)} keywords)",
+                             f"[RAG] Keyword cache hit ({len(cached_raw)} raw keywords)",
                              module="keyword_extractor", func="extract")
                 except Exception:
                     pass
                 debug_info["cache_hit"] = True
-                debug_info["result_source"] = "cache"
-                debug_info["final_keywords"] = list(cached_list)
                 self._record_keyword_step(
                     debug_info,
                     phase="cache",
                     name="cache_hit",
                     before=[],
-                    after=cached_list,
+                    after=cached_raw,
                     note=f"cache_version={self._KW_CACHE_VERSION}; fingerprint={cache_fingerprint[:12]}",
                 )
-                # Return a copy: callers mutate the list (append/sort) and used
-                # to corrupt the cached entry (R-36).
+                # The cache stores the raw (pre-finalize) LLM answer; finalize is
+                # recomputed on every hit so post-processing changes are applied
+                # and callers can never mutate the cached entry (R-36).
+                keywords = self._finalize_keywords(
+                    cached_raw,
+                    text,
+                    log_callback,
+                    debug_info=debug_info,
+                    phase="cache",
+                )
+                debug_info["result_source"] = "cache"
+                debug_info["final_keywords"] = list(keywords)
                 if return_debug:
-                    return list(cached_list), debug_info
-                return list(cached_list)
+                    return keywords, debug_info
+                return keywords
 
         try:
             log_emit(log_callback, self.config, "DEBUG",
@@ -145,6 +186,15 @@ class KeywordExtractor:
             keywords = []
             if isinstance(debug_info, dict):
                 debug_info["result_source"] = "llm_error_regex"
+
+        # Cache the raw (pre-finalize) answer, and only for successful LLM
+        # paths: failures, refusals and parse fallbacks are never cached
+        # (R-35/R-36).
+        if self._cache is not None and not llm_call_failed and cache_key:
+            call_source = str(debug_info.get("result_source") or "")
+            if call_source in ("primary_llm", "fallback_llm"):
+                self._cache.put(cache_key, self._clone_keyword_list(keywords))
+
         keywords = self._finalize_keywords(
             keywords,
             text,
@@ -190,18 +240,6 @@ class KeywordExtractor:
                      extra={"keywords": keywords, "input_text": text[:100]})
         except Exception:
             pass
-
-        if self._cache is not None:
-            final_source = str(debug_info.get("result_source") or "")
-            # Never cache degraded/failed results; cache successful empty
-            # results so repeated [] answers stay free (R-35/R-36).
-            if final_source not in self._DEGRADED_RESULT_SOURCES:
-                cache_key = LRUCache.make_key(
-                    self._KW_CACHE_VERSION,
-                    self._keyword_cache_fingerprint(),
-                    normalized_text,
-                )
-                self._cache.put(cache_key, list(keywords))
 
         debug_info["final_keywords"] = list(keywords)
         if not debug_info.get("result_source"):
@@ -1085,8 +1123,7 @@ class KeywordExtractor:
             token = tokens[0]
             if (
                 token in self.glossary_manager._COMMON_WORDS
-                or token in self._LOW_SIGNAL_SINGLE_TOKENS
-                or (token.endswith("ly") and len(token) >= 5)
+                or token in self._LOW_SIGNAL_ADVERBS
             ):
                 return False
             return self.glossary_manager.is_signal_token(token) or raw[0].isupper()
@@ -1194,8 +1231,7 @@ class KeywordExtractor:
                 t = tokens[0]
                 if (
                     t in self.glossary_manager._COMMON_WORDS
-                    or t in self._LOW_SIGNAL_SINGLE_TOKENS
-                    or (t.endswith("ly") and len(t) >= 5)
+                    or t in self._LOW_SIGNAL_ADVERBS
                 ):
                     dropped.append(raw)
                     continue
@@ -1420,71 +1456,221 @@ class KeywordExtractor:
         )
         return limited
 
-    def _extract_proper_nouns_regex(self, text: str) -> list[str]:
-        """Minimal fallback for extractor outages."""
-        result = []
-        seen: set[str] = set()
+    # --- Deterministic fallback (R-04) ---
 
-        # Chinese/CJK fallback: glossary phrases appearing as substrings are kept.
-        try:
-            has_cjk = bool(re.search(r"[\u4e00-\u9fff]", text or ""))
-        except Exception:
-            has_cjk = False
-        if has_cjk:
+    def _glossary_fallback_fingerprint(self) -> str:
+        getter = getattr(self.glossary_manager, "get_content_fingerprint", None)
+        if callable(getter):
             try:
-                glossary = getattr(self.glossary_manager, "glossary", {}) or {}
-                for term in glossary.keys():
-                    if not term or not isinstance(term, str):
-                        continue
-                    norm = self.glossary_manager.normalize_term_key(term)
-                    if not norm:
-                        continue
-                    if term in (text or "") or self._keyword_appears_in_text(term, text or ""):
-                        if norm not in seen:
-                            seen.add(norm)
-                            result.append(term)
+                value = str(getter() or "")
+                if value:
+                    return value
             except Exception:
                 pass
-        # Preserve multi-word glossary phrases appearing verbatim in source.
-        try:
+        glossary = getattr(self.glossary_manager, "glossary", {}) or {}
+        return f"len:{len(glossary)}:id:{id(glossary)}"
+
+    def _get_fallback_index(self) -> tuple[dict[str, list[str]], Optional[list[str]]]:
+        """Lazily build the fallback inverted index for the current glossary.
+
+        ``token -> [glossary terms]`` plus a lazily-built CJK-term subset.  The
+        index is cached by glossary content fingerprint, so the regex fallback
+        only inspects candidates for tokens that actually occur in the source
+        text instead of scanning all ~40k entries on every call (R-04).
+
+        The glossary manager already maintains ``_term_token_index`` while
+        rebuilding its lookup; reusing it keeps the first fallback call cheap
+        even for a 40k-term glossary.
+        """
+        fingerprint = self._glossary_fallback_fingerprint()
+        cached = getattr(self, "_fallback_index_cache", None)
+        if isinstance(cached, tuple) and len(cached) == 3 and cached[0] == fingerprint:
+            return cached[1], cached[2]
+
+        index: dict[str, list[str]] = {}
+        cjk_terms: Optional[list[str]] = None
+        existing_index = getattr(self.glossary_manager, "_term_token_index", None)
+        if isinstance(existing_index, dict) and existing_index:
+            index = {token: list(terms) for token, terms in existing_index.items()}
+        else:
             glossary = getattr(self.glossary_manager, "glossary", {}) or {}
-            for term in glossary.keys():
-                if not term or not isinstance(term, str) or " " not in term.strip():
+            common_words = getattr(self.glossary_manager, "_COMMON_WORDS", frozenset())
+            for term in list(glossary.keys()):
+                if not isinstance(term, str) or not term.strip():
                     continue
-                norm = self.glossary_manager.normalize_term_key(term)
-                if not norm or norm in seen:
+                try:
+                    normalized = self.glossary_manager.normalize_term_key(term)
+                except Exception:
+                    normalized = ""
+                if not normalized:
                     continue
-                if self._keyword_appears_in_text(term, text or ""):
-                    seen.add(norm)
-                    result.append(term)
+                if self._CJK_RE.search(term):
+                    if cjk_terms is None:
+                        cjk_terms = []
+                    cjk_terms.append(term)
+                for token in set(normalized.split()):
+                    # Common connectives ("the"/"of") are useless for candidate
+                    # retrieval and can match thousands of terms.
+                    if not token or len(token) < 2 or token in common_words:
+                        continue
+                    index.setdefault(token, []).append(term)
+
+        self._fallback_index_cache = (fingerprint, index, cjk_terms)
+        return index, cjk_terms
+
+    def _get_fallback_cjk_terms(self) -> list[str]:
+        """CJK terms for substring matching; only built when a CJK source hits."""
+        index, cjk_terms = self._get_fallback_index()
+        if cjk_terms is not None:
+            return cjk_terms
+        glossary = getattr(self.glossary_manager, "glossary", {}) or {}
+        resolved = [
+            term for term in list(glossary.keys())
+            if isinstance(term, str) and term and self._CJK_RE.search(term)
+        ]
+        self._fallback_index_cache = (self._glossary_fallback_fingerprint(), index, resolved)
+        return resolved
+
+    def _fallback_token_df(self, token: str) -> int:
+        try:
+            ensure = getattr(self.glossary_manager, "ensure_token_df", None)
+            if callable(ensure):
+                ensure()
         except Exception:
             pass
+        token_df = getattr(self.glossary_manager, "_token_df", None)
+        if not isinstance(token_df, dict) or not token_df:
+            return 0
+        try:
+            return int(token_df.get(token, 0) or 0)
+        except Exception:
+            return 0
 
-        for token in self._WORD_TOKEN_RE.findall(text or ""):
-            token_norm = self.glossary_manager.normalize_term_key(token)
-            if not token_norm or " " in token_norm:
-                continue
-            if len(token_norm) < 3:
-                continue
-            if token_norm in self.glossary_manager._COMMON_WORDS:
-                continue
-            direct_glossary_hit = self.glossary_manager.lookup_normalized(token_norm) is not None
-            if not direct_glossary_hit and not self.glossary_manager.is_signal_token(token_norm):
-                continue
-            if token_norm in seen:
-                continue
-            seen.add(token_norm)
-            result.append(token)
+    def _fallback_signal_max_df(self) -> int:
+        getter = getattr(self.glossary_manager, "_signal_max_df", None)
+        if callable(getter):
+            try:
+                return int(getter())
+            except Exception:
+                pass
+        try:
+            return max(50, min(250, int(len(self.glossary_manager.glossary) * 0.02)))
+        except Exception:
+            return 250
 
-        matches = self._PROPER_NOUN_RE.findall(text)
-        for word in matches:
-            lw = word.lower()
-            if lw in self.glossary_manager._COMMON_WORDS:
+    @classmethod
+    def _is_roman_numeral(cls, token: str) -> bool:
+        candidate = str(token or "").strip().upper()
+        if not candidate or len(candidate) > 6:
+            return False
+        if any(char not in "IVXLCDM" for char in candidate):
+            return False
+        return bool(cls._ROMAN_NUMERAL_RE.match(candidate))
+
+    def _fallback_signal_token(self, token: str, *, direct_hit: bool) -> bool:
+        """Signal test for fallback extraction; df == 0 is never a signal."""
+        if direct_hit:
+            return True
+        if not token or len(token) < 3:
+            return False
+        if token in self.glossary_manager._COMMON_WORDS:
+            return False
+        if token in self._LOW_SIGNAL_ADVERBS:
+            return False
+        if token in self._COMMON_ABBREVIATIONS or token in self._COMMON_VERBS:
+            return False
+        if self._is_roman_numeral(token):
+            return False
+        df = self._fallback_token_df(token)
+        if df <= 0:
+            return False
+        return df <= self._fallback_signal_max_df()
+
+    @staticmethod
+    def _is_sentence_start(text: str, start: int) -> bool:
+        position = start - 1
+        while position >= 0 and text[position].isspace():
+            position -= 1
+        if position < 0:
+            return True
+        return text[position] in ".!?;:>\"'"
+
+    def _extract_proper_nouns_regex(self, text: str) -> list[str]:
+        """Minimal deterministic fallback for extractor outages.
+
+        Candidates come from a lazily built ``token -> terms`` inverted index and
+        require df > 0, so sentence words ("Press", "menu"), common abbreviations
+        and Roman numerals ("III", "MCM") are no longer emitted (R-04).
+        """
+        source = text or ""
+        result: list[str] = []
+        seen: set[str] = set()
+        if not source.strip():
+            return result
+
+        def add(term: str, normalized: str) -> None:
+            if not term or not normalized or normalized in seen:
+                return
+            seen.add(normalized)
+            result.append(term)
+
+        index, _cjk_terms = self._get_fallback_index()
+
+        # Chinese/CJK fallback: no whitespace tokens, so scan only CJK glossary
+        # terms that appear as substrings of the source.
+        if self._CJK_RE.search(source):
+            for term in self._get_fallback_cjk_terms():
+                normalized = self.glossary_manager.normalize_term_key(term)
+                if not normalized:
+                    continue
+                try:
+                    appears = term in source or self._keyword_appears_in_text(term, source)
+                except Exception:
+                    appears = term in source
+                if appears:
+                    add(term, normalized)
+
+        # Resolve candidate glossary terms through the inverted index (only
+        # tokens present in the source text are looked up).
+        source_tokens: list[str] = []
+        token_matches = list(self._WORD_TOKEN_RE.finditer(source))
+        for match in token_matches:
+            normalized = self.glossary_manager.normalize_term_key(match.group(0))
+            if normalized and " " not in normalized:
+                source_tokens.append(normalized)
+
+        candidate_terms: dict[str, None] = {}
+        for token in dict.fromkeys(source_tokens):
+            for term in index.get(token, ()):
+                candidate_terms.setdefault(term, None)
+
+        for term in candidate_terms:
+            normalized = self.glossary_manager.normalize_term_key(term)
+            if not normalized or " " not in normalized:
                 continue
-            if len(lw) < 3:
+            try:
+                appears = self._keyword_appears_in_text(term, source)
+            except Exception:
+                appears = False
+            if appears:
+                add(term, normalized)
+
+        # Single-token candidates from the source text itself.
+        for match in token_matches:
+            raw_token = match.group(0)
+            normalized = self.glossary_manager.normalize_term_key(raw_token)
+            if not normalized or " " in normalized:
                 continue
-            if lw in seen:
+            direct_hit = self.glossary_manager.lookup_normalized(normalized) is not None
+            if not self._fallback_signal_token(normalized, direct_hit=direct_hit):
                 continue
-            seen.add(lw)
-            result.append(word)
+            if not direct_hit and self._is_sentence_start(source, match.start()):
+                # Sentence-initial ordinary words are grammar, not entities.
+                if (
+                    normalized in self.glossary_manager._COMMON_WORDS
+                    or normalized in self._COMMON_VERBS
+                ):
+                    continue
+            add(raw_token, normalized)
+
         return result

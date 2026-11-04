@@ -504,6 +504,32 @@ class KeywordRecallAndCacheTests(unittest.TestCase):
         self.assertEqual([], extractor.extract("wow,  my thane."))
         self.assertEqual(1, len(client.calls))
 
+    def test_cache_stores_raw_response_and_recomputes_finalize(self):
+        cache = LRUCache(max_size=32)
+        client = _StaticLLMClient('["Thane"]')
+        extractor = self._make(
+            '["Thane"]',
+            glossary={"Thane": "武卫"},
+            signal_terms={"thane"},
+            cache=cache,
+            client=client,
+        )
+
+        self.assertEqual(["Thane"], extractor.extract("Thane"))
+        self.assertEqual(1, len(client.calls))
+
+        finalized_inputs = []
+
+        def fake_finalize(keywords, text, log_callback, debug_info=None, phase="llm"):
+            finalized_inputs.append(list(keywords))
+            return ["Refinalized"]
+
+        extractor._finalize_keywords = fake_finalize
+        self.assertEqual(["Refinalized"], extractor.extract("  thane  "))
+        # The cache handed the raw LLM answer back to finalize.
+        self.assertEqual([["Thane"]], finalized_inputs)
+        self.assertEqual(1, len(client.calls))
+
     def test_failed_result_is_not_cached(self):
         cache = LRUCache(max_size=32)
         client = _FailingLLMClient()
