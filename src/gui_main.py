@@ -47,7 +47,7 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QLineEdit, QPushButton, QTextEdit, QPlainTextEdit,
                              QTabWidget, QFileDialog, QCheckBox, QProgressBar, 
                              QListWidget, QMessageBox, QGroupBox, QFormLayout, QSpinBox,
-                             QTableWidget, QTableWidgetItem, QHeaderView, QSplitter, QDoubleSpinBox,
+                             QTableWidgetItem, QHeaderView, QSplitter, QDoubleSpinBox,
                              QComboBox, QAbstractSpinBox, QScrollArea, QDialog, QTreeWidget, QTreeWidgetItem,
                              QAbstractItemView, QApplication)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QRectF, QEvent
@@ -81,6 +81,7 @@ from src.file_formats import (
 from src.logging_helper import emit as log_emit
 from src.i18n import i18n
 from src.xml_content import node_has_child_elements
+from src.gui_table import TranslationTableView
 
 
 TASK_COMPLETION_STATE_SUCCESS = "success"
@@ -2923,14 +2924,14 @@ class MainWindow(QMainWindow):
     def _get_window_stylesheet(is_dark: bool) -> str:
         if not is_dark:
             return """
-            QTableWidget {
+            QTableView {
                 gridline-color: #d9e1eb;
                 border: 1px solid #d2dbe7;
                 background-color: #ffffff;
                 alternate-background-color: #f7f9fc;
                 color: #334155;
             }
-            QTableWidget::item:selected {
+            QTableView::item:selected {
                 background-color: #dbeafe;
                 color: #1e3a8a;
             }
@@ -3177,14 +3178,14 @@ class MainWindow(QMainWindow):
             }
             """
         return """
-        QTableWidget {
+        QTableView {
             gridline-color: #2a3040;
             border: 1px solid #2a3040;
             background-color: #161a20;
             alternate-background-color: #1c2028;
             color: #dce3ec;
         }
-        QTableWidget::item:selected {
+        QTableView::item:selected {
             background-color: #1d4a9a;
             color: #e8f0fc;
         }
@@ -3764,8 +3765,9 @@ class MainWindow(QMainWindow):
         summary_layout.addStretch()
         layout.addLayout(summary_layout)
 
-        # Table
-        self.trans_table = QTableWidget()
+        # Table (F-01 root fix): model/view instead of one QTableWidgetItem per
+        # cell; the view keeps the QTableWidget-compatible facade used below.
+        self.trans_table = TranslationTableView()
         self.trans_table.setColumnCount(3)
         self.trans_table.setHorizontalHeaderLabels([i18n.t("header_id"), i18n.t("header_source"), i18n.t("header_dest")])
         self.trans_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -4055,6 +4057,10 @@ class MainWindow(QMainWindow):
 
         was_blocked = table.blockSignals(True)
         table.setUpdatesEnabled(False)
+        begin_batch = getattr(table, "begin_style_batch", None)
+        end_batch = getattr(table, "end_style_batch", None)
+        if callable(begin_batch):
+            begin_batch()
         try:
             for row in range(row_count):
                 status = status_map.get(row, self.ROW_STATUS_UNTRANSLATED)
@@ -4068,6 +4074,8 @@ class MainWindow(QMainWindow):
                     item.setBackground(color)
                     item.setToolTip(tooltip)
         finally:
+            if callable(end_batch):
+                end_batch()
             table.setUpdatesEnabled(True)
             table.blockSignals(was_blocked)
 
@@ -5656,6 +5664,10 @@ class MainWindow(QMainWindow):
         # F-01: keep repaints off while a page is inserted and auto-size column 0
         # once at the end of the whole fill chain.
         table.setUpdatesEnabled(False)
+        begin_batch = getattr(table, "begin_style_batch", None)
+        end_batch = getattr(table, "end_style_batch", None)
+        if callable(begin_batch):
+            begin_batch()
         try:
             if start == 0:
                 table.setRowCount(0)
@@ -5699,6 +5711,8 @@ class MainWindow(QMainWindow):
             self._set_status_summary_refresh_suspended(False)
             raise
         finally:
+            if callable(end_batch):
+                end_batch()
             table.setUpdatesEnabled(True)
         table.blockSignals(False)
         self._set_status_summary_refresh_suspended(False)

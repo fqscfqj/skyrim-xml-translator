@@ -213,6 +213,84 @@ def bench_deterministic_scan() -> None:
         record("deterministic scan 40k", "skipped", str(exc)[:80])
 
 
+def bench_table_migration() -> None:
+    try:
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtGui import QColor
+        from PyQt6.QtWidgets import QApplication, QTableWidget, QTableWidgetItem
+
+        from src.gui_table import TranslationTableView
+
+        app = QApplication.instance() or QApplication([])  # noqa: F841
+        rows = 10000
+        color = QColor("#E8F5E9")
+
+        def fill_model_view():
+            table = TranslationTableView()
+            table.setRowCount(0)
+            table.setRowCount(rows)
+            table.blockSignals(True)
+            table.begin_style_batch()  # same as MainWindow._fill_trans_table_paged
+            try:
+                for i in range(rows):
+                    id_item = QTableWidgetItem(f"ID{i}")
+                    id_item.setFlags(id_item.flags() ^ Qt.ItemFlag.ItemIsEditable)
+                    table.setItem(i, 0, id_item)
+                    source_item = QTableWidgetItem(f"Source text {i}")
+                    source_item.setFlags(source_item.flags() ^ Qt.ItemFlag.ItemIsEditable)
+                    table.setItem(i, 1, source_item)
+                    table.setItem(i, 2, QTableWidgetItem(f"Dest {i}"))
+            finally:
+                table.end_style_batch()
+            table.blockSignals(False)
+            return table
+
+        def fill_widget():
+            table = QTableWidget(rows, 3)
+            table.blockSignals(True)
+            for i in range(rows):
+                id_item = QTableWidgetItem(f"ID{i}")
+                id_item.setFlags(id_item.flags() ^ Qt.ItemFlag.ItemIsEditable)
+                table.setItem(i, 0, id_item)
+                source_item = QTableWidgetItem(f"Source text {i}")
+                source_item.setFlags(source_item.flags() ^ Qt.ItemFlag.ItemIsEditable)
+                table.setItem(i, 1, source_item)
+                table.setItem(i, 2, QTableWidgetItem(f"Dest {i}"))
+            table.blockSignals(False)
+            return table
+
+        def restyle(table, batched: bool) -> None:
+            table.blockSignals(True)
+            table.setUpdatesEnabled(False)
+            if batched:
+                table.begin_style_batch()
+            try:
+                for row in range(table.rowCount()):
+                    for col in range(table.columnCount()):
+                        item = table.item(row, col)
+                        item.setBackground(color)
+                        item.setToolTip("" if row % 7 else "error")
+            finally:
+                if batched:
+                    table.end_style_batch()
+                table.setUpdatesEnabled(True)
+                table.blockSignals(False)
+
+        view_ms = timed(fill_model_view, 1)
+        widget_ms = timed(fill_widget, 1)
+        view = fill_model_view()
+        widget = fill_widget()
+        record("table fill 10k rows", f"{view_ms:.0f} ms", f"QTableWidget {widget_ms:.0f} ms")
+        record(
+            "table restyle 10k rows",
+            f"{timed(lambda: restyle(view, True), 2):.0f} ms",
+            f"QTableWidget {timed(lambda: restyle(widget, False), 2):.0f} ms",
+        )
+        del view, widget
+    except Exception as exc:  # noqa: BLE001
+        record("table migration", "skipped", str(exc)[:80])
+
+
 def main() -> None:
     bench_import()
     bench_regex()
@@ -220,6 +298,7 @@ def main() -> None:
     bench_xml_fidelity()
     bench_vector_batch()
     bench_deterministic_scan()
+    bench_table_migration()
 
     width = max(len(r[0]) for r in ROWS) + 2
     print()

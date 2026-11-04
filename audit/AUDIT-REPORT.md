@@ -709,6 +709,7 @@ dialogue 增加：“称呼按说话人与受话人的阶层、亲疏、场合�
 | M-06/07/09/10 | MCM 逐行 EOL 保持；行首缩进保存；`set_dest(overwrite=True)`；`file_formats` 内容识别（大小写不敏感、`.txt` 需 MCM 形状）并接入 GUI |
 | F-08..F-15 | 词表搜索 150ms 去抖 + 小写缓存（100k 每键 0.002ms）；导入预览后台线程并复用解析结果；新增术语后台 embedding；RAG 可视化线程化；主题切换批量重绘（10k 行 1.98s→122ms）；日志目录缓存/单换行/跨线程 signal（1.4µs/条，8 线程 1200 行零丢失） |
 | F-18 | `openai` 惰性导入：`import src.gui_main` 442→**134ms**，`sys.modules` 无 openai |
+| F-01 | **翻译表格迁移 `QAbstractTableModel` + `QTableView`**（`src/gui_table.py`）：数据不再是一格一个 `QTableWidgetItem`；视图保留 `item()/setItem()/selectedItems()/itemChanged` 兼容层，现有调用零改动；批量填充/重绘走 batch 合并信号；10k 行填充 72ms、全表重绘 34ms（QTableWidget 对照 52/41ms），无逐格 Qt 对象 |
 | F-13 | RAG 延迟初始化：窗口先出（构造 70ms），show 后后台建索引（30k 术语 129ms） |
 | C-13 | 中英各 333 键、集合一致；src 内 i18n 字面量全覆盖 |
 | T-02 | 新增 `.github/workflows/tests.yml`：push/PR 触发，Windows + Python 3.11/3.13，compileall + locale 键校验 + pytest |
@@ -739,11 +740,11 @@ dialogue 增加：“称呼按说话人与受话人的阶层、亲疏、场合�
 - **Q-02** 边界：各子块都成功但合并后 QC 仍失败时记录 failed，不重发原请求。
 - **R-40** 只捕获 `extract_keywords` 显式异常/超时（keyword_extractor 内部会把 LLM 错误降级为正则，不冒泡）。
 - **EmbeddingCache** 无 atexit 强制 flush：<200 条且 <30s 退出时该段缓存不落盘。
-- **未做**：`QAbstractTableModel` 迁移（批量刷新已把 10k 行主题切换降到 122ms）、Q-40/Q-41（按块 RAG 术语与失败块缓存）、R-30 的 `domain` 过滤（variants/forbidden/priority 已接入）、G-04 单行表头 legacy 兼容、X-12 可配置大小上限。
+- **未做**：Q-40/Q-41（按块 RAG 术语与失败块缓存）、R-30 的 `domain` 过滤（variants/forbidden/priority 已接入）、G-04 单行表头 legacy 兼容、X-12 可配置大小上限。
 
 ### 9.4 验证
 
-- `python -m pytest tests -q` → **660 passed, 118 subtests passed**（第二轮 451/86，审查前 254）。
+- `python -m pytest tests -q` → **670 passed, 118 subtests passed**（第二轮 451/86，审查前 254）。
 - `python -m compileall -q src main.py` 通过；`git diff --check` 通过。
 - `python audit/bench_round3.py` 复现 §9.2 全部数字。
 - 无头 GUI：`MainWindow` 构造 → RAG 未就绪/就绪两态、10k 行主题切换 <0.5s、100k 词表每键 <3ms、跨线程日志、`previous_source` 注入均通过。
@@ -751,13 +752,12 @@ dialogue 增加：“称呼按说话人与受话人的阶层、亲疏、场合�
 
 ### 9.5 仍未做（建议下一轮）
 
-1. `QAbstractTableModel` 迁移（一次性解决填充/状态/主题/内存，当前靠批量刷新达标）。
-2. Q-40/Q-41：长文按块做 RAG（关键词取前 8k 或逐块合并）、失败块部分缓存。
-3. R-30 `domain` 过滤与 `examples` 注入；多译法在 UI 中的选择。
-4. R-23 真正 append-only 分片索引；R-27 全量范数校验（当前抽样 64 行）。
-5. X-01 剩余字节形态（空元素/实体/属性引号）与混合换行。
-6. X-12 可配置 50MB 上限；MCM 大文件流式解析。
-7. 真实网络下的端到端回归（LLM/embedding 429/超时/断网），以及 CI 在 GitHub 上的首次运行。
-8. R-38 关键词请求的 JSON mode/temperature 参数（client 已支持 `response_format`，`extract` 尚未启用）；R-33 sidecar 内容未纳入词表指纹。
-9. 单实例、打包路径、异步日志队列。
+1. Q-40/Q-41：长文按块做 RAG（关键词取前 8k 或逐块合并）、失败块部分缓存。
+2. R-30 `domain` 过滤与 `examples` 注入；多译法在 UI 中的选择。
+3. R-23 真正 append-only 分片索引；R-27 全量范数校验（当前抽样 64 行）。
+4. X-01 剩余字节形态（空元素/实体/属性引号）与混合换行。
+5. X-12 可配置 50MB 上限；MCM 大文件流式解析。
+6. 真实网络下的端到端回归（LLM/embedding 429/超时/断网），以及 CI 在 GitHub 上的首次运行。
+7. R-38 关键词请求的 JSON mode/temperature 参数（client 已支持 `response_format`，`extract` 尚未启用）；R-33 sidecar 内容未纳入词表指纹。
+8. 单实例、打包路径、异步日志队列。
 
