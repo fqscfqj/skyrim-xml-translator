@@ -9,8 +9,8 @@ tools_debug_*.py
 logs/
 build/
 dist/
-cache/
-glossary/
+/cache/
+/glossary/
 
 
 # Python artifact ignores
