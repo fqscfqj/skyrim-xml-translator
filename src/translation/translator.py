@@ -3,11 +3,12 @@
 import copy
 import hashlib
 import json
+import re
 import time
 from threading import Lock
 from typing import Optional
 
-from src.llm.client import LLMClient
+from src.llm.client import LLMClient, ResponseTruncatedError
 from ..rag.engine import RAGEngine
 from src.prompt.prompt_manager import PromptManager
 from src.translation.text_analyzer import TextAnalyzer
@@ -28,11 +29,20 @@ class _ChunkQualityFailure(RuntimeError):
 
 
 class Translator:
-    _CACHE_POLICY_VERSION = "translation_policy_v2"
+    _CACHE_POLICY_VERSION = "translation_policy_v3"
     _FORMAT_SHELL_VERSION = "format_shell_v1"
-    _QUALITY_RULES_VERSION = "quality_rules_v3"
+    _QUALITY_RULES_VERSION = "quality_rules_v4"
     _GLOSSARY_IMPORT_FORMAT_VERSION = "glossary_import_v1"
     _DEFAULT_FORMAT_EXTRA_RETRIES = 2
+    # Q-02: at most two split layers (original -> halves -> quarters).
+    _TRUNCATION_MAX_SPLIT_DEPTH = 2
+    _TRUNCATION_MIN_SPLIT_CHARS = 20
+    # R-40: open the keyword circuit after 3 failures for 60 seconds.
+    _KEYWORD_CIRCUIT_FAILURE_THRESHOLD = 3
+    _KEYWORD_CIRCUIT_SECONDS = 60.0
+    # Q-56: flush the translation cache in bounded batches.
+    _CACHE_SAVE_EVERY_DIRTY = 200
+    _CACHE_SAVE_INTERVAL_SECONDS = 30.0
     _BLOCKING_UNTRANSLATED_RULES = {
         "empty",
         "empty_visible",
@@ -40,6 +50,8 @@ class Translator:
         "containment",
         "coverage",
         "latin_ratio",
+        "wrong_script",
+        "forbidden_term",
         "glossary_fragment",
         "paragraph_loss",
         "placeholder_adjacent_latin_residue",
@@ -56,6 +68,10 @@ class Translator:
         "coverage",
         "empty_visible",
         "latin_ratio",
+        "script_ratio",
+        "wrong_script",
+        "forbidden_term",
+        "term_consistency",
         "glossary_fragment",
         "paragraph_loss",
     }
@@ -124,6 +140,19 @@ class Translator:
 
         # Prompt hot-reload throttle: avoid per-text mtime checks in batch runs.
         self._last_prompt_reload_time: float = 0.0
+
+        # R-40: keyword extraction circuit breaker.
+        self._keyword_circuit_lock = Lock()
+        self._keyword_failure_count = 0
+        self._keyword_circuit_open_until = 0.0
+        self._keyword_circuit_logged = False
+        self._index_unavailable_logged = False
+
+        # Q-56: throttled cache flushing.
+        self._cache_write_lock = Lock()
+        self._cache_save_lock = Lock()
+        self._cache_dirty_entries = 0
+        self._last_cache_save_time = time.time()
 
     # --- Public API ---
 
@@ -291,7 +320,10 @@ class Translator:
         mcm_ui_mode = bool(self._get_runtime_flag("mcm_ui_mode", False))
         system_prompt, user_prompt = self._prompt_builder.build(
             text, debug_info.get("matched_terms", {}), prompt_style,
-            mcm_ui_mode=mcm_ui_mode, context_hint=resolved_context_hint)
+            mcm_ui_mode=mcm_ui_mode, context_hint=resolved_context_hint,
+            rich_meta=self._collect_rich_meta(debug_info.get("matched_terms", {})),
+            previous_source=self._resolve_previous_source(None, context_hint),
+        )
 
         debug_info["system_prompt"] = system_prompt
         debug_info["user_prompt"] = user_prompt
@@ -319,17 +351,48 @@ class Translator:
 
         threshold = self.rag_engine.config.get("rag", "similarity_threshold", 0.75)
 
-        log_emit(log_callback, self.rag_engine.config, "DEBUG",
-                 f"[RAG] Starting keyword extraction for text (length={len(text)}): "
-                 f"{text[:200]}{'...' if len(text) > 200 else ''}",
-                 module="translator", func="_run_rag_phase")
+        # R-34: an empty glossary can never match; paying keyword extraction
+        # (and possibly an LLM call) for it is pure waste.
+        glossary = getattr(self.rag_engine, "glossary", None)
+        if isinstance(glossary, dict) and not glossary:
+            log_emit(log_callback, self.rag_engine.config, "DEBUG",
+                     "[RAG] Glossary is empty; skipping keyword extraction and search",
+                     module="translator", func="_run_rag_phase")
+            return result
 
-        keyword_result = self.rag_engine.extract_keywords(
-            text, log_callback=log_callback, return_debug=True)
-        if isinstance(keyword_result, tuple):
-            result["keywords"], result["keyword_debug"] = keyword_result
+        stripped = str(text or "").strip()
+        short_local = (
+            self._config_bool("rag", "short_text_local_keywords", True)
+            and 0 < len(stripped) <= 40
+            and len(stripped.split()) <= 3
+        )
+        index_unavailable = self._vector_index_unavailable()
+
+        if short_local:
+            # R-34: short labels go straight to deterministic lookup with the
+            # text itself as the query; no keyword LLM call.
+            result["keywords"] = [stripped]
+            result["keyword_debug"] = {"result_source": "short_text_local"}
+            log_emit(log_callback, self.rag_engine.config, "DEBUG",
+                     f"[RAG] Short-text local path: query={stripped!r} "
+                     "(keyword LLM skipped)",
+                     module="translator", func="_run_rag_phase")
+        elif index_unavailable:
+            result["keywords"] = self._local_keywords(text)
+            result["keyword_debug"] = {"result_source": "index_unavailable_local"}
+            if not self._index_unavailable_logged:
+                self._index_unavailable_logged = True
+                log_emit(log_callback, self.rag_engine.config, "WARNING",
+                         "[RAG] Vector index unavailable; using local keywords "
+                         "and deterministic glossary lookup",
+                         module="translator", func="_run_rag_phase")
         else:
-            result["keywords"] = keyword_result
+            log_emit(log_callback, self.rag_engine.config, "DEBUG",
+                     f"[RAG] Starting keyword extraction for text (length={len(text)}): "
+                     f"{text[:200]}{'...' if len(text) > 200 else ''}",
+                     module="translator", func="_run_rag_phase")
+            result["keywords"], result["keyword_debug"] = (
+                self._extract_keywords_with_circuit(text, log_callback=log_callback))
 
         try:
             log_emit(log_callback, self.rag_engine.config, "DEBUG",
@@ -353,6 +416,16 @@ class Translator:
         if not isinstance(result["search_debug"], list):
             result["search_debug"] = []
 
+        # Q-55: one canonical matched_terms set for prompt, cache and quality.
+        if not isinstance(result["matched_terms"], dict):
+            result["matched_terms"] = {}
+        # R-30: expand variants first so an alias that occurs in the source can
+        # keep its parent entry (the parent spelling itself may not appear).
+        result["matched_terms"] = self._expand_matched_term_aliases(
+            text, result["matched_terms"])
+        result["matched_terms"] = self._filter_matched_terms_present_in_source(
+            text, result["matched_terms"])
+
         # Best-effort cache for visualization (shared across threads)
         self._set_last_rag_debug_info({
             "original_text": text,
@@ -374,14 +447,19 @@ class Translator:
 
         if result["matched_terms"]:
             result["glossary_context"] = self._prompt_builder.build_glossary_context(
-                text, result["matched_terms"])
+                text,
+                result["matched_terms"],
+                rich_meta=self._collect_rich_meta(result["matched_terms"]),
+            )
 
         return result
 
     def translate_text(self, text, use_rag=True, log_callback=None,
                        max_retries=2, return_debug_info: bool = False,
                        context_hint: Optional[dict] = None,
-                       _precomputed_rag_result: Optional[dict] = None):
+                       _precomputed_rag_result: Optional[dict] = None,
+                       previous_source: Optional[str] = None,
+                       _truncation_depth: int = 0):
         source_text = str(text) if text is not None else ""
         resolved_context_hint = self._with_resolved_whitespace_policy(
             source_text,
@@ -390,6 +468,9 @@ class Translator:
         reference_id = ""
         if isinstance(resolved_context_hint, dict):
             reference_id = str(resolved_context_hint.get("entry_id", "") or "")
+        # Q-46: explicit argument wins; GUI-provided context_hint is fallback.
+        effective_previous_source = self._resolve_previous_source(
+            previous_source, context_hint)
 
         if not text or not source_text.strip():
             if return_debug_info:
@@ -431,6 +512,7 @@ class Translator:
                     return_debug_info=return_debug_info,
                     context_hint=resolved_context_hint,
                     reference_id=reference_id,
+                    previous_source=effective_previous_source,
                 )
 
             log_emit(log_callback, self.rag_engine.config, "ERROR",
@@ -468,13 +550,15 @@ class Translator:
         cached = self._translation_cache.get(
             source_text, prompt_style, target_lang, context_key=runtime_context_key)
         if cached is not None and str(cached).strip():
-            if self._should_reject_cached_translation(
-                    source=source_text,
-                    translation=str(cached),
-                    target_lang=str(target_lang),
-                    reference_id=reference_id,
-                    whitespace_policy=quality_whitespace_policy,
-                    matched_terms=None):
+            rejected, cached_issues = self._evaluate_cached_translation(
+                source=source_text,
+                translation=str(cached),
+                target_lang=str(target_lang),
+                reference_id=reference_id,
+                whitespace_policy=quality_whitespace_policy,
+                matched_terms=None,
+            )
+            if rejected:
                 log_emit(log_callback, self.rag_engine.config, "DEBUG",
                          "Ignoring suspicious cache entry (possible missed translation)",
                          module="translator", func="translate_text")
@@ -486,15 +570,11 @@ class Translator:
                 cached_translation = self._finalize_translation_text(
                     str(cached),
                     target_lang=str(target_lang),
+                    source_text=source_text,
+                    whitespace_policy=shell_whitespace_policy,
                 )
                 if return_debug_info:
-                    cached_issues = self._quality_checker.check(
-                        source_text,
-                        cached_translation,
-                        reference_id=reference_id,
-                        target_lang=str(target_lang),
-                        whitespace_policy=quality_whitespace_policy,
-                    )
+                    # Q-54: reuse the issues from the cache-hit gate.
                     result_status, result_details = self._result_status_from_issues(cached_issues)
                     return cached_translation, self._empty_debug_info(
                         text,
@@ -518,13 +598,17 @@ class Translator:
         matched_terms = rag_result["matched_terms"]
         search_debug = rag_result["search_debug"]
         glossary_context = rag_result["glossary_context"]
+        rich_meta = self._collect_rich_meta(matched_terms)
 
         # Build prompt
         mcm_ui_mode = bool(self._get_runtime_flag("mcm_ui_mode", False))
         system_prompt, user_content = self._prompt_builder.build(
             llm_text, matched_terms, prompt_style,
             mcm_ui_mode=mcm_ui_mode, context_hint=resolved_context_hint,
-            glossary_source_text=source_text)
+            glossary_source_text=source_text,
+            previous_source=effective_previous_source,
+            rich_meta=rich_meta,
+        )
 
         debug_info = None
         if return_debug_info:
@@ -608,6 +692,8 @@ class Translator:
                 translation = self._finalize_translation_text(
                     translation,
                     target_lang=str(target_lang),
+                    source_text=source_text,
+                    whitespace_policy=shell_whitespace_policy,
                 )
                 last_translation = translation
 
@@ -619,6 +705,7 @@ class Translator:
                     reference_id=reference_id,
                     target_lang=str(target_lang),
                     whitespace_policy=quality_whitespace_policy,
+                    rich_meta=rich_meta,
                 )
                 has_untranslated_error = self._has_untranslated_error(issues)
                 has_format_error = self._has_format_error(issues)
@@ -645,6 +732,7 @@ class Translator:
                         self._translation_cache.put(
                             str(text), prompt_style, target_lang, translation,
                             context_key=runtime_context_key)
+                        self._maybe_save_translation_cache()
                     self._set_debug_result(debug_info, result_status, result_details)
                     if return_debug_info:
                         return translation, debug_info
@@ -692,6 +780,53 @@ class Translator:
                 if retry_count >= base_retries:
                     raise
                 retry_count += 1
+
+            except ResponseTruncatedError as e:
+                # Q-02: do not retry the same oversized request. Split the
+                # source at a sentence/paragraph boundary, translate the parts
+                # independently and keep whatever succeeded.
+                error_summary = format_provider_error(e)
+                if isinstance(attempt_info, dict):
+                    attempt_info["error"] = error_summary
+                    attempt_info["result_status"] = "failed"
+                    attempt_info["result_details"] = error_summary
+                    attempt_info["truncated"] = True
+                    attempt_info["accepted"] = False
+                log_emit(log_callback, self.rag_engine.config, "WARNING",
+                         f"Response truncated (depth={_truncation_depth}); "
+                         f"splitting source instead of retrying: {error_summary}",
+                         module="translator", func="translate_text")
+                combined, split_issues, split_meta = self._translate_truncated_source(
+                    source_text,
+                    use_rag=use_rag,
+                    log_callback=log_callback,
+                    max_retries=max_retries,
+                    context_hint=resolved_context_hint,
+                    previous_source=effective_previous_source,
+                    target_lang=str(target_lang),
+                    matched_terms=matched_terms,
+                    rich_meta=rich_meta,
+                    depth=_truncation_depth,
+                )
+                if combined is None:
+                    if retry_count >= base_retries:
+                        raise
+                    retry_count += 1
+                    continue
+
+                issues = split_issues
+                result_status, result_details = self._result_status_from_issues(issues)
+                if self._should_cache_translation(
+                        str(text), str(combined), issues):
+                    self._translation_cache.put(
+                        str(text), prompt_style, target_lang, combined,
+                        context_key=runtime_context_key)
+                    self._maybe_save_translation_cache()
+                if isinstance(debug_info, dict):
+                    debug_info["truncation_split"] = split_meta
+                    self._set_debug_result(debug_info, result_status, result_details)
+                    return combined, debug_info
+                return combined
 
             except Exception as e:
                 is_content_block = classify_error(e) == ErrorType.CONTENT_BLOCK
@@ -812,26 +947,26 @@ class Translator:
 
             cached = self._translation_cache.get(
                 source_text, prompt_style, target_lang, context_key=item_context_key)
-            if cached is not None and str(cached).strip() and not self._should_reject_cached_translation(
+            rejected, cached_issues = (True, [])
+            if cached is not None and str(cached).strip():
+                rejected, cached_issues = self._evaluate_cached_translation(
                     source=source_text,
                     translation=str(cached),
                     target_lang=str(target_lang),
                     reference_id=reference_id,
                     whitespace_policy=quality_whitespace_policy,
-                    matched_terms=None):
+                    matched_terms=None,
+                )
+            if cached is not None and str(cached).strip() and not rejected:
                 self._increment_runtime_counter("translation_cache_hits")
                 cached_translation = self._finalize_translation_text(
                     str(cached),
                     target_lang=str(target_lang),
+                    source_text=source_text,
+                    whitespace_policy=quality_whitespace_policy,
                 )
                 if return_debug_info:
-                    cached_issues = self._quality_checker.check(
-                        source_text,
-                        cached_translation,
-                        reference_id=reference_id,
-                        target_lang=str(target_lang),
-                        whitespace_policy=quality_whitespace_policy,
-                    )
+                    # Q-54: reuse the issues from the cache-hit gate.
                     result_status, result_details = self._result_status_from_issues(cached_issues)
                     results[idx] = (cached_translation, self._empty_debug_info(
                         source_text,
@@ -859,6 +994,11 @@ class Translator:
                 "keyword_debug": rag_result["keyword_debug"],
                 "search_debug": rag_result["search_debug"],
                 "matched_terms": rag_result["matched_terms"],
+                "rich_meta": self._collect_rich_meta(rag_result["matched_terms"]),
+                "previous_source": (
+                    resolved_context_hint.get("previous_source")
+                    if isinstance(resolved_context_hint, dict) else None
+                ),
                 "glossary_context": rag_result["glossary_context"],
             })
             rag_results_by_index[idx] = rag_result
@@ -881,6 +1021,16 @@ class Translator:
                 expected = {int(item["id"]) for item in batch_entries}
                 parsed = self._response_parser.parse_batch(
                     response, log_callback=log_callback, expected_ids=expected)
+            except ResponseTruncatedError as e:
+                # Q-02: a truncated batch is never retried as a batch.  Each
+                # item falls back to the single-item path, which splits on
+                # truncation if needed.
+                log_emit(log_callback, self.rag_engine.config, "WARNING",
+                         "Batch response truncated; falling back to single-item "
+                         f"translation per item: {e}",
+                         exc=e, module="translator", func="translate_batch_texts")
+                self._increment_runtime_counter("batch_truncated_fallbacks")
+                parsed = None
             except Exception as e:
                 log_emit(log_callback, self.rag_engine.config, "WARNING",
                          f"Batch translation failed, falling back to single-item calls: {e}",
@@ -901,6 +1051,8 @@ class Translator:
                     translation = self._finalize_translation_text(
                         str(translation),
                         target_lang=str(target_lang),
+                        source_text=source_text,
+                        whitespace_policy=str(item.get("whitespace_policy", "") or ""),
                     )
                     issues = self._quality_checker.check(
                         source_text,
@@ -909,6 +1061,7 @@ class Translator:
                         reference_id=str(item.get("reference_id", "") or ""),
                         target_lang=str(target_lang),
                         whitespace_policy=str(item.get("whitespace_policy", "") or ""),
+                        rich_meta=item.get("rich_meta") or None,
                     )
                     if self._quality_checker.should_retry(issues):
                         fallback_indices.add(idx)
@@ -919,6 +1072,7 @@ class Translator:
                         self._translation_cache.put(
                             source_text, prompt_style, target_lang, translation,
                             context_key=str(item.get("context_key", "") or ""))
+                        self._maybe_save_translation_cache()
 
                     if return_debug_info:
                         debug_info = {
@@ -1013,7 +1167,8 @@ class Translator:
     def _translate_long_text(self, source_text: str, use_rag=True, log_callback=None,
                              max_retries=2, return_debug_info: bool = False,
                              context_hint: Optional[dict] = None,
-                             reference_id: str = ""):
+                             reference_id: str = "",
+                             previous_source: Optional[str] = None):
         prompt_style = self.rag_engine.config.get("general", "prompt_style", "default")
         target_lang = self.rag_engine.config.get("general", "target_language", "zh")
         resolved_context_hint = self._with_resolved_whitespace_policy(
@@ -1041,13 +1196,15 @@ class Translator:
         cached = self._translation_cache.get(
             source_text, prompt_style, target_lang, context_key=runtime_context_key)
         if cached is not None and str(cached).strip():
-            if self._should_reject_cached_translation(
-                    source=source_text,
-                    translation=str(cached),
-                    target_lang=str(target_lang),
-                    reference_id=reference_id,
-                    whitespace_policy=quality_whitespace_policy,
-                    matched_terms=None):
+            rejected, cached_issues = self._evaluate_cached_translation(
+                source=source_text,
+                translation=str(cached),
+                target_lang=str(target_lang),
+                reference_id=reference_id,
+                whitespace_policy=quality_whitespace_policy,
+                matched_terms=None,
+            )
+            if rejected:
                 log_emit(log_callback, self.rag_engine.config, "DEBUG",
                          "Ignoring suspicious long-text cache entry",
                          module="translator", func="_translate_long_text")
@@ -1059,15 +1216,11 @@ class Translator:
                 cached_translation = self._finalize_translation_text(
                     str(cached),
                     target_lang=str(target_lang),
+                    source_text=source_text,
+                    whitespace_policy=TextAnalyzer.WHITESPACE_POLICY_STRICT,
                 )
                 if return_debug_info:
-                    cached_issues = self._quality_checker.check(
-                        source_text,
-                        cached_translation,
-                        reference_id=reference_id,
-                        target_lang=str(target_lang),
-                        whitespace_policy=quality_whitespace_policy,
-                    )
+                    # Q-54: reuse the issues from the cache-hit gate.
                     result_status, result_details = self._result_status_from_issues(cached_issues)
                     return cached_translation, self._empty_debug_info(
                         source_text,
@@ -1136,6 +1289,7 @@ class Translator:
                 chunk,
                 matched_terms,
             )
+            chunk_rich_meta = self._collect_rich_meta(chunk_terms)
             format_shell = self._text_analyzer.build_protected_format_shell(
                 chunk,
                 whitespace_policy=chunk_whitespace_policy,
@@ -1149,6 +1303,10 @@ class Translator:
                 mcm_ui_mode=mcm_ui_mode,
                 context_hint=resolved_context_hint,
                 glossary_source_text=chunk,
+                previous_source=previous_source if idx == 1 else None,
+                rich_meta=chunk_rich_meta,
+                chunk_index=idx,
+                chunk_total=len(chunks),
             )
             if previous_translation:
                 context_snippet = self._truncate_previous_translation(previous_translation, 1000)
@@ -1172,6 +1330,7 @@ class Translator:
 
             retry_count = 0
             last_corrective = ""
+            chunk_split_attempts = 0
             while True:
                 response = None
                 chunk_translation = ""
@@ -1181,38 +1340,79 @@ class Translator:
                              f"Long-text chunk translate call: chunk={idx}/{len(chunks)} "
                              f"chunk_len={len(chunk)} retry={retry_count}",
                              module="translator", func="_translate_long_text")
-                    response = self.llm_client.chat_completion(
-                        messages,
-                        log_callback=log_callback,
-                    )
-                    if isinstance(debug_info, dict):
-                        chunk_attempt = {
-                            "stage": "long_text_chunk",
-                            "chunk_index": idx,
-                            "retry": retry_count,
-                            "message_count": len(messages),
-                            "response_text": "" if response is None else str(response),
-                        }
-                        debug_info.setdefault("translation_attempts", []).append(chunk_attempt)
-                    chunk_translation = self._response_parser.parse(
-                        response, chunk, messages,
-                        llm_client=self.llm_client, log_callback=log_callback)
-                    if format_shell.has_tokens:
-                        chunk_translation = self._text_analyzer.restore_protected_format_shell(
-                            chunk_translation,
-                            format_shell,
+                    chunk_was_split = False
+                    try:
+                        response = self.llm_client.chat_completion(
+                            messages,
+                            log_callback=log_callback,
                         )
-                    chunk_translation = self._finalize_translation_text(
-                        chunk_translation,
-                        target_lang=str(target_lang),
-                    )
-                    # Q-36: pure newlines are no longer sentinels, so restore
-                    # the chunk-boundary layout tail explicitly.  Without this
-                    # the model may merge paragraphs between chunks.
-                    trailing_layout = chunk[len(chunk.rstrip()):]
-                    if trailing_layout and "\n" in trailing_layout:
-                        chunk_translation = (
-                            str(chunk_translation).rstrip() + trailing_layout)
+                    except ResponseTruncatedError:
+                        # Q-02: split this chunk instead of re-sending it.
+                        if chunk_split_attempts >= self._TRUNCATION_MAX_SPLIT_DEPTH:
+                            raise
+                        chunk_split_attempts += 1
+                        log_emit(log_callback, self.rag_engine.config, "WARNING",
+                                 f"Long-text chunk {idx}/{len(chunks)} truncated; "
+                                 f"splitting chunk (attempt {chunk_split_attempts})",
+                                 module="translator", func="_translate_long_text")
+                        combined_split = self._translate_chunk_parts(
+                            chunk,
+                            use_rag=use_rag,
+                            log_callback=log_callback,
+                            max_retries=max_retries,
+                            context_hint=resolved_context_hint,
+                            target_lang=str(target_lang),
+                        )
+                        if combined_split is None:
+                            raise
+                        chunk_translation = combined_split
+                        chunk_was_split = True
+                        if isinstance(debug_info, dict):
+                            debug_info.setdefault("truncation_splits", []).append({
+                                "chunk_index": idx,
+                                "attempt": chunk_split_attempts,
+                                "chunk_len": len(chunk),
+                            })
+                    if not chunk_was_split:
+                        if isinstance(debug_info, dict):
+                            chunk_attempt = {
+                                "stage": "long_text_chunk",
+                                "chunk_index": idx,
+                                "retry": retry_count,
+                                "message_count": len(messages),
+                                "response_text": "" if response is None else str(response),
+                            }
+                            debug_info.setdefault("translation_attempts", []).append(chunk_attempt)
+                        chunk_translation = self._response_parser.parse(
+                            response, chunk, messages,
+                            llm_client=self.llm_client, log_callback=log_callback)
+                        if format_shell.has_tokens:
+                            chunk_translation = self._text_analyzer.restore_protected_format_shell(
+                                chunk_translation,
+                                format_shell,
+                            )
+                        chunk_translation = self._finalize_translation_text(
+                            chunk_translation,
+                            target_lang=str(target_lang),
+                            source_text=chunk,
+                            whitespace_policy=chunk_whitespace_policy,
+                        )
+                        # Q-36: pure newlines are no longer sentinels, so restore
+                        # the chunk-boundary layout tail explicitly.  Without this
+                        # the model may merge paragraphs between chunks.
+                        trailing_layout = chunk[len(chunk.rstrip()):]
+                        if trailing_layout:
+                            if "\n" in trailing_layout:
+                                chunk_translation = (
+                                    str(chunk_translation).rstrip() + trailing_layout)
+                            elif (
+                                str(chunk_translation)
+                                and not str(chunk_translation).endswith((" ", "\t"))
+                            ):
+                                # Q-38: preserve a plain trailing space (the
+                                # chunker may split exactly on a space).
+                                chunk_translation = (
+                                    str(chunk_translation) + trailing_layout)
                     # Bug #11 fix: verify chunk is not empty
                     if not str(chunk_translation).strip():
                         raise ValueError(
@@ -1239,6 +1439,7 @@ class Translator:
                         chunk_terms,
                         target_lang=str(target_lang),
                         whitespace_policy=chunk_whitespace_policy,
+                        rich_meta=chunk_rich_meta,
                     )
                     paragraph_issue = self._quality_checker.check_paragraph_preservation(
                         chunk, str(chunk_translation))
@@ -1353,6 +1554,7 @@ class Translator:
             target_lang=str(target_lang),
             strict_format_whitespace=False,
             whitespace_policy=quality_whitespace_policy,
+            rich_meta=self._collect_rich_meta(quality_matched_terms),
         )
         paragraph_issue = self._quality_checker.check_paragraph_preservation(
             source_text, translation)
@@ -1383,6 +1585,7 @@ class Translator:
             self._translation_cache.put(
                 source_text, prompt_style, target_lang, translation,
                 context_key=runtime_context_key)
+            self._maybe_save_translation_cache()
 
         if isinstance(debug_info, dict):
             debug_info["system_prompt"] = first_system_prompt
@@ -1392,6 +1595,363 @@ class Translator:
         return translation
 
     # --- Internal helpers ---
+
+    # --- Q-46 / R-30 / R-34 / R-40 / Q-02 helpers ---
+
+    @staticmethod
+    def _resolve_previous_source(previous_source, context_hint) -> Optional[str]:
+        """Q-46: explicit argument wins, context_hint is the GUI fallback.
+
+        The value never enters the cache key/fingerprint: the same source line
+        must keep its cache entry regardless of the preceding line.
+        """
+        if previous_source is not None:
+            text = str(previous_source).strip()
+            return text or None
+        if isinstance(context_hint, dict):
+            value = context_hint.get("previous_source")
+            if value is not None:
+                text = str(value).strip()
+                return text or None
+        return None
+
+    def _get_rich_meta(self, term: str) -> dict:
+        """Read glossary rich metadata without ever raising (R-30 contract)."""
+        provider = getattr(self.rag_engine, "get_rich_meta", None)
+        if not callable(provider):
+            provider = getattr(
+                getattr(self.rag_engine, "_glossary_mgr", None),
+                "get_rich_meta",
+                None,
+            )
+        if not callable(provider):
+            return {}
+        try:
+            meta = provider(term)
+        except Exception:
+            return {}
+        return dict(meta) if isinstance(meta, dict) else {}
+
+    def _collect_rich_meta(self, matched_terms) -> dict:
+        if not isinstance(matched_terms, dict) or not matched_terms:
+            return {}
+        collected: dict = {}
+        for term in matched_terms:
+            meta = self._get_rich_meta(term)
+            if meta:
+                collected[str(term)] = meta
+        return collected
+
+    def _expand_matched_term_aliases(self, source_text: str,
+                                     matched_terms) -> dict:
+        """R-30: a hit term's ``variants`` are aliases for the same entry."""
+        if not isinstance(matched_terms, dict) or not matched_terms:
+            return {}
+        expanded = dict(matched_terms)
+        for term, translation in list(matched_terms.items()):
+            meta = self._get_rich_meta(term)
+            variants = meta.get("variants") if isinstance(meta, dict) else None
+            if isinstance(variants, str):
+                variants = [variants]
+            if not isinstance(variants, (list, tuple, set)):
+                continue
+            for variant in variants:
+                alias = str(variant or "").strip()
+                if not alias or alias in expanded:
+                    continue
+                if alias.casefold() == str(term).casefold():
+                    continue
+                if not self._prompt_builder._term_appears_in_source(alias, source_text):
+                    continue
+                expanded[alias] = translation
+        return expanded
+
+    def _local_keywords(self, text: str) -> list[str]:
+        """R-34/R-40 deterministic fallback: text itself + regex scan."""
+        stripped = str(text or "").strip()
+        keywords: list[str] = []
+        if stripped:
+            # Never send an entire long document as one search query.
+            keywords.append(stripped if len(stripped) <= 200 else stripped[:200])
+        for match in re.finditer(r"[A-Z][A-Za-z'\-]{1,}", stripped):
+            word = match.group(0)
+            if word in keywords:
+                continue
+            keywords.append(word)
+            if len(keywords) >= 9:
+                break
+        return keywords
+
+    def _extract_keywords_with_circuit(self, text: str, log_callback=None):
+        """R-40: open a 60s local-keyword circuit after 3 failures."""
+        now = time.time()
+        with self._keyword_circuit_lock:
+            open_until = self._keyword_circuit_open_until
+            if open_until and now >= open_until:
+                # Window elapsed: retry the model from a clean counter.
+                self._keyword_failure_count = 0
+                self._keyword_circuit_open_until = 0.0
+                self._keyword_circuit_logged = False
+                open_until = 0.0
+        if open_until and now < open_until:
+            return self._local_keywords(text), {
+                "result_source": "keyword_circuit_local",
+                "circuit_seconds_left": round(open_until - now, 1),
+            }
+
+        try:
+            keyword_result = self.rag_engine.extract_keywords(
+                text, log_callback=log_callback, return_debug=True)
+        except Exception as exc:
+            opened = False
+            with self._keyword_circuit_lock:
+                self._keyword_failure_count += 1
+                if (
+                    self._keyword_failure_count
+                    >= self._KEYWORD_CIRCUIT_FAILURE_THRESHOLD
+                    and not self._keyword_circuit_logged
+                ):
+                    self._keyword_circuit_open_until = (
+                        now + self._KEYWORD_CIRCUIT_SECONDS)
+                    self._keyword_circuit_logged = True
+                    opened = True
+            if opened:
+                log_emit(
+                    log_callback,
+                    self.rag_engine.config,
+                    "WARNING",
+                    "Keyword extraction failed "
+                    f"{self._KEYWORD_CIRCUIT_FAILURE_THRESHOLD} times in a row; "
+                    f"using local keywords for "
+                    f"{int(self._KEYWORD_CIRCUIT_SECONDS)}s before retrying",
+                    exc=exc,
+                    module="translator",
+                    func="_extract_keywords_with_circuit",
+                )
+            return self._local_keywords(text), {
+                "result_source": "keyword_failure_local",
+                "error": str(exc),
+            }
+
+        with self._keyword_circuit_lock:
+            self._keyword_failure_count = 0
+            self._keyword_circuit_open_until = 0.0
+            self._keyword_circuit_logged = False
+
+        if isinstance(keyword_result, tuple):
+            keywords, debug_info = keyword_result
+        else:
+            keywords, debug_info = keyword_result, {}
+        if not isinstance(debug_info, dict):
+            debug_info = {}
+        return list(keywords or []), debug_info
+
+    def _vector_index_unavailable(self) -> bool:
+        getter = getattr(self.rag_engine, "get_vector_index_status", None)
+        if not callable(getter):
+            return False
+        try:
+            status = getter()
+        except Exception:
+            return False
+        if status is None:
+            return False
+        return not bool(getattr(status, "is_ready", True))
+
+    def _split_for_truncation(self, text: str) -> list[str]:
+        """Split at a sentence/paragraph boundary near the midpoint (Q-02)."""
+        source = "" if text is None else str(text)
+        if len(source) < self._TRUNCATION_MIN_SPLIT_CHARS * 2:
+            return [source]
+        boundaries: list[int] = []
+        for match in re.finditer(
+                r"\n\s*\n|[\u3002\uff01\uff1f\uff1b]|[.!?;](?=\s|$)", source):
+            idx = match.end()
+            if 0 < idx < len(source):
+                boundaries.append(idx)
+        if not boundaries:
+            return [source]
+        low = max(1, int(len(source) * 0.25))
+        high = min(len(source) - 1, int(len(source) * 0.75))
+        candidates = [value for value in boundaries if low <= value <= high]
+        if not candidates:
+            mid = len(source) // 2
+            window = max(20, len(source) // 8)
+            candidates = [
+                value for value in boundaries if abs(value - mid) <= window
+            ] or boundaries
+        cut = min(candidates, key=lambda value: abs(value - len(source) // 2))
+        if cut <= 0 or cut >= len(source):
+            return [source]
+        return [source[:cut], source[cut:]]
+
+    def _restore_truncation_layout(self, part: str, translation: str,
+                                   target_lang: str = "zh") -> str:
+        """Restore paragraph/line layout lost when split parts are joined."""
+        source = "" if part is None else str(part)
+        text = "" if translation is None else str(translation)
+        if not source or not text:
+            return text
+        leading = source[: len(source) - len(source.lstrip())]
+        if leading:
+            if "\n" in leading or "\r" in leading:
+                newline_prefix = leading.replace(" ", "").replace("\t", "")
+                if not text.startswith(("\n", "\r")):
+                    text = newline_prefix + text
+            elif (
+                not self._is_cjk_target_language(target_lang)
+                and not text.startswith((" ", "\t", "\n", "\r"))
+            ):
+                text = " " + text
+        trailing = source[len(source.rstrip()):]
+        if trailing and ("\n" in trailing or "\r" in trailing):
+            newline_suffix = trailing.replace(" ", "").replace("\t", "")
+            if newline_suffix and not text.endswith(("\n", "\r")):
+                text = text.rstrip() + newline_suffix
+        elif trailing and text and not text.endswith((" ", "\t")):
+            # Q-38: a plain trailing space is still source layout.
+            text = text + trailing
+        return text
+
+    def _truncation_part_context(
+            self, context_hint: Optional[dict]) -> dict:
+        """Boundary whitespace belongs to the split algorithm, not the model."""
+        part_context = dict(context_hint) if isinstance(context_hint, dict) else {}
+        part_context["whitespace_policy"] = (
+            TextAnalyzer.WHITESPACE_POLICY_RELAXED_ALL)
+        return part_context
+
+    def _translate_truncated_source(
+            self,
+            source_text: str,
+            *,
+            use_rag: bool,
+            log_callback,
+            max_retries: int,
+            context_hint: Optional[dict],
+            previous_source: Optional[str],
+            target_lang: str,
+            matched_terms: Optional[dict],
+            rich_meta: Optional[dict],
+            depth: int):
+        """Q-02: translate split halves; keep successful parts at max depth."""
+        if depth >= self._TRUNCATION_MAX_SPLIT_DEPTH:
+            return None, [], {}
+        parts = self._split_for_truncation(source_text)
+        if len(parts) < 2:
+            return None, [], {}
+
+        succeeded: list[str] = []
+        failed_parts = 0
+        part_context = self._truncation_part_context(context_hint)
+        for part in parts:
+            try:
+                part_translation = self.translate_text(
+                    part,
+                    use_rag=use_rag,
+                    log_callback=log_callback,
+                    max_retries=max_retries,
+                    return_debug_info=False,
+                    context_hint=part_context,
+                    previous_source=previous_source,
+                    _truncation_depth=depth + 1,
+                )
+            except Exception as exc:
+                failed_parts += 1
+                log_emit(
+                    log_callback,
+                    self.rag_engine.config,
+                    "ERROR",
+                    f"Truncation split part failed (depth={depth + 1}): {exc}",
+                    exc=exc,
+                    module="translator",
+                    func="_translate_truncated_source",
+                )
+                continue
+            succeeded.append(self._restore_truncation_layout(
+                part, part_translation, target_lang))
+
+        if not succeeded:
+            return None, [], {}
+
+        combined = "".join(succeeded)
+        quality_whitespace_policy = self._resolve_quality_whitespace_policy(
+            source_text,
+            context_hint=context_hint,
+        )
+        issues = self._quality_checker.check(
+            source_text,
+            combined,
+            matched_terms,
+            target_lang=target_lang,
+            whitespace_policy=quality_whitespace_policy,
+            rich_meta=rich_meta,
+        )
+        meta = {
+            "depth": depth + 1,
+            "parts": len(parts),
+            "failed_parts": failed_parts,
+        }
+        if failed_parts:
+            log_emit(
+                log_callback,
+                self.rag_engine.config,
+                "ERROR",
+                f"Truncated translation kept {len(succeeded)}/{len(parts)} "
+                f"successful part(s); {failed_parts} part(s) remained truncated",
+                module="translator",
+                func="_translate_truncated_source",
+            )
+        else:
+            log_emit(
+                log_callback,
+                self.rag_engine.config,
+                "INFO",
+                f"Truncation split succeeded: depth={depth + 1} parts={len(parts)}",
+                module="translator",
+                func="_translate_truncated_source",
+            )
+        return combined, issues, meta
+
+    def _translate_chunk_parts(
+            self,
+            chunk: str,
+            *,
+            use_rag: bool,
+            log_callback,
+            max_retries: int,
+            context_hint: Optional[dict],
+            target_lang: str) -> Optional[str]:
+        """Q-02: translate a truncated long-text chunk in halves."""
+        parts = self._split_for_truncation(chunk)
+        if len(parts) < 2:
+            return None
+        results: list[str] = []
+        part_context = self._truncation_part_context(context_hint)
+        for part in parts:
+            try:
+                part_translation = self.translate_text(
+                    part,
+                    use_rag=use_rag,
+                    log_callback=log_callback,
+                    max_retries=max_retries,
+                    return_debug_info=False,
+                    context_hint=part_context,
+                )
+            except Exception as exc:
+                log_emit(
+                    log_callback,
+                    self.rag_engine.config,
+                    "ERROR",
+                    f"Truncated chunk part failed: {exc}",
+                    exc=exc,
+                    module="translator",
+                    func="_translate_chunk_parts",
+                )
+                return None
+            results.append(self._restore_truncation_layout(
+                part, part_translation, target_lang))
+        return "".join(results)
 
     def _filter_matched_terms_present_in_source(self, source_text: str,
                                                 matched_terms: Optional[dict]) -> dict:
@@ -1570,9 +2130,18 @@ class Translator:
                 if value:
                     parts.append(f"{key}:{value}")
             entry_id = str(context_hint.get("entry_id", "") or "").strip()
-            if entry_id:
+            # Q-52: a whitespace-free short label ("Health") is a shared UI
+            # token; isolating it per entry destroys dedupe/cache hits.  Keep
+            # text_kind/entry_type/domain (above) but drop entry_id.
+            compact_short_label = (
+                bool(source_text)
+                and len(source_text) <= 40
+                and not any(ch.isspace() for ch in source_text)
+            )
+            if entry_id and not compact_short_label:
                 parts.append(f"entry_id:{entry_id}")
-            elif not str(context_hint.get("record_type", "") or "").strip():
+            elif not entry_id and not str(
+                    context_hint.get("record_type", "") or "").strip():
                 try:
                     log_emit(None, self.rag_engine.config, "DEBUG",
                              "Translation cache key missing entry_id/record_type",
@@ -1620,6 +2189,25 @@ class Translator:
             "style": section_values("general", ("prompt_style", "style_profile")),
             "llm": llm_policy,
             "use_rag": bool(use_rag),
+            # Q-51: chunking/quality/prompt-budget settings change the
+            # produced text and must rotate the cache namespace.
+            "chunking": section_values("general", (
+                "long_text_chunking_enabled",
+                "long_text_chunk_threshold_chars",
+                "long_text_chunk_target_chars",
+            )),
+            "quality": {
+                "latin_ratio_threshold": config.get(
+                    "rag", "latin_ratio_threshold", 2.0),
+                "glossary_entry_max_chars": config.get(
+                    "rag", "glossary_entry_max_chars", 240),
+            },
+            "prompt_limits": {
+                "batch_prompt_max_chars": config.get(
+                    "rag", "batch_prompt_max_chars", 12000),
+                "short_text_local_keywords": config.get(
+                    "rag", "short_text_local_keywords", True),
+            },
         }
         if use_rag:
             glossary_fingerprint = getattr(self.rag_engine, "get_glossary_fingerprint", None)
@@ -1671,10 +2259,23 @@ class Translator:
             return True
         return len(stripped.split()) <= 4 and not has_sentence_punctuation
 
-    def _finalize_translation_text(self, translation: str, target_lang: str) -> str:
+    def _finalize_translation_text(self, translation: str, target_lang: str,
+                                   source_text: Optional[str] = None,
+                                   whitespace_policy: Optional[str] = None) -> str:
         text = "" if translation is None else str(translation)
         if self._is_cjk_target_language(target_lang):
             text = self._text_analyzer.normalize_cjk_runtime_tag_spacing(text)
+        if source_text is not None and (
+            whitespace_policy != TextAnalyzer.WHITESPACE_POLICY_RELAXED_SPACES
+        ):
+            # Q-38: edge padding comes from the source of truth, never from
+            # model output (strict shell checks would otherwise mis-fire).
+            # Dialogue padding follows the relaxed-space policy instead.
+            try:
+                text = self._text_analyzer.restore_edge_whitespace(
+                    source_text, text)
+            except Exception:
+                pass
         return text
 
     @staticmethod
@@ -1842,21 +2443,22 @@ class Translator:
                 return False
         return True
 
-    def _should_reject_cached_translation(
+    def _evaluate_cached_translation(
             self,
             source: str,
             translation: str,
             target_lang: str,
             reference_id: Optional[str] = None,
             whitespace_policy: Optional[str] = None,
-            matched_terms: Optional[dict] = None) -> bool:
-        """Guard cache hits; matched_terms forwarded for fragment checks."""
+            matched_terms: Optional[dict] = None,
+            rich_meta: Optional[dict] = None):
+        """Q-54: evaluate a cache hit once and return ``(rejected, issues)``."""
         lang = (target_lang or "").strip().lower()
         if lang.startswith("en"):
-            return False
+            return False, []
 
         if self._is_suspicious_identity_translation(source, translation):
-            return True
+            return True, []
 
         issues = self._quality_checker.check(
             source,
@@ -1865,8 +2467,66 @@ class Translator:
             reference_id=reference_id,
             target_lang=target_lang,
             whitespace_policy=whitespace_policy,
+            rich_meta=rich_meta,
         )
-        return any(issue.severity == "error" for issue in issues)
+        return any(issue.severity == "error" for issue in issues), issues
+
+    def _should_reject_cached_translation(
+            self,
+            source: str,
+            translation: str,
+            target_lang: str,
+            reference_id: Optional[str] = None,
+            whitespace_policy: Optional[str] = None,
+            matched_terms: Optional[dict] = None,
+            rich_meta: Optional[dict] = None) -> bool:
+        """Guard cache hits; kept boolean-shaped for compatibility (Q-54)."""
+        rejected, _issues = self._evaluate_cached_translation(
+            source=source,
+            translation=translation,
+            target_lang=target_lang,
+            reference_id=reference_id,
+            whitespace_policy=whitespace_policy,
+            matched_terms=matched_terms,
+            rich_meta=rich_meta,
+        )
+        return rejected
+
+    def _maybe_save_translation_cache(self) -> None:
+        """Q-56: flush the cache every 200 dirty entries or 30 seconds.
+
+        Uses the existing ``TranslationCache.save`` implementation; a failure
+        must never break translation, so it is logged and swallowed.
+        """
+        should_save = False
+        with self._cache_write_lock:
+            self._cache_dirty_entries += 1
+            now = time.time()
+            if self._cache_dirty_entries >= self._CACHE_SAVE_EVERY_DIRTY:
+                should_save = True
+            elif (
+                self._cache_dirty_entries > 0
+                and now - self._last_cache_save_time
+                >= self._CACHE_SAVE_INTERVAL_SECONDS
+            ):
+                should_save = True
+            if should_save:
+                self._cache_dirty_entries = 0
+                self._last_cache_save_time = now
+        if not should_save:
+            return
+        with self._cache_save_lock:
+            try:
+                self._translation_cache.save()
+            except Exception as exc:
+                log_emit(
+                    None,
+                    self.rag_engine.config,
+                    "WARNING",
+                    f"Periodic translation cache save failed: {exc}",
+                    module="translator",
+                    func="_maybe_save_translation_cache",
+                )
 
     @staticmethod
     def _truncate_previous_translation(text: str, max_chars: int = 1000) -> str:

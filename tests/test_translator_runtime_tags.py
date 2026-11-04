@@ -194,7 +194,9 @@ class TranslatorRuntimeTagTests(unittest.TestCase):
         result = translator.translate_text(source, use_rag=False, max_retries=0)
 
         self.assertGreater(llm.calls, 1)
-        self.assertEqual(long_translation * llm.calls, result)
+        # Chunks may end on a plain space; it is preserved as source layout
+        # (Q-38), so compare the concatenated translation with spaces removed.
+        self.assertEqual(long_translation * llm.calls, result.replace(" ", ""))
         second_user_prompt = llm.messages_seen[1][1]["content"]
         self.assertIn("前文候选译文", second_user_prompt)
         self.assertLess(

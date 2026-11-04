@@ -96,6 +96,11 @@ class QualityChecker:
     _PROPER_NOUN_TOKEN_RE = re.compile(r"^[A-Z][a-z'\-]+$")
     _UPPER_ACRONYM_RE = re.compile(r"\b[A-Z]{2,}(?:[A-Z0-9]{0,4})\b")
     _LATIN_SPAN_RE = re.compile(r"[A-Za-z]+(?:[ '\-][A-Za-z]+)*")
+    # Q-43: script gate works for every supported target language, not only
+    # CJK.  Latin covers the accented ranges used by fr/de/es/it/pt/pl/tr.
+    _LATIN_SCRIPT_RE = re.compile(r"[A-Za-z\u00c0-\u024f\u1e00-\u1eff]")
+    _CYRILLIC_SCRIPT_RE = re.compile(r"[\u0400-\u04ff]")
+    _WRONG_SCRIPT_MIN_VISIBLE_CHARS = 12
     _PLACEHOLDER_ADJACENT_LATIN_RE = re.compile(
         r"(?P<prefix>(?:<[^>]*>\s*)?%\s*)(?P<letter>[a-z])"
         r"(?=$|[\s\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af。，、！？；：,.!?;:)\]\uFF09])"
@@ -139,7 +144,8 @@ class QualityChecker:
               reference_id: Optional[str] = None,
               target_lang: str = "zh",
               strict_format_whitespace: bool = True,
-              whitespace_policy: Optional[str] = None) -> list[QualityIssue]:
+              whitespace_policy: Optional[str] = None,
+              rich_meta: Optional[dict] = None) -> list[QualityIssue]:
         """Run quality checks and return a list of issues."""
         issues: list[QualityIssue] = []
         source_text = "" if source is None else str(source)
@@ -190,6 +196,20 @@ class QualityChecker:
         frag_issue = self._check_untranslated_fragments(source_text, translation_text, matched_terms)
         if frag_issue:
             issues.append(frag_issue)
+
+        # R-30: glossary rich metadata is consumed by quality as well as prompt.
+        forbidden_issue = self._check_forbidden_terms(translation_text, rich_meta)
+        if forbidden_issue:
+            issues.append(forbidden_issue)
+
+        consistency_issue = self._check_term_consistency(
+            source_text,
+            translation_text,
+            matched_terms,
+            rich_meta=rich_meta,
+        )
+        if consistency_issue:
+            issues.append(consistency_issue)
 
         residue_issue = self._check_placeholder_adjacent_latin_residue(
             source_text,
@@ -310,15 +330,24 @@ class QualityChecker:
             matched_terms=matched_terms,
         )
 
+        script_issue = self._check_script_presence(
+            source_visible,
+            translation_visible,
+            target_lang=target_lang,
+        )
+
         latin_issue = None
         if self._should_check_latin_ratio(target_lang):
-            latin_issue = self._check_latin_ratio(source_visible, translation_visible)
+            latin_issue = self._check_script_ratio(
+                source_visible, translation_visible, target_lang=target_lang)
 
         # Never let containment short-circuit the latin-ratio check (Q-03).
-        for issue in (coverage_issue, zero_cjk_issue, containment_issue, latin_issue):
+        for issue in (coverage_issue, zero_cjk_issue, script_issue,
+                      containment_issue, latin_issue):
             if issue is not None and issue.severity == "error":
                 return issue
-        return coverage_issue or zero_cjk_issue or containment_issue or latin_issue
+        return (coverage_issue or zero_cjk_issue or script_issue
+                or containment_issue or latin_issue)
 
     @staticmethod
     def _make_issue(severity: str, details: str, rule_id: str,
@@ -332,7 +361,15 @@ class QualityChecker:
         )
 
     def _check_latin_ratio(self, source_visible: str,
-                           translation_visible: str) -> Optional[QualityIssue]:
+                           translation_visible: str,
+                           target_lang: str = "zh") -> Optional[QualityIssue]:
+        """Backward-compatible alias for the target-script ratio check (Q-43)."""
+        return self._check_script_ratio(
+            source_visible, translation_visible, target_lang=target_lang)
+
+    def _check_script_ratio(self, source_visible: str,
+                            translation_visible: str,
+                            target_lang: str = "zh") -> Optional[QualityIssue]:
         # Q-31: a capitalized common UI/stat word left inside otherwise
         # translated text is a missed translation, not a proper noun.
         residual_ui = self._residual_ui_tokens(source_visible, translation_visible)
@@ -344,32 +381,101 @@ class QualityChecker:
                 fragments=residual_ui,
             )
 
+        expected_re = self._script_char_re(self._target_script(target_lang))
+        if expected_re is None:
+            return None
+
         text_only = self._strip_safe_latin_spans(
             source_visible,
             translation_visible,
         )
         if len(text_only) > 5:
-            chinese_chars = len(self._CJK_CHAR_RE.findall(text_only))
-            alpha_chars = len(self._text_analyzer._ALPHA_CHAR_RE.findall(text_only))
-            total_chars = chinese_chars + alpha_chars
+            expected_chars = len(expected_re.findall(text_only))
+            alpha_chars = len(self._LATIN_SCRIPT_RE.findall(text_only))
+            total_chars = expected_chars + alpha_chars
             if total_chars > 5:
-                cjk_ratio = chinese_chars / total_chars if total_chars else 0.0
+                script_ratio = expected_chars / total_chars if total_chars else 0.0
                 required = 1.0 / (1.0 + self._latin_ratio_threshold)
-                if alpha_chars > chinese_chars * self._latin_ratio_threshold or (
-                    chinese_chars == 0 and alpha_chars > 5
+                if (
+                    alpha_chars > expected_chars * self._latin_ratio_threshold
+                    or (expected_chars == 0 and alpha_chars > 5)
                 ):
                     return self._make_issue(
                         "error",
-                        f"Translation appears mostly untranslated (alpha={alpha_chars}, "
-                        f"cjk={chinese_chars}, cjk_ratio={cjk_ratio:.2f}<{required:.2f})",
+                        f"Translation appears mostly untranslated "
+                        f"(latin={alpha_chars}, expected_script={expected_chars}, "
+                        f"script_ratio={script_ratio:.2f}<{required:.2f})",
                         "latin_ratio",
                         fragments=self._latin_fragments(translation_visible),
                     )
         return None
 
+    def _check_script_presence(
+            self,
+            source_visible: str,
+            translation_visible: str,
+            target_lang: str = "zh") -> Optional[QualityIssue]:
+        """Q-43: non-CJK targets must actually use their expected script.
+
+        A French/German/... target that returns only CJK/Cyrillic text, or a
+        Russian/Ukrainian target that returns only Latin text, is not a
+        translation at all.  CJK targets keep using the existing
+        ``latin_ratio``/zero-CJK gate to avoid duplicate errors.
+        """
+        script = self._target_script(target_lang)
+        if script not in {"latin", "cyrillic"}:
+            return None
+        expected_re = self._script_char_re(script)
+        if expected_re is None:
+            return None
+        # The source already uses the target script: nothing to enforce.
+        if expected_re.search(source_visible or ""):
+            return None
+        if len(str(translation_visible or "").strip()) < self._WRONG_SCRIPT_MIN_VISIBLE_CHARS:
+            return None
+        if expected_re.search(translation_visible or ""):
+            return None
+        return self._make_issue(
+            "error",
+            f"Target {target_lang} translation contains no {script} characters",
+            "wrong_script",
+            fragments=self._latin_fragments(translation_visible),
+        )
+
+    @staticmethod
+    def _target_script(target_lang: str) -> str:
+        """Expected writing system for a target language code (Q-43)."""
+        lang = (target_lang or "").strip().lower()
+        if not lang:
+            return ""
+        if lang.startswith(("zh", "ja", "ko")):
+            return "cjk"
+        if lang.startswith(("ru", "uk")):
+            return "cyrillic"
+        if lang.startswith(("en", "fr", "de", "es", "it", "pt", "pl", "tr")):
+            return "latin"
+        return ""
+
+    def _script_char_re(self, script: str):
+        if script == "cjk":
+            return self._CJK_CHAR_RE
+        if script == "cyrillic":
+            return self._CYRILLIC_SCRIPT_RE
+        if script == "latin":
+            return self._LATIN_SCRIPT_RE
+        return None
+
+    @staticmethod
+    def _is_cjk_target_language(target_lang: str) -> bool:
+        lang = (target_lang or "").strip().lower()
+        return lang.startswith(("zh", "ja", "ko"))
+
     def _residual_ui_tokens(self, source_visible: str,
                             translation_visible: str) -> list[str]:
-        if not self._CJK_CHAR_RE.search(translation_visible):
+        if not (
+            self._CJK_CHAR_RE.search(translation_visible)
+            or self._CYRILLIC_SCRIPT_RE.search(translation_visible)
+        ):
             return []
         source_lower = str(source_visible or "").lower()
         fragments: list[str] = []
@@ -394,7 +500,7 @@ class QualityChecker:
             target_lang: str = "zh",
             matched_terms: Optional[dict] = None) -> Optional[QualityIssue]:
         """zh/ja/ko targets must not return pure Latin for a Latin source."""
-        if not self._should_check_latin_ratio(target_lang):
+        if not self._is_cjk_target_language(target_lang):
             return None
         if not self._ALPHA_RE.search(source_visible):
             return None
@@ -533,8 +639,12 @@ class QualityChecker:
 
     @staticmethod
     def _should_check_latin_ratio(target_lang: str) -> bool:
-        lang = (target_lang or "").strip().lower()
-        return lang.startswith(("zh", "ja", "ko"))
+        """Q-43: any non-Latin target script needs the ratio gate.
+
+        Kept under the old name for API/test compatibility; latin-script
+        targets are protected by ``_check_script_presence`` instead.
+        """
+        return QualityChecker._target_script(target_lang) in {"cjk", "cyrillic"}
 
     def _strip_safe_latin_spans(self, source_visible: str, translation_visible: str) -> str:
         if not translation_visible:
@@ -630,7 +740,7 @@ class QualityChecker:
         if it were a protected token. Real source placeholders like ``%s`` or
         ``%f`` are skipped when they appear in the source token sequence.
         """
-        if not self._should_check_latin_ratio(target_lang):
+        if not self._is_cjk_target_language(target_lang):
             return None
         if not translation:
             return None
@@ -710,6 +820,106 @@ class QualityChecker:
                 fragments=untranslated,
             )
         return None
+
+    # --- R-30: rich glossary metadata consumption ---
+
+    _FORBIDDEN_KEYS = ("forbidden", "forbidden_translations", "banned")
+
+    def _check_forbidden_terms(
+            self,
+            translation: str,
+            rich_meta: Optional[dict] = None) -> Optional[QualityIssue]:
+        """A translation must never use a glossary entry's forbidden variants."""
+        if not rich_meta or not isinstance(rich_meta, dict):
+            return None
+        translation_text = str(translation or "")
+        if not translation_text:
+            return None
+        translation_folded = translation_text.casefold()
+
+        found: list[str] = []
+        for _term, meta in rich_meta.items():
+            if not isinstance(meta, dict):
+                continue
+            values = None
+            for key in self._FORBIDDEN_KEYS:
+                if meta.get(key):
+                    values = meta.get(key)
+                    break
+            if values is None:
+                continue
+            if isinstance(values, str):
+                values = [values]
+            if not isinstance(values, (list, tuple, set)):
+                continue
+            for value in values:
+                banned = str(value or "").strip()
+                if not banned:
+                    continue
+                if banned.casefold() in translation_folded and banned not in found:
+                    found.append(banned)
+        if not found:
+            return None
+        return QualityIssue(
+            issue_type=QualityIssueType.UNTRANSLATED,
+            severity="error",
+            details=f"Translation uses forbidden glossary variant(s): {found}",
+            rule_id="forbidden_term",
+            fragments=found,
+        )
+
+    def _check_term_consistency(
+            self,
+            source: str,
+            translation: str,
+            matched_terms: Optional[dict] = None,
+            rich_meta: Optional[dict] = None) -> Optional[QualityIssue]:
+        """Warn when a hit term's primary translation is missing (R-30).
+
+        This is advisory only: an evidence-backed synonym must remain usable,
+        but the reviewer/model should see that the preferred rendering was not
+        used.  A surviving source term is already an error from
+        ``_check_untranslated_fragments`` and is not duplicated here.
+        """
+        if not matched_terms or not isinstance(matched_terms, dict):
+            return None
+        translation_text = str(translation or "")
+        if not translation_text:
+            return None
+        translation_folded = translation_text.casefold()
+        source_text = str(source or "")
+
+        missing: list[str] = []
+        for term, expected in matched_terms.items():
+            term_text = str(term or "").strip()
+            expected_text = str(expected or "").strip()
+            if not term_text or not expected_text:
+                continue
+            if expected_text.casefold() == term_text.casefold():
+                continue
+            if not self._term_present_in_source(term_text, source_text):
+                continue
+            if expected_text.casefold() in translation_folded:
+                continue
+            # Surviving source text is a hard error elsewhere.
+            if term_text.casefold() in translation_folded:
+                continue
+            if self._text_analyzer.is_common_ui_token(term_text):
+                continue
+            if len(term_text) >= 2 and term_text.upper() == term_text:
+                continue
+            entry = f"{term_text}->{expected_text}"
+            if entry not in missing:
+                missing.append(entry)
+        if not missing:
+            return None
+        return QualityIssue(
+            issue_type=QualityIssueType.UNTRANSLATED,
+            severity="warning",
+            details=f"Preferred glossary term translation not used: {missing}",
+            rule_id="term_consistency",
+            fragments=missing,
+        )
 
     _QUOTE_PAIRS = (('"', '"'), ("“", "”"), ("「", "」"), ("『", "』"), ("‘", "’"))
 
@@ -862,7 +1072,7 @@ class QualityChecker:
             tokens: list[str],
             index: int,
             target_lang: str = "zh") -> bool:
-        if not self._should_check_latin_ratio(target_lang):
+        if not self._is_cjk_target_language(target_lang):
             return False
         if index < 0 or index >= len(tokens):
             return False

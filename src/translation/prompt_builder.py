@@ -32,7 +32,11 @@ class PromptBuilder:
               prompt_style: str = "default",
               mcm_ui_mode: bool = False,
               context_hint: Optional[dict] = None,
-              glossary_source_text: Optional[str] = None) -> tuple[str, str]:
+              glossary_source_text: Optional[str] = None,
+              previous_source: Optional[str] = None,
+              rich_meta: Optional[dict] = None,
+              chunk_index: Optional[int] = None,
+              chunk_total: Optional[int] = None) -> tuple[str, str]:
         """Build complete (system_prompt, user_content) for a translation request.
 
         Phase B restructure: system prompt contains only core rules;
@@ -81,11 +85,27 @@ class PromptBuilder:
         if dialogue_whitespace_rules:
             sections.append(dialogue_whitespace_rules.strip())
 
+        # Q-46: the previous line of the same conversation is data-only
+        # context.  Explicit argument wins; context_hint is the GUI default.
+        previous_line = self._build_previous_source_context(
+            previous_source,
+            context_hint=context_hint,
+            source_text=source_text,
+        )
+        if previous_line:
+            sections.append(previous_line)
+
+        # Q-37: long-text chunk anchor so the model translates only this slice.
+        chunk_context = self._build_chunk_context(chunk_index, chunk_total)
+        if chunk_context:
+            sections.append(chunk_context)
+
         # Glossary matches vary per source, so keep them after stable
         # style/context rules and immediately before the source text.
         glossary_context = self.build_glossary_context(
             glossary_source_text if glossary_source_text is not None else source_text,
             matched_terms,
+            rich_meta=rich_meta,
         )
         if glossary_context:
             glossary_append = self.prompt_manager.get(
@@ -217,7 +237,11 @@ class PromptBuilder:
                     item_parts.append(
                         self.apply_prompt_vars(style_rules, prompt_vars))
 
-            glossary_context = self.build_glossary_context(source_text, matched_terms)
+            glossary_context = self.build_glossary_context(
+                source_text,
+                matched_terms,
+                rich_meta=item.get("rich_meta"),
+            )
             if glossary_context:
                 glossary_append = self.prompt_manager.get(
                     "translator.glossary_instruction_append",
@@ -242,6 +266,17 @@ class PromptBuilder:
             if dialogue_whitespace_rules:
                 item_parts.append(dialogue_whitespace_rules.strip())
 
+            previous_source = item.get("previous_source")
+            if previous_source is None and isinstance(context_hint, dict):
+                previous_source = context_hint.get("previous_source")
+            previous_line = self._build_previous_source_context(
+                previous_source,
+                context_hint=context_hint if isinstance(context_hint, dict) else None,
+                source_text=str(item.get("text", "")),
+            )
+            if previous_line:
+                item_parts.append(previous_line)
+
             item_parts.append(self.apply_prompt_vars(
                 user_template,
                 {**prompt_vars, "text": source_text},
@@ -254,14 +289,60 @@ class PromptBuilder:
 
     def resolve_style_profile(self, prompt_style: str,
                               context_hint: Optional[dict] = None) -> ResolvedStyleProfile:
-        return self._style_profiles.resolve(prompt_style, context_hint)
+        return self._style_profiles.resolve(
+            prompt_style,
+            self._style_context_with_inferred_kind(context_hint),
+        )
+
+    def _style_context_with_inferred_kind(
+            self, context_hint: Optional[dict] = None) -> dict:
+        """Q-45: infer ``journal_letter`` for BOOK records with a private
+        journal/letter/note/diary EDID.
+
+        An explicit style profile (context or config) always wins, so this
+        only fills the automatic-mapping gap.
+        """
+        context = dict(context_hint) if isinstance(context_hint, dict) else {}
+        explicit = str(context.get("style_profile", "") or "").strip()
+        configured = str(
+            self.config.get("general", "style_profile", "auto") or "auto"
+        ).strip()
+        if explicit and explicit.lower() != "auto":
+            return context
+        if configured and configured.lower() != "auto":
+            return context
+        inferred = self._infer_text_kind(context)
+        if inferred:
+            context["text_kind"] = inferred
+            context["style_profile"] = inferred
+        return context
+
+    @staticmethod
+    def _infer_text_kind(context_hint: Optional[dict]) -> str:
+        if not isinstance(context_hint, dict):
+            return ""
+        text_kind = str(context_hint.get("text_kind", "") or "").strip().lower()
+        if text_kind == "journal_letter":
+            return "journal_letter"
+        record_type = str(context_hint.get("record_type", "") or "").strip().upper()
+        if record_type != "BOOK":
+            return ""
+        identifier = " ".join(
+            str(context_hint.get(key, "") or "")
+            for key in ("entry_id", "edid", "EDID", "reference_id")
+        ).upper()
+        if re.search(r"JOURNAL|LETTER|NOTE|DIARY", identifier):
+            return "journal_letter"
+        return ""
 
     @staticmethod
     def _render_style_profile(profile: ResolvedStyleProfile) -> str:
         if not profile.rules:
             return ""
         lines = "\n".join(f"- {rule}" for rule in profile.rules)
-        return f"文本类型与文体上下文（{profile.profile_id}，不与原文证据冲突时采用）：\n{lines}"
+        # Q-48: profile_id stays internal; it is not useful to the model and
+        # costs prompt tokens on every request.
+        return f"文本类型与文体上下文（不与原文证据冲突时采用）：\n{lines}"
 
     def _build_mcm_ui_rules(self, target_lang_code: str, source_text: str,
                             context_hint: Optional[dict]) -> str:
@@ -301,11 +382,62 @@ class PromptBuilder:
         joined = "\n".join(f"- {r}" for r in base_rules)
         return f"\n\nMCM 界面上下文（按原文证据采用）：\n{joined}"
 
+    @staticmethod
+    def _build_chunk_context(chunk_index: Optional[int],
+                             chunk_total: Optional[int]) -> str:
+        """Q-37: tell the model which slice it is translating."""
+        try:
+            index = int(chunk_index)
+            total = int(chunk_total)
+        except (TypeError, ValueError):
+            return ""
+        if index <= 0 or total <= 1 or index > total:
+            return ""
+        return (
+            f"分段上下文：本段为第 {index}/{total} 段，仅译本段，"
+            "不补开场或收束，也不重复其它段落内容。"
+        )
+
+    def _build_previous_source_context(self, previous_source: Optional[str],
+                                       context_hint: Optional[dict] = None,
+                                       source_text: str = "") -> str:
+        """Q-46: inject the previous dialogue line as read-only context."""
+        text = "" if previous_source is None else str(previous_source).strip()
+        if not text:
+            return ""
+        if not self._is_dialogue_context(context_hint, source_text):
+            return ""
+        # Keep only the tail: references/address forms live near the end.
+        if len(text) > 600:
+            text = "…" + text[-600:]
+        text = self._escape_source_delimiters(text)
+        return (
+            "上一句原文（仅供参考，不要翻译它；只用于保持指代、称呼和语气一致）：\n"
+            "<<<PREVIOUS_SOURCE>>>\n"
+            f"{text}\n"
+            "<<<END_PREVIOUS_SOURCE>>>"
+        )
+
+    @staticmethod
+    def _is_dialogue_context(context_hint: Optional[dict],
+                              source_text: str = "") -> bool:
+        if isinstance(context_hint, dict):
+            text_kind = str(context_hint.get("text_kind", "") or "").strip().lower()
+            if text_kind in {"dialogue", "short_dialogue"}:
+                return True
+            if text_kind in {"document", "book", "quest", "ui",
+                             "journal_letter", "item_name"}:
+                return False
+            record_type = str(context_hint.get("record_type", "") or "").strip().upper()
+            if record_type in {"DIAL", "INFO"}:
+                return True
+        source = str(source_text or "")
+        return any(ch in source for ch in ('"', "“", "”", "「", "」"))
+
     def _build_dialogue_whitespace_rules(self, context_hint: Optional[dict],
                                          source_text: str = "") -> str:
         if not isinstance(context_hint, dict):
             return ""
-
         whitespace_policy = self._text_analyzer.normalize_whitespace_policy(
             str(context_hint.get("whitespace_policy", "") or "")
         )
@@ -356,8 +488,15 @@ class PromptBuilder:
             return True
         return len(stripped.split()) <= 4
 
-    def build_glossary_context(self, source_text: str, matched_terms: dict) -> str:
-        """Build flat glossary context with in-source vs reference grouping."""
+    def build_glossary_context(self, source_text: str, matched_terms: dict,
+                               rich_meta: Optional[dict] = None) -> str:
+        """Build flat glossary context with in-source vs reference grouping.
+
+        R-30: rich metadata is consumed here:
+        * ``priority`` only changes ordering, never the term text;
+        * ``forbidden`` variants are rendered as explicit prohibitions;
+        * ``variants`` are rendered as source aliases for recognition.
+        """
         if not matched_terms:
             return ""
 
@@ -370,12 +509,28 @@ class PromptBuilder:
         in_source_lines: list[str] = []
         reference_lines: list[str] = []
 
-        for term, translation in matched_terms.items():
-            if not isinstance(term, str) or not term.strip():
-                continue
-            if len(term) >= 100:
-                continue
+        items = [
+            (term, translation)
+            for term, translation in matched_terms.items()
+            if isinstance(term, str) and term.strip() and len(term) < 100
+        ]
 
+        meta_map = rich_meta if isinstance(rich_meta, dict) else {}
+
+        if meta_map:
+            def _priority_key(item: tuple) -> int:
+                meta = meta_map.get(item[0])
+                if not isinstance(meta, dict):
+                    return 0
+                try:
+                    return int(meta.get("priority", 0) or 0)
+                except (TypeError, ValueError):
+                    return 0
+
+            # Python's sort is stable: equal priorities keep RAG order.
+            items.sort(key=lambda item: -_priority_key(item))
+
+        for term, translation in items:
             v_str = "" if translation is None else str(translation)
             raw_display_term = self._strip_term_edge_punct(term) or term
             display_term = self._sanitize_glossary_field(
@@ -385,10 +540,42 @@ class PromptBuilder:
                 max_chars=entry_max_chars,
             )
 
+            extras: list[str] = []
+            meta = meta_map.get(term)
+            if isinstance(meta, dict):
+                forbidden = self._coerce_meta_list(meta.get("forbidden"))
+                if not forbidden:
+                    for key in ("forbidden_translations", "banned"):
+                        forbidden = self._coerce_meta_list(meta.get(key))
+                        if forbidden:
+                            break
+                if forbidden:
+                    rendered = "、".join(
+                        self._sanitize_glossary_field(value, max_chars=60)
+                        for value in forbidden[:6]
+                    )
+                    if rendered:
+                        extras.append(f"禁止使用以下译名：{rendered}")
+                variants = self._coerce_meta_list(meta.get("variants"))
+                alias_values = [
+                    self._sanitize_glossary_field(value, max_chars=60)
+                    for value in variants[:6]
+                ]
+                alias_values = [
+                    value for value in alias_values
+                    if value and value.casefold() != raw_display_term.casefold()
+                ]
+                if alias_values:
+                    extras.append(f"原文亦作：{'、'.join(alias_values)}")
+
+            line = f"- {display_term} -> {display_translation}"
+            if extras:
+                line = f"{line}（{'；'.join(extras)}）"
+
             if self._term_appears_in_source(raw_display_term, source_text):
-                in_source_lines.append(f"- {display_term} -> {display_translation}")
+                in_source_lines.append(line)
             else:
-                reference_lines.append(f"- {display_term} -> {display_translation}")
+                reference_lines.append(line)
 
         if not in_source_lines and not reference_lines:
             return ""
@@ -495,6 +682,8 @@ class PromptBuilder:
             "<<<END_GLOSSARY_DATA>>>",
             "<<<PREVIOUS_TRANSLATION>>>",
             "<<<END_PREVIOUS_TRANSLATION>>>",
+            "<<<PREVIOUS_SOURCE>>>",
+            "<<<END_PREVIOUS_SOURCE>>>",
             "<<<MODEL_RESPONSE>>>",
             "<<<END_MODEL_RESPONSE>>>",
         ):
@@ -680,6 +869,17 @@ class PromptBuilder:
         stripped = term.strip()
         stripped = self._TERM_EDGE_PUNCT_RE.sub("", stripped)
         return stripped
+
+    @staticmethod
+    def _coerce_meta_list(value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            parts = [part.strip() for part in re.split(r"[、,，;；|]", value)]
+            return [part for part in parts if part]
+        if isinstance(value, (list, tuple, set)):
+            return [str(item).strip() for item in value if str(item).strip()]
+        return []
 
     @classmethod
     def _sanitize_glossary_field(cls, value: Any, max_chars: Optional[int] = None) -> str:

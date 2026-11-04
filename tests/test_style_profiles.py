@@ -288,7 +288,7 @@ class PromptBuilderStyleProfileTests(unittest.TestCase):
             context_hint={"record_type": "DIAL", "text_kind": "dialogue"},
         )
 
-        self.assertIn("文本类型与文体上下文（dialogue，不与原文证据冲突时采用）", system_prompt)
+        self.assertIn("文本类型与文体上下文（不与原文证据冲突时采用）", system_prompt)
         self.assertIn("共享世界观规则", system_prompt)
         self.assertIn("成人内容规则", system_prompt)
         self.assertIn("成人对话规则", system_prompt)
@@ -315,8 +315,8 @@ class PromptBuilderStyleProfileTests(unittest.TestCase):
         book_core = book_system.split("\n\n文本类型与文体上下文", 1)[0]
         self.assertEqual(dialogue_core, book_core)
         self.assertTrue(dialogue_core.startswith("基础规则 "))
-        self.assertIn("文本类型与文体上下文（dialogue，不与原文证据冲突时采用）", dialogue_system)
-        self.assertIn("文本类型与文体上下文（lore_book，不与原文证据冲突时采用）", book_system)
+        self.assertIn("文本类型与文体上下文（不与原文证据冲突时采用）", dialogue_system)
+        self.assertIn("文本类型与文体上下文（不与原文证据冲突时采用）", book_system)
 
     def test_batch_prompt_keeps_item_style_rules_scoped_to_each_item(self):
         builder = PromptBuilder(_DummyPromptManager(), _DummyConfig())
@@ -338,8 +338,13 @@ class PromptBuilderStyleProfileTests(unittest.TestCase):
         )
 
         self.assertNotIn("文本类型与文体上下文", system_prompt)
-        self.assertIn("文本类型与文体上下文（lore_book，不与原文证据冲突时采用）", user_prompt)
-        self.assertIn("文本类型与文体上下文（dialogue，不与原文证据冲突时采用）", user_prompt)
+        # Both items get their own scoped header; Q-48 removed the profile id.
+        self.assertEqual(
+            2,
+            user_prompt.count("文本类型与文体上下文（不与原文证据冲突时采用）"),
+        )
+        self.assertIn("- 书籍规则", user_prompt)
+        self.assertIn("- 对话规则", user_prompt)
 
 
 if __name__ == "__main__":
