@@ -28,24 +28,41 @@ class TextAnalyzer:
         WHITESPACE_POLICY_RELAXED_ALL,
     })
 
-    # Compile regex patterns once
-    _FORMAT_SENTINEL_PATTERN = r"__FMT_(?:[A-Z0-9]+_)?\d{4,}__"
+    # Compile regex patterns once.
+    #
+    # Every quantifier that can be driven by attacker supplied text is hard
+    # bounded (Q-36..Q-41 / report 2.3).  Without the caps, inputs such as
+    # "%" + "0"*20000 or 8000 unclosed "<!--" backtrack for seconds.  A
+    # formatting token never legitimately needs thousands of characters.
+    # Formatting tokens never legitimately need thousands of characters.
+    _MAX_COMMENT_CHARS = 65536
+
+    _FORMAT_SENTINEL_PATTERN = r"__FMT_(?:[A-Z0-9]{1,32}_)?\d{4,12}__"
     _FORMAT_SENTINEL_RE = re.compile(_FORMAT_SENTINEL_PATTERN)
     _FORMAT_SENTINEL_RE_IGNORECASE = re.compile(_FORMAT_SENTINEL_PATTERN, re.IGNORECASE)
-    _COMMENT_CDATA_PATTERN = r"<!--.*?-->|<!\[CDATA\[.*?\]\]>"
+    # The regex form is only kept for ``fullmatch`` checks on already
+    # extracted tokens; whole-text scanning uses ``_iter_comment_spans``
+    # (linear "find opener, then find closer" scanner).
+    _COMMENT_CDATA_PATTERN = (
+        r"<!--.{0,%d}?-->|<!\[CDATA\[.{0,%d}?\]\]>"
+        % (_MAX_COMMENT_CHARS, _MAX_COMMENT_CHARS)
+    )
     _COMMENT_CDATA_RE = re.compile(_COMMENT_CDATA_PATTERN, flags=re.DOTALL)
-    _DOLLAR_TOKEN_PATTERN = r"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[^{}]+\}|\d+)"
-    _NAMED_BRACE_PATTERN = r"\{[A-Za-z_][A-Za-z0-9_\-:.]*\}"
+    _DOLLAR_TOKEN_PATTERN = (
+        r"\$(?:[A-Za-z_][A-Za-z0-9_]{0,63}|\{[^{}]{1,1024}\}|\d{1,12})"
+    )
+    _NAMED_BRACE_PATTERN = r"\{[A-Za-z_][A-Za-z0-9_\-:.]{0,127}\}"
     _PERCENT_PLACEHOLDER_PATTERN = (
-        r"(?:(?<![>\d])%[A-Za-z_][A-Za-z0-9_]*|"
+        r"(?:(?<![>\d])%[A-Za-z_][A-Za-z0-9_]{0,63}|"
         r"%%|"
-        r"%(?:\d+\$)?[#0\-+]*(?:\*|\d+)?(?:\.(?:\*|\d+))?"
+        r"%(?:\d{1,9}\$)?[#0\-+]{0,8}(?:\*|\d{1,12})?"
+        r"(?:\.(?:\*|\d{1,12}))?"
         r"(?:hh|h|ll|l|L|z|j|t)?[diuoxXfFeEgGaAcspncrs](?![A-Za-z])|"
-        r"%\d+)"
+        r"%\d{1,12})"
     )
     _PERCENT_LITERAL_PATTERN = r"(?:(?<=[>\d])%|%(?![A-Za-z0-9_]))"
-    _BRACKET_TOKEN_PATTERN = r"\[[^\]]+\]"
-    _ANGLE_BLOCK_RE = re.compile(r"<[^>]*>")
+    _BRACKET_TOKEN_PATTERN = r"\[[^\]]{1,4096}\]"
+    _ANGLE_BLOCK_RE = re.compile(r"<[^>]{0,4096}>")
     _XML_TAG_NAME_RE = re.compile(r"^[A-Za-z_][\w:.-]*$")
     _XML_ATTRS_RE = re.compile(
         r'^[A-Za-z_:][\w:.-]*\s*=\s*(?:"[^"]*"|\'[^\']*\'|[^<>\s"\']+)'
@@ -58,7 +75,22 @@ class TextAnalyzer:
         _PERCENT_PLACEHOLDER_PATTERN
         + r"|"
         + _PERCENT_LITERAL_PATTERN
-        + r"|\{\d+\}|"
+        + r"|\{\d{1,12}\}|"
+        + _NAMED_BRACE_PATTERN
+        + r"|"
+        + _DOLLAR_TOKEN_PATTERN
+        + r"|"
+        + _BRACKET_TOKEN_PATTERN
+    )
+    # Token alternatives without comments: whole-text scans merge the linear
+    # comment/CDATA scanner separately (``_iter_protected_tokens``).
+    _TOKEN_ALTERNATIVES_PATTERN = (
+        _FORMAT_SENTINEL_PATTERN
+        + r"|<[^>]{0,4096}>|"
+        + _PERCENT_PLACEHOLDER_PATTERN
+        + r"|"
+        + _PERCENT_LITERAL_PATTERN
+        + r"|\{\d{1,12}\}|"
         + _NAMED_BRACE_PATTERN
         + r"|"
         + _DOLLAR_TOKEN_PATTERN
@@ -68,18 +100,12 @@ class TextAnalyzer:
     _PROTECTED_TOKEN_RE = re.compile(
         _COMMENT_CDATA_PATTERN
         + r"|"
-        + _FORMAT_SENTINEL_PATTERN
-        + r"|<[^>]*>|"
-        + _PERCENT_PLACEHOLDER_PATTERN
-        + r"|"
-        + _PERCENT_LITERAL_PATTERN
-        + r"|\{\d+\}|"
-        + _NAMED_BRACE_PATTERN
-        + r"|"
-        + _DOLLAR_TOKEN_PATTERN
-        + r"|"
-        + _BRACKET_TOKEN_PATTERN
+        + _TOKEN_ALTERNATIVES_PATTERN
         + r"|\s+",
+        flags=re.DOTALL,
+    )
+    _PROTECTED_TOKEN_NO_COMMENT_RE = re.compile(
+        _TOKEN_ALTERNATIVES_PATTERN + r"|\s+",
         flags=re.DOTALL,
     )
     # Match latin words even when adjacent to CJK (e.g. "Choose你的").
@@ -89,6 +115,28 @@ class TextAnalyzer:
     _BRACKET_PLACEHOLDER_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_:-]*$")
     _IDENTIFIER_CHAR_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_:-]*$")
     _WHITESPACE_RE = re.compile(r"\s+")
+    # CJK runtime-tag spacing rules (compiled once instead of per call).
+    _CJK_SPACING_CHARS = (
+        "\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af\u3400-\u4dbf"
+        "，。！？；：、“”‘’（）《》〈〉「」『』【】〔〕…—·"
+    )
+    _CJK_BEFORE_TAG_RE = re.compile(
+        r"(?P<left>[" + _CJK_SPACING_CHARS + r"])(?P<gap>[ \t\u3000]+)"
+        r"(?P<tag><[^>]{0,4096}>)"
+    )
+    _CJK_AFTER_TAG_RE = re.compile(
+        r"(?P<tag><[^>]{0,4096}>)(?P<gap>[ \t\u3000]+)"
+        r"(?P<right>[" + _CJK_SPACING_CHARS + r"])"
+    )
+    # Chunk boundary probes, strongest first.  The CJK branch deliberately
+    # needs no trailing whitespace (Q-37): Chinese sentences end with 。！？；
+    # or an ellipsis and no space before the next sentence.
+    _CHUNK_BOUNDARY_PATTERNS = (
+        re.compile(r"(?:\r?\n){2,}\s*"),
+        re.compile(r"[.!?。！？]+(?:[\"'\)\]\}”’》」』]*)\s+"),
+        re.compile(r"[。！？；…]+(?:[”’》」』）】]*)"),
+        re.compile(r"[;；:：,，、]\s+"),
+    )
     # Common UI / stat / action words.  These must NOT be treated as proper
     # nouns (Q-29/Q-31): "Health", "Armor", "Lockpicking" are translation
     # targets, not untouchable names.
@@ -137,10 +185,144 @@ class TextAnalyzer:
         if text is None:
             return ""
         source = str(text)
-        source = self._COMMENT_CDATA_RE.sub("", source)
+        source = self._strip_comment_cdata(source)
         source = self._ANGLE_BLOCK_RE.sub(self._strip_protected_angle_match, source)
         source = self._PLACEHOLDER_TOKEN_RE.sub(self._strip_placeholder_match, source)
         return self._FORMAT_SENTINEL_RE.sub("", source)
+
+    def _strip_comment_cdata(self, text: str) -> str:
+        """Remove complete ``<!-- -->`` / ``<![CDATA[ ]]>`` spans (linear)."""
+        spans = list(self._iter_comment_spans(text))
+        if not spans:
+            return text
+        parts: list[str] = []
+        last = 0
+        for start, end in spans:
+            parts.append(text[last:start])
+            last = end
+        parts.append(text[last:])
+        return "".join(parts)
+
+    @staticmethod
+    def _iter_comment_spans(text: str):
+        """Yield ``(start, end)`` for complete comment/CDATA spans in O(n).
+
+        Scanning for an opener and then its closer keeps the cost linear even
+        for thousands of unclosed ``<!--`` markers.  Once a closer is missing
+        after an opener it can never appear after a later opener of the same
+        kind, so that kind is disabled for the rest of the scan.
+        """
+        length = len(text)
+        if length < 4 or "<!" not in text:
+            return
+        comment_possible = "-->" in text
+        cdata_possible = "]]>" in text
+        pos = 0
+        while pos < length:
+            candidates = []
+            if comment_possible:
+                start = text.find("<!--", pos)
+                if start >= 0:
+                    candidates.append((start, 4, "-->"))
+            if cdata_possible:
+                start = text.find("<![CDATA[", pos)
+                if start >= 0:
+                    candidates.append((start, 9, "]]>"))
+            if not candidates:
+                return
+            start, open_len, closer = min(candidates)
+            close = text.find(closer, start + open_len)
+            if close < 0:
+                if closer == "-->":
+                    comment_possible = False
+                else:
+                    cdata_possible = False
+                pos = start + open_len
+                continue
+            end = close + len(closer)
+            yield start, end
+            pos = end
+
+    @staticmethod
+    def _is_comment_cdata_token(token: str) -> bool:
+        if not token or len(token) < 7:
+            return False
+        if token.startswith("<!--"):
+            return token.endswith("-->")
+        if token.startswith("<![CDATA["):
+            return token.endswith("]]>")
+        return False
+
+    def _iter_protected_tokens(self, text: str):
+        """Yield ``(start, end, token)`` left-to-right.
+
+        Emulates the old single-regex "leftmost match wins" ordering while
+        handling comments/CDATA with linear opener/closer searches.  A token
+        that starts before a comment opener and runs into it consumes that
+        opener, so comment discovery is incremental rather than precomputed
+        (a precomputed span would otherwise hide a later opener).
+        """
+        length = len(text)
+        if length <= 0:
+            return
+        next_comment = text.find("<!--")
+        next_cdata = text.find("<![CDATA[")
+        if next_comment < 0 and next_cdata < 0:
+            # No comments at all (the common case): a single regex pass is the
+            # fastest equivalent of the old behaviour.
+            for match in self._PROTECTED_TOKEN_NO_COMMENT_RE.finditer(text):
+                yield match.start(), match.end(), match.group(0)
+            return
+        comment_disabled = next_comment < 0
+        cdata_disabled = next_cdata < 0
+        pos = 0
+        while pos < length:
+            # Drop cached openers already consumed by a preceding token.
+            if next_comment >= 0 and next_comment < pos:
+                next_comment = text.find("<!--", pos)
+                if next_comment < 0:
+                    comment_disabled = True
+            if next_cdata >= 0 and next_cdata < pos:
+                next_cdata = text.find("<![CDATA[", pos)
+                if next_cdata < 0:
+                    cdata_disabled = True
+
+            match = self._PROTECTED_TOKEN_NO_COMMENT_RE.search(text, pos)
+            match_start = match.start() if match is not None else length
+
+            opener = -1
+            closer = ""
+            open_len = 0
+            kind = ""
+            if not comment_disabled and next_comment >= 0:
+                opener, closer, open_len, kind = (
+                    next_comment, "-->", 4, "comment")
+            if (not cdata_disabled and next_cdata >= 0
+                    and (opener < 0 or next_cdata < opener)):
+                opener, closer, open_len, kind = (
+                    next_cdata, "]]>", 9, "cdata")
+
+            if opener >= 0 and opener <= match_start:
+                close = text.find(closer, opener + open_len)
+                if close < 0:
+                    # No closer after this opener means none after any later
+                    # opener of the same kind either.
+                    if kind == "comment":
+                        comment_disabled = True
+                        next_comment = -1
+                    else:
+                        cdata_disabled = True
+                        next_cdata = -1
+                    continue
+                end = close + len(closer)
+                yield opener, end, text[opener:end]
+                pos = end
+                continue
+
+            if match is None:
+                break
+            yield match.start(), match.end(), match.group(0)
+            pos = match.end()
 
     def extract_placeholder_tokens(self, text: str) -> list[str]:
         """Extract placeholder-like tokens that must be preserved exactly."""
@@ -177,14 +359,15 @@ class TextAnalyzer:
         sentinels: list[str] = []
         tokens: list[str] = []
         last_index = 0
+        matches = list(self._iter_protected_tokens(source))
 
-        for match in self._PROTECTED_TOKEN_RE.finditer(source):
-            token = match.group(0)
-            start, end = match.span()
+        for index, (start, end, token) in enumerate(matches):
+            previous = matches[index - 1] if index > 0 else None
+            following = matches[index + 1] if index + 1 < len(matches) else None
 
             if self._FORMAT_SENTINEL_RE.fullmatch(token):
                 should_protect = True
-            elif self._COMMENT_CDATA_RE.fullmatch(token):
+            elif self._is_comment_cdata_token(token):
                 should_protect = True
             elif not self._should_protect_percent_token(source, start, end, token):
                 should_protect = False
@@ -200,6 +383,8 @@ class TextAnalyzer:
                     start,
                     end,
                     whitespace_policy=normalized_policy,
+                    previous_match=previous,
+                    next_match=following,
                 )
             else:
                 should_protect = True
@@ -230,6 +415,29 @@ class TextAnalyzer:
 
         return self._FORMAT_SENTINEL_RE_IGNORECASE.sub(_repl, restored)
 
+    @staticmethod
+    def restore_edge_whitespace(source: str, translation: str) -> str:
+        """Restore the source's leading/trailing whitespace onto a translation.
+
+        Q-38: ``" Lockpicking "`` must keep its padding even though the model
+        translates the inner text.  Callers (e.g. the translator finalizer)
+        pass the original source fragment so edge padding comes from the
+        source of truth rather than from model output.
+        """
+        src = "" if source is None else str(source)
+        text = "" if translation is None else str(translation)
+        if not text:
+            return text
+        stripped = src.strip()
+        if not stripped:
+            return src
+        leading = src[:len(src) - len(src.lstrip())]
+        trailing = src[len(src.rstrip()):]
+        core = text.strip()
+        if not core:
+            return leading + trailing
+        return f"{leading}{core}{trailing}"
+
     def normalize_cjk_runtime_tag_spacing(self, text: str) -> str:
         """Remove spaces around runtime tags only in CJK context."""
         if text is None:
@@ -239,17 +447,8 @@ class TextAnalyzer:
         if not normalized:
             return normalized
 
-        cjk_chars = (
-            r"\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af\u3400-\u4dbf"
-            r"，。"
-            r"！？；：、“”‘’（）《》〈〉「」『』【】〔〕…—·"
-        )
-        before_tag_re = re.compile(
-            rf"(?P<left>[{cjk_chars}])(?P<gap>[ \t\u3000]+)(?P<tag><[^>]*>)"
-        )
-        after_tag_re = re.compile(
-            rf"(?P<tag><[^>]*>)(?P<gap>[ \t\u3000]+)(?P<right>[{cjk_chars}])"
-        )
+        before_tag_re = self._CJK_BEFORE_TAG_RE
+        after_tag_re = self._CJK_AFTER_TAG_RE
 
         def strip_before(match: re.Match[str]) -> str:
             tag = match.group("tag")
@@ -289,12 +488,17 @@ class TextAnalyzer:
         chunks: list[str] = []
         start = 0
         source_len = len(source)
+        # Plain prose (no format markers at all) needs no protected-token
+        # safety checks for every punctuation candidate; this keeps 100KB
+        # chunking linear (Q-37 performance).
+        marker_free = not any(marker in source for marker in ("<", "[", "$", "%", "{"))
         while start < source_len:
             if source_len - start <= limit:
                 chunks.append(source[start:])
                 break
 
-            split_at = self._find_chunk_boundary(source, start, limit)
+            split_at = self._find_chunk_boundary(
+                source, start, limit, marker_free=marker_free)
             if split_at <= start:
                 split_at = min(source_len, start + limit)
 
@@ -303,31 +507,37 @@ class TextAnalyzer:
 
         return [chunk for chunk in chunks if chunk]
 
-    def _find_chunk_boundary(self, text: str, start: int, limit: int) -> int:
+    def _find_chunk_boundary(
+            self,
+            text: str,
+            start: int,
+            limit: int,
+            *,
+            marker_free: bool = False) -> int:
+        """Return the best cut position in ``[start, start+limit]``.
+
+        Candidates are tested from the end of the window backwards so the first
+        acceptable boundary is almost always the answer; CJK prose can have
+        hundreds of punctuation marks per window.
+        """
         max_end = min(len(text), start + limit)
         window = text[start:max_end]
         hard_cap = min(len(text), start + limit + 256)
 
-        boundary_patterns = (
-            re.compile(r"(?:\r?\n){2,}\s*"),
-            re.compile(r"[.!?。！？]+(?:[\"'\)\]\}”’》」』]*)\s+"),
-            # CJK sentence punctuation is a boundary without trailing
-            # whitespace (Q-37): Chinese prose has no spaces after 。！？；
-            re.compile(r"[。！？；]+(?:[”’》」』）】]*)"),
-            re.compile(r"[;；:：,，、]\s+"),
-            self._WHITESPACE_RE,
-        )
+        boundary_patterns = self._CHUNK_BOUNDARY_PATTERNS + (self._WHITESPACE_RE,)
 
         for pattern in boundary_patterns:
-            candidates = [
-                start + match.end()
-                for match in pattern.finditer(window)
-                if start + match.end() > start
-                and self._is_safe_chunk_boundary(text, start + match.end())
-                and not self._is_adjacent_to_protected_token(text, start + match.end())
+            candidate_ends = [
+                start + match.end() for match in pattern.finditer(window)
             ]
-            if candidates:
-                return candidates[-1]
+            for candidate in reversed(candidate_ends):
+                if candidate <= start:
+                    continue
+                if not marker_free and (
+                        not self._is_safe_chunk_boundary(text, candidate)
+                        or self._is_adjacent_to_protected_token(text, candidate)):
+                    continue
+                return candidate
 
         split_at = max_end
         while split_at > start and not self._is_safe_chunk_boundary(text, split_at):
@@ -347,13 +557,11 @@ class TextAnalyzer:
             return True
         probe_start = max(0, index - 256)
         probe_end = min(len(text), index + 256)
-        offset = probe_start
-        for match in self._PROTECTED_TOKEN_RE.finditer(text[probe_start:probe_end]):
-            token = match.group(0)
+        for start, end, token in self._iter_protected_tokens(text[probe_start:probe_end]):
             if token.isspace():
                 continue
-            token_start = offset + match.start()
-            token_end = offset + match.end()
+            token_start = probe_start + start
+            token_end = probe_start + end
             if token_start < index < token_end:
                 return False
         return True
@@ -369,14 +577,13 @@ class TextAnalyzer:
         source = str(text)
         normalized_policy = self.normalize_whitespace_policy(whitespace_policy)
         tokens: list[str] = []
-        for match in self._PROTECTED_TOKEN_RE.finditer(source):
-            token = match.group(0)
-            start, end = match.span()
+        matches = list(self._iter_protected_tokens(source))
 
+        for index, (start, end, token) in enumerate(matches):
             if self._FORMAT_SENTINEL_RE.fullmatch(token):
                 tokens.append(token)
                 continue
-            if self._COMMENT_CDATA_RE.fullmatch(token):
+            if self._is_comment_cdata_token(token):
                 tokens.append(token)
                 continue
             if not self._should_protect_percent_token(source, start, end, token):
@@ -393,11 +600,15 @@ class TextAnalyzer:
                 tokens.append(token)
                 continue
             if token.isspace():
+                previous = matches[index - 1] if index > 0 else None
+                following = matches[index + 1] if index + 1 < len(matches) else None
                 if self._should_protect_whitespace(
                         source,
                         start,
                         end,
-                        whitespace_policy=normalized_policy):
+                        whitespace_policy=normalized_policy,
+                        previous_match=previous,
+                        next_match=following):
                     tokens.append(token)
                 continue
             tokens.append(token)
@@ -419,7 +630,7 @@ class TextAnalyzer:
     def _is_protected_angle_token(self, token: str) -> bool:
         if not token or not token.startswith("<") or not token.endswith(">"):
             return False
-        if self._COMMENT_CDATA_RE.fullmatch(token):
+        if self._is_comment_cdata_token(token):
             return True
         return self._is_xml_like_tag(token) or self._is_skyrim_runtime_token(token)
 
@@ -543,8 +754,16 @@ class TextAnalyzer:
             text: str,
             start: int,
             end: int,
-            whitespace_policy: str = WHITESPACE_POLICY_STRICT) -> bool:
-        """Preserve structural whitespace without freezing word separators inside prose."""
+            whitespace_policy: str = WHITESPACE_POLICY_STRICT,
+            *,
+            previous_match: Optional[tuple[int, int, str]] = None,
+            next_match: Optional[tuple[int, int, str]] = None) -> bool:
+        """Preserve structural whitespace without freezing word separators inside prose.
+
+        ``previous_match`` / ``next_match`` are the adjacent tokens already
+        produced by ``_iter_protected_tokens``.  Passing them avoids rescanning
+        a 256-character window with the large token regex for every space.
+        """
         token = text[start:end]
         if not token:
             return False
@@ -553,6 +772,14 @@ class TextAnalyzer:
         if policy == self.WHITESPACE_POLICY_RELAXED_ALL:
             return False
 
+        at_start = start == 0
+        at_end = end == len(text)
+        # Q-39: a trailing line break (optionally padded with spaces) is
+        # tolerated.  Models routinely drop it and it carries no meaning, so
+        # it must not turn into a protected-token mismatch.  Judge the edge
+        # first, then the line break.
+        if at_end and ("\n" in token or "\r" in token):
+            return False
         if "\t" in token:
             return True
         if "\n" in token or "\r" in token:
@@ -567,11 +794,14 @@ class TextAnalyzer:
             if not self._is_plain_space_token(token):
                 return True
             return (
-                self._has_protected_token_ending_at(text, start)
-                and self._has_protected_token_starting_at(text, end)
+                self._has_protected_token_ending_at(text, start, previous_match)
+                and self._has_protected_token_starting_at(text, end, next_match)
             )
-        if start == 0 or end == len(text):
-            return False
+        # Q-38: leading/trailing padding is structural too (" Lockpicking ").
+        # Keep it protected so a dropped edge space is detected; relaxed
+        # policies already returned above and keep their softer contract.
+        if at_start or at_end:
+            return True
         if len(token) > 1:
             return True
 
@@ -587,8 +817,8 @@ class TextAnalyzer:
         prev_is_boundary = self._is_format_boundary_char(prev_char)
         next_is_boundary = self._is_format_boundary_char(next_char)
         between_protected_tokens = (
-            self._has_protected_token_ending_at(text, start)
-            and self._has_protected_token_starting_at(text, end)
+            self._has_protected_token_ending_at(text, start, previous_match)
+            and self._has_protected_token_starting_at(text, end, next_match)
         )
 
         # A lone source-language space beside just one protected token is usually
@@ -598,10 +828,19 @@ class TextAnalyzer:
         # protected boundaries (for example "%s %d" or "<a> <b>").
         return (prev_is_boundary and next_is_boundary) or between_protected_tokens
 
-    def _has_protected_token_ending_at(self, text: str, index: int) -> bool:
+    def _has_protected_token_ending_at(
+            self,
+            text: str,
+            index: int,
+            previous_match: Optional[tuple[int, int, str]] = None) -> bool:
         if index <= 0:
             return False
-
+        if previous_match is not None:
+            prev_start, prev_end, prev_token = previous_match
+            if prev_end != index:
+                return False
+            return self._is_protected_non_whitespace_token(
+                text, prev_token, prev_start, prev_end)
         window_start = max(0, index - 256)
         fragment = text[window_start:index]
         for match in self._PROTECTED_TOKEN_RE.finditer(fragment):
@@ -616,9 +855,19 @@ class TextAnalyzer:
             )
         return False
 
-    def _has_protected_token_starting_at(self, text: str, index: int) -> bool:
+    def _has_protected_token_starting_at(
+            self,
+            text: str,
+            index: int,
+            next_match: Optional[tuple[int, int, str]] = None) -> bool:
         if index < 0 or index >= len(text):
             return False
+        if next_match is not None:
+            next_start, next_end, next_token = next_match
+            if next_start != index:
+                return False
+            return self._is_protected_non_whitespace_token(
+                text, next_token, next_start, next_end)
 
         match = self._PROTECTED_TOKEN_RE.match(text, index)
         if not match:
@@ -640,7 +889,7 @@ class TextAnalyzer:
             return False
         if self._FORMAT_SENTINEL_RE.fullmatch(token):
             return True
-        if self._COMMENT_CDATA_RE.fullmatch(token):
+        if self._is_comment_cdata_token(token):
             return True
         if token == "%":
             return self._is_protected_percent_literal(text, start, end)

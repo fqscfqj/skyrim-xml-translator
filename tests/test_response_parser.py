@@ -258,5 +258,60 @@ class ResponseParserTests(unittest.TestCase):
         self.assertIsNone(self.parser.parse_batch("抱歉，我无法协助处理该翻译请求。"))
 
 
+class ResponseParserBoundedScanTests(unittest.TestCase):
+    """Report 2.3 / Q-41: candidate braces and huge payloads are bounded."""
+
+    def setUp(self):
+        self.parser = ResponseParser()
+
+    @staticmethod
+    def _silent(*_args, **_kwargs):
+        return None
+
+    def test_last_translation_object_still_wins(self):
+        result = self.parser.parse(
+            '{"translation":"草稿"}\n{"translation":"最终"}',
+            "Hello",
+            [],
+            log_callback=self._silent,
+        )
+
+        self.assertEqual("最终", result)
+
+    def test_translation_after_unrelated_json_still_found(self):
+        result = self.parser.parse(
+            '{"thinking":{"steps":[1,2]}} 最终：{"translation":"你好"}',
+            "Hello",
+            [],
+            log_callback=self._silent,
+        )
+
+        self.assertEqual("你好", result)
+
+    def test_deeply_nested_json_does_not_raise_recursion_error(self):
+        # 40k "[" used to bubble RecursionError out of json.loads.
+        self.assertIsInstance(
+            self.parser.parse("[" * 40000, "Hi", [], log_callback=self._silent),
+            str,
+        )
+        self.assertIsNone(
+            self.parser.parse_batch("[" * 40000, log_callback=self._silent))
+        self.assertEqual(
+            "",
+            self.parser.parse("{" * 40000, "Hi", [], log_callback=self._silent),
+        )
+
+    def test_large_batch_with_trailing_chatter_still_parses(self):
+        items = ",".join(
+            '{"id":%d,"translation":"译文%d"}' % (i, i) for i in range(3000))
+        response = '{"translations":[' + items + ']} trailing commentary'
+
+        parsed = self.parser.parse_batch(response, log_callback=self._silent)
+
+        self.assertIsNotNone(parsed)
+        self.assertEqual(3000, len(parsed))
+        self.assertEqual("译文2999", parsed[2999])
+
+
 if __name__ == "__main__":
     unittest.main()

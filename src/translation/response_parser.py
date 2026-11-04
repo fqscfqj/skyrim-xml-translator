@@ -14,10 +14,17 @@ class ModelRefusalError(RuntimeError):
 
 
 class ResponseParser:
-    _JSON_EXTRACT_RE = re.compile(r"\{.*\}", flags=re.DOTALL)
+    # Report 2.3 / Q-41: bound every scan driven by untrusted model output so
+    # adversarial inputs (thousands of "{" or a repeated unclosed JSON string)
+    # cannot degrade to seconds.
+    _JSON_CANDIDATE_LIMIT = 64
+    _RELAXED_REGEX_MAX_CHARS = 32_768
+    _RELAXED_MAX_INPUT_CHARS = 200_000
+    _TRANSLATION_KV_MAX_VALUE_CHARS = 16_384
     _MARKDOWN_CODE_RE = re.compile(r"```(?:json)?")
     _TRANSLATION_KV_RE = re.compile(
-        r"""["']?translation["']?\s*[:：]\s*(?P<q>["'])(?P<value>.*?)(?P=q)(?=\s*(?:[,}]|$))""",
+        r"""["']?translation["']?\s*[:：]\s*(?P<q>["'])(?P<value>.{0,%d}?)(?P=q)(?=\s*(?:[,}]|$))"""
+        % _TRANSLATION_KV_MAX_VALUE_CHARS,
         flags=re.DOTALL | re.IGNORECASE,
     )
     _BARE_TRANSLATION_RE = re.compile(
@@ -98,7 +105,7 @@ class ResponseParser:
         try:
             parsed_json = json.loads(clean_response)
             json_ok = True
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, RecursionError):
             json_ok = False
         if json_ok:
             if isinstance(parsed_json, str):
@@ -175,7 +182,7 @@ class ResponseParser:
             return False
         try:
             json.loads(original)
-        except (json.JSONDecodeError, TypeError, ValueError):
+        except (json.JSONDecodeError, TypeError, ValueError, RecursionError):
             return False
         return True
 
@@ -280,7 +287,7 @@ class ResponseParser:
             if value[0] == '"':
                 try:
                     return str(json.loads(value))
-                except (json.JSONDecodeError, TypeError, ValueError):
+                except (json.JSONDecodeError, TypeError, ValueError, RecursionError):
                     pass
             else:
                 try:
@@ -306,7 +313,7 @@ class ResponseParser:
         data = None
         try:
             data = json.loads(clean_response)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, RecursionError):
             data = self._try_parse_first_json_object(clean_response)
             if data is None:
                 data = self._try_parse_first_json_array(clean_response)
@@ -409,7 +416,7 @@ class ResponseParser:
         try:
             json.loads(compact)
             return False
-        except (json.JSONDecodeError, TypeError, ValueError):
+        except (json.JSONDecodeError, TypeError, ValueError, RecursionError):
             pass
         if compact in {"{", "}", "[", "]", "\"", "'", "{\"", "\"}"}:
             return True
@@ -418,6 +425,38 @@ class ResponseParser:
         if compact.count("{") > compact.count("}") and len(compact) < 32:
             return True
         return False
+
+    @staticmethod
+    def _iter_brace_positions(
+            text: str, *, from_right: bool,
+            limit: int):
+        """Yield at most ``limit`` ``{`` offsets without a regex scan."""
+        found = 0
+        if from_right:
+            pos = text.rfind("{")
+            while pos >= 0 and found < limit:
+                yield pos
+                found += 1
+                pos = text.rfind("{", 0, pos)
+        else:
+            pos = text.find("{")
+            while pos >= 0 and found < limit:
+                yield pos
+                found += 1
+                pos = text.find("{", pos + 1)
+
+    @staticmethod
+    def _extract_outermost_json_object(text: str) -> Optional[str]:
+        """Greedy ``\\{.*\\}`` equivalent without a backtracking regex."""
+        if not text:
+            return None
+        start = text.find("{")
+        if start < 0:
+            return None
+        end = text.rfind("}")
+        if end <= start:
+            return None
+        return text[start:end + 1]
 
     @classmethod
     def _try_parse_first_json_object(
@@ -428,6 +467,9 @@ class ResponseParser:
         For translation objects, invalid placeholder/leak candidates are
         skipped and the LAST valid candidate wins (Q-18/Q-19).  Generic
         callers (no required keys) keep first-match semantics.
+
+        Candidate braces are capped (report 2.3): scanning every ``{`` with
+        ``raw_decode`` made a 166KB repeated payload take seconds.
         """
         if not text:
             return None
@@ -455,69 +497,50 @@ class ResponseParser:
             return True
 
         if not require_translation:
-            compact = text.lstrip()
-            if compact.startswith("{"):
+            for pos in cls._iter_brace_positions(
+                    text, from_right=False, limit=cls._JSON_CANDIDATE_LIMIT):
                 try:
-                    parsed, end = decoder.raw_decode(compact)
-                    if _matches(parsed, compact[:end]):
-                        return parsed
-                except json.JSONDecodeError:
-                    pass
-
-            for match in re.finditer(r"\{", text):
-                try:
-                    parsed, end = decoder.raw_decode(text[match.start():])
-                    if _matches(parsed, text[match.start():match.start() + end]):
-                        return parsed
-                except json.JSONDecodeError:
+                    parsed, end = decoder.raw_decode(text, pos)
+                except (json.JSONDecodeError, ValueError, RecursionError):
                     continue
-
+                if _matches(parsed, text[pos:end]):
+                    return parsed
             return None
 
-        candidates: list[dict] = []
-        compact = text.lstrip()
-        if compact.startswith("{"):
-            try:
-                parsed, end = decoder.raw_decode(compact)
-                if _matches(parsed, compact[:end]):
-                    candidates.append(parsed)
-            except json.JSONDecodeError:
-                pass
+        # Cheap prefilter: a translation object must contain the key name.
+        if "translation" not in text.casefold():
+            return None
 
-        for match in re.finditer(r"\{", text):
+        # The rightmost usable candidate is the LAST valid object in document
+        # order, so scanning from the right can return immediately.
+        for pos in cls._iter_brace_positions(
+                text, from_right=True, limit=cls._JSON_CANDIDATE_LIMIT):
             try:
-                parsed, end = decoder.raw_decode(text[match.start():])
-                if _matches(parsed, text[match.start():match.start() + end]):
-                    candidates.append(parsed)
-            except json.JSONDecodeError:
+                parsed, end = decoder.raw_decode(text, pos)
+            except (json.JSONDecodeError, ValueError, RecursionError):
                 continue
+            if _matches(parsed, text[pos:end]):
+                return parsed
+        return None
 
-        return candidates[-1] if candidates else None
-
-    @staticmethod
-    def _try_parse_first_json_array(text: str) -> Optional[list]:
+    @classmethod
+    def _try_parse_first_json_array(cls, text: str) -> Optional[list]:
         """Parse the first valid JSON array from text, ignoring trailing content."""
         if not text:
             return None
 
         decoder = json.JSONDecoder()
-
-        compact = text.lstrip()
-        if compact.startswith("["):
+        found = 0
+        pos = text.find("[")
+        while pos >= 0 and found < cls._JSON_CANDIDATE_LIMIT:
+            found += 1
             try:
-                parsed, _ = decoder.raw_decode(compact)
-                if isinstance(parsed, list):
-                    return parsed
-            except json.JSONDecodeError:
-                pass
-
-        for match in re.finditer(r"\[", text):
-            try:
-                parsed, _ = decoder.raw_decode(text[match.start():])
-                if isinstance(parsed, list):
-                    return parsed
-            except json.JSONDecodeError:
-                continue
+                parsed, _ = decoder.raw_decode(text, pos)
+            except (json.JSONDecodeError, ValueError, RecursionError):
+                parsed = None
+            if isinstance(parsed, list):
+                return parsed
+            pos = text.find("[", pos + 1)
 
         return None
 
@@ -550,24 +573,24 @@ class ResponseParser:
                                   log_callback: Optional[Callable] = None) -> Optional[str]:
         """Try to extract translation from malformed JSON-like responses."""
         clean = response.strip()
-        if len(clean) > 200_000:
+        if len(clean) > self._RELAXED_MAX_INPUT_CHARS:
             return None
 
         # Q-22: repair trailing commas structurally, so commas inside JSON
         # strings are never touched.
         fixed = self._repair_trailing_commas(clean)
-        try:
-            m = self._JSON_EXTRACT_RE.search(fixed)
-            if m:
-                data = json.loads(m.group(0))
+        candidate = self._extract_outermost_json_object(fixed)
+        if candidate is not None:
+            try:
+                data = json.loads(candidate)
                 found, result = self._extract_usable_translation(data)
                 if found:
                     log_emit(log_callback, self.config, "DEBUG",
                              "Recovered translation via trailing-comma fix",
                              module="response_parser", func="_try_relaxed_json_extract")
                     return result
-        except Exception:
-            pass
+            except Exception:
+                pass
 
         # Handle Python-like dicts with single quotes.
         if fixed.startswith("{") and fixed.endswith("}") and "'" in fixed:
@@ -581,6 +604,12 @@ class ResponseParser:
                     return result
             except Exception:
                 pass
+
+        # The KV/bare regex recovery paths are only fallbacks for short
+        # payloads.  On large malformed text they backtrack quadratically
+        # (report 2.3: 166KB repeated JSON took 665ms+), so they are skipped.
+        if len(clean) > self._RELAXED_REGEX_MAX_CHARS:
+            return None
 
         # Match "translation": "value" or 'translation': 'value' pattern.
         # Prefer the LAST valid candidate so draft objects do not win (Q-18).

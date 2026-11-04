@@ -220,6 +220,167 @@ class TextAnalyzerPercentProtectionTests(unittest.TestCase):
         self.assertIn("<mag>", chunks[1])
 
 
+class TextAnalyzerRoundThreeTests(unittest.TestCase):
+    """Q-36..Q-39: whitespace fidelity, CJK chunking and bounded scanning."""
+
+    def setUp(self):
+        self.analyzer = TextAnalyzer()
+
+    def assert_round_trips(self, source: str,
+                           policy: str = TextAnalyzer.WHITESPACE_POLICY_STRICT):
+        shell = self.analyzer.build_protected_format_shell(
+            source, whitespace_policy=policy)
+        restored = self.analyzer.restore_protected_format_shell(
+            shell.protected_text, shell)
+        self.assertEqual(source, restored)
+        return shell
+
+    @staticmethod
+    def non_space_tokens(tokens):
+        return [token for token in tokens if not str(token).isspace()]
+
+    def test_comment_and_cdata_are_protected_as_whole_blocks(self):
+        source = "A <!-- <b>note</b> --> B <![CDATA[ [pagebreak] ]]> C"
+
+        shell = self.assert_round_trips(source)
+
+        self.assertEqual(
+            ["<!-- <b>note</b> -->", "<![CDATA[ [pagebreak] ]]>"],
+            self.non_space_tokens(shell.tokens),
+        )
+        # Inner markup must not leak out as separate protected tokens.
+        self.assertNotIn("<b>", shell.tokens)
+        self.assertNotIn("[pagebreak]", shell.tokens)
+
+    def test_unclosed_comment_does_not_hide_later_tokens(self):
+        source = "intro <!-- unclosed [pagebreak]"
+
+        shell = self.assert_round_trips(source)
+
+        self.assertIn("[pagebreak]", shell.tokens)
+        self.assertFalse(any("<!--" in token for token in shell.tokens))
+
+    def test_comment_between_tags_is_a_single_token(self):
+        source = "<b><!--x--></b>"
+
+        shell = self.assert_round_trips(source)
+
+        self.assertEqual(
+            ["<b>", "<!--x-->", "</b>"],
+            self.non_space_tokens(shell.tokens),
+        )
+
+    def test_token_swallowing_comment_opener_keeps_later_comment(self):
+        # A bracket starting before "<!--" consumes that opener (leftmost
+        # match wins), but a later opener is still a valid comment.
+        source = "[a<!--b]<!--c-->"
+
+        shell = self.assert_round_trips(source)
+
+        self.assertIn("<!--c-->", shell.tokens)
+
+    def test_bracket_that_swallows_comment_keeps_following_token(self):
+        source = "[a <!--c--> b] %s"
+
+        tokens = self.analyzer.extract_protected_format_tokens(source)
+
+        self.assertIn("%s", tokens)
+        self.assertFalse(any("<!--" in token for token in tokens), tokens)
+
+    def test_pure_paragraph_breaks_are_not_frozen(self):
+        # Q-36: \n / \n\n / \r\n\r\n are content, not sentinels.
+        for source in ("a\nb", "a\n\nb", "a\r\n\r\nb"):
+            with self.subTest(source=source):
+                self.assertEqual(
+                    (), self.analyzer.build_protected_format_shell(source).tokens)
+                self.assertEqual(
+                    [], self.analyzer.extract_protected_format_tokens(source))
+
+        structural = self.analyzer.build_protected_format_shell("a \n\nb")
+        self.assertEqual((" \n\n",), structural.tokens)
+
+    def test_cjk_chunking_splits_at_sentence_punctuation_without_spaces(self):
+        # Q-37: 3400 CJK chars with no spaces used to be cut mid-sentence.
+        source = "这是第一句测试文本，内容需要保持完整。" * 170
+        self.assertGreater(len(source), 3000)
+
+        chunks = self.analyzer.chunk_text(source, 300)
+
+        self.assertGreater(len(chunks), 1)
+        self.assertEqual(source, "".join(chunks))
+        self.assertTrue(all(len(chunk) <= 300 for chunk in chunks))
+        for chunk in chunks[:-1]:
+            self.assertTrue(chunk.endswith("。"), chunk[-10:])
+            # Chunks should stay close to the limit instead of collapsing.
+            self.assertGreater(len(chunk), 240)
+
+    def test_cjk_ellipsis_and_closing_quote_are_chunk_boundaries(self):
+        ellipsis_source = "话说未完……" * 400
+        ellipsis_chunks = self.analyzer.chunk_text(ellipsis_source, 100)
+        self.assertGreater(len(ellipsis_chunks), 1)
+        self.assertEqual(ellipsis_source, "".join(ellipsis_chunks))
+        for chunk in ellipsis_chunks[:-1]:
+            self.assertTrue(chunk.endswith("…"), chunk[-6:])
+
+        quoted_source = "他说：“你好。”" * 200
+        quoted_chunks = self.analyzer.chunk_text(quoted_source, 50)
+        self.assertGreater(len(quoted_chunks), 1)
+        self.assertEqual(quoted_source, "".join(quoted_chunks))
+        for chunk in quoted_chunks[:-1]:
+            self.assertTrue(chunk.endswith("。”"), chunk[-6:])
+
+    def test_leading_and_trailing_padding_is_protected(self):
+        # Q-38: " Lockpicking " must keep both edge spaces.
+        source = " Lockpicking "
+
+        shell = self.assert_round_trips(source)
+
+        self.assertEqual((" ", " "), shell.tokens)
+        self.assertEqual(
+            [" ", " "],
+            self.analyzer.extract_protected_format_tokens(source),
+        )
+
+    def test_restore_edge_whitespace_helper_uses_source_edges(self):
+        self.assertEqual(
+            " 开锁 ",
+            TextAnalyzer.restore_edge_whitespace(" Lockpicking ", "开锁"),
+        )
+        self.assertEqual(
+            "\u3000全角\u3000",
+            TextAnalyzer.restore_edge_whitespace("\u3000全角\u3000", "全角"),
+        )
+        self.assertEqual(
+            "你好\n",
+            TextAnalyzer.restore_edge_whitespace("Hello\n", "你好"),
+        )
+        self.assertEqual(
+            "开锁",
+            TextAnalyzer.restore_edge_whitespace("Lockpicking", " 开锁 "),
+        )
+
+    def test_trailing_line_break_is_tolerated(self):
+        # Q-39: "Hello\n" -> "你好" must not produce a token mismatch.
+        for source in ("Hello\n", "Hello\n\n", "Hello \n", "Hello\r\n"):
+            with self.subTest(source=source):
+                self.assertEqual(
+                    (), self.analyzer.build_protected_format_shell(source).tokens)
+                self.assertEqual(
+                    [], self.analyzer.extract_protected_format_tokens(source))
+        self.assertEqual(
+            [], self.analyzer.extract_protected_format_tokens("你好"))
+
+    def test_relaxed_spaces_policy_keeps_edge_padding_soft(self):
+        for source in (" Lockpicking ", "  multiple   spaces  "):
+            with self.subTest(source=source):
+                tokens = self.analyzer.extract_protected_format_tokens(
+                    source,
+                    whitespace_policy=TextAnalyzer.WHITESPACE_POLICY_RELAXED_SPACES,
+                )
+                self.assertFalse(
+                    any(not token.strip() for token in tokens), tokens)
+
+
 class PromptBuilderGlossaryContextTests(unittest.TestCase):
     def test_fallback_system_prompt_protects_format_sentinels(self):
         builder = PromptBuilder(_DummyPromptManager(), _DummyConfig())
