@@ -671,3 +671,93 @@ dialogue 增加：“称呼按说话人与受话人的阶层、亲疏、场合�
 **翻译**：Q-02 与 `ResponseTruncatedError` 的拆块重译联动、Q-43 非 CJK 目标脚本门禁、Q-45 journal_letter 映射、Q-46 speaker/listener 上下文、Q-51/52/54/55/56 缓存键与持久化细节。
 **文件/工程**：X-01 完整字节保真（standalone/CRLF/属性引号/实体写法/空元素）、X-09 512KB 预检窗、M-07 行首缩进、`file_formats.py` 死代码收敛、CI pytest job、GUI 测试覆盖扩展到真实 Worker/配置保存失败路径。
 
+---
+
+## 9. 修复进展（2026-11-04，第三轮）
+
+第三轮按"性能 / RAG 完善 / 翻译质量"三条主线并行推进，7 个子代理 + 主代理集成，完成 §8.5 中的绝大多数条目。所有改动仍未提交 git（见 §9.7）。
+
+### 9.1 本轮完成项（按报告编号）
+
+| 编号 | 修复 |
+|---|---|
+| R-04 | 正则兜底改为"原文 token → 词条倒排"候选查询（懒建、按词表指纹失效），df=0 不再算信号词，罗马数字/缩写/句首普通词/常见动词排除；40k 词表冷建 10.5ms、热查询 0.03ms/条 |
+| R-07/08/09 | containment 改整 token/词序列匹配（`war` 不中 `Warning`）；单 token 多候选按原始 cosine 取 top-1×0.92（差 >0.15 才放弃）；去掉 `-ly` 一刀切，所有格剥离后判中心名词，低信号仍走词法 |
+| R-13..R-16 | 统一融合分（raw cosine + direct/containment/overlap 加成，不 clamp）；阈值只作用于归一化最终分；`(-fused, len(term), term)` 确定性 tie-break；先全局排序再按 short/long 配额截断（单调、非先到先得） |
+| R-17 | 检索结果按融合分有序返回；prompt 上下文按顺序截断（消费侧） |
+| R-18 | anchor token 只从 df>0 且 df≤max_df 选，分母用实际 anchor 数 |
+| R-19/20 | `return_debug=False` 时零 debug 分配/零 deepcopy；`RAGSearcher` 接收 stop/pause 回调，在关键词循环/embedding 批次/候选打分边界生效，engine 已接线 |
+| R-21/22 | 状态机比较 key 集合哈希；增量构建差集删除孤儿向量，空词表清空整库 |
+| R-23/24 | 1.5× 预分配缓冲 + 每批直接写入（去掉两次 vstack）；checkpoint 间隔自适应 `max(config, len/2)`，结束/停止/异常前 flush；12000 词实测 7 次全量写（固定 1000 行需 12 次、≈78k 行） |
+| R-25 | 批量删除沿用 `delete_terms_batch` |
+| R-26/27 | terms 任何非法项 → `terms_corrupt` 拒绝加载（不再截断错位）；`metadata_missing` 按 `embedding` 键判断；加载抽样 ≤64 行校验 L2 范数并与 `unit_l2` 对账修复 |
+| R-28/29 | uuid4 tmp + WinError 5/32 重试 + `.bak` 回退；metadata RLock；词法索引局部构建替换 + 锁内快照 |
+| R-30/31 | 多译法导入主译 + `variants`；`forbidden` 进提示词并做输出拦截（blocking error）；`priority` 参与排序；`variants` 作为别名召回；术语一致性做 warning；sidecar 与 envelope 逐字段合并 |
+| R-32 | 词表注入转义（`_sanitize_glossary_field` → `_escape_source_delimiters`）覆盖新增的 variants/forbidden 字段 |
+| R-34 | 空词表/索引未建跳过 RAG；≤40 字且 ≤3 token 用 `[text]` 直配，不调关键词 LLM；`rag.short_text_local_keywords` 可关 |
+| R-36 | 缓存原始响应、失败/降级不缓存、配置指纹补全、空白归一化 key、返回副本 |
+| R-39 | `EmbeddingCache` npz 持久化（float32 + fingerprint 命名空间 + 脏标记 + 200 条/30s 节流），换模型自动切命名空间 |
+| R-40 | 关键词连续 3 次失败熔断 60s，日志一次 |
+| 3.6-1 | **新增确定性命中扫描器**（`src/rag/deterministic_scan.py`）：词首倒排 + 第二 token 子索引 + CJK 字符 trie，整篇扫描，40k 术语重建 79ms、400 字扫描 0.06ms、内存 ≈5.6MiB；接入 `RAGSearcher.search`，逐字命中按配额优先返回（即使关键词 LLM 返回空） |
+| Q-02 | `ResponseTruncatedError` 不再重试；单条/批量/长文块均可拆块重译（最多 2 层），保留成功部分 |
+| Q-37/38/39 | CJK 分块允许标点后无空格切分（15/15 句末）；首尾空白按源串恢复；行尾换行可容忍 |
+| Q-43 | 目标脚本门禁：ru/uk 西里尔、en/fr/de/es/it/pt/pl/tr 拉丁，`wrong_script` 纳入 blocking |
+| Q-45/46/48 | BOOK+EDID 推断 `journal_letter`；dialogue 注入上一句原文（`context_hint["previous_source"]`，不进入缓存键）；system 补 UI 长度/中文排版/反翻译腔/JSON few-shot，删重复 hedge |
+| Q-51..Q-56 | 指纹补 6 个配置键；无空白短文本缓存键去 `entry_id`；warning 不缓存；缓存命中质检复用 issues；matched_terms 口径统一；200 条/30s 线程安全落盘 |
+| X-01 | 布局快照（sha256/声明/BOM/EOL/末尾换行/编码）；无修改保存**不重写文件**（字节天然一致），有修改手工拼 BOM+原声明+正文+原 EOL；实测 318B 文件无修改保存逐字节一致 |
+| X-05..X-11 | CDATA 文本语义 + 警告；新建 Dest 按兄弟缩进、空译文不建；删 `forbid_dtd` 死分支；预检状态机分块扫到文件尾、先跳过 PI/注释/CDATA；失败原因回调 + `last_load_error`；旧树节点抛 `StaleNodeError` |
+| M-06/07/09/10 | MCM 逐行 EOL 保持；行首缩进保存；`set_dest(overwrite=True)`；`file_formats` 内容识别（大小写不敏感、`.txt` 需 MCM 形状）并接入 GUI |
+| F-08..F-15 | 词表搜索 150ms 去抖 + 小写缓存（100k 每键 0.002ms）；导入预览后台线程并复用解析结果；新增术语后台 embedding；RAG 可视化线程化；主题切换批量重绘（10k 行 1.98s→122ms）；日志目录缓存/单换行/跨线程 signal（1.4µs/条，8 线程 1200 行零丢失） |
+| F-18 | `openai` 惰性导入：`import src.gui_main` 442→**134ms**，`sys.modules` 无 openai |
+| F-13 | RAG 延迟初始化：窗口先出（构造 70ms），show 后后台建索引（30k 术语 129ms） |
+| C-13 | 中英各 333 键、集合一致；src 内 i18n 字面量全覆盖 |
+| T-02 | 新增 `.github/workflows/tests.yml`：push/PR 触发，Windows + Python 3.11/3.13，compileall + locale 键校验 + pytest |
+
+### 9.2 实测对比
+
+| 指标 | 修复前 | 修复后 |
+|---|---|---|
+| `import src.gui_main` | 442ms | **134ms** |
+| 10k 行主题切换 | 1.98s | **122ms** |
+| 词表搜索 100k 每键 | 21.4ms | **0.002ms**（150ms 去抖） |
+| 正则 `%`+20k `0` | 7.76s | **1ms** |
+| 8000 个未闭合注释 | 8.4s | **39ms** |
+| `"[a"*20000` / `"<"*20000` | 236 / 118ms | **47 / 44ms** |
+| 166KB 重复 JSON | 27.99s | **≤8ms** |
+| 5124 字保护壳 / 质检 | 19.5 / 40.6ms | **1.2 / 5.7ms** |
+| CJK 3.7k 字分块 | 句中硬切 | **15/15 句末** |
+| XML 无修改保存 | 全量重写 | **字节完全一致** |
+| RAG 批量打分 20k×5 | 1.2ms | **0.6ms**（误差 <2e-7） |
+| 确定性扫描 40k 词表 | — | 重建 **82ms**、1.4KB 扫描 **8ms** |
+
+### 9.3 设计决定与已知边界
+
+- **确定性命中顺序**：`search()` 返回顺序为"逐字命中（源码序）+ 其余（融合分降序）"。逐字命中是最高置信类别，放在最前是有意为之，融合/配额层本身仍是严格降序。
+- **归一化退化保护**：语义候选 min-max 仅在 `band≥3 且 spread≥0.05 且 raw_max≥threshold` 时启用，否则用原始 cosine；单条弱候选不会被抬过阈。
+- **X-01 仍不保真**：`<Dest></Dest>`→`<Dest/>`、`&#160;`/`&quot;` 实体写法、属性引号统一、顶层 PI 间空白、XML 内部混合换行归并、未知编码回退 UTF-8（有 warning）。未修改保存时这些均不受影响。
+- **R-23** 未做真正 append-only 分片文件，采用预分配 + 自适应间隔（写量从 O(n²/1000) 降到约 O(n log n)）。
+- **Q-02** 边界：各子块都成功但合并后 QC 仍失败时记录 failed，不重发原请求。
+- **R-40** 只捕获 `extract_keywords` 显式异常/超时（keyword_extractor 内部会把 LLM 错误降级为正则，不冒泡）。
+- **EmbeddingCache** 无 atexit 强制 flush：<200 条且 <30s 退出时该段缓存不落盘。
+- **未做**：`QAbstractTableModel` 迁移（批量刷新已把 10k 行主题切换降到 122ms）、Q-40/Q-41（按块 RAG 术语与失败块缓存）、R-30 的 `domain` 过滤（variants/forbidden/priority 已接入）、G-04 单行表头 legacy 兼容、X-12 可配置大小上限。
+
+### 9.4 验证
+
+- `python -m pytest tests -q` → **660 passed, 118 subtests passed**（第二轮 451/86，审查前 254）。
+- `python -m compileall -q src main.py` 通过；`git diff --check` 通过。
+- `python audit/bench_round3.py` 复现 §9.2 全部数字。
+- 无头 GUI：`MainWindow` 构造 → RAG 未就绪/就绪两态、10k 行主题切换 <0.5s、100k 词表每键 <3ms、跨线程日志、`previous_source` 注入均通过。
+- 手工探针：XML 无修改保存字节一致；MCM 编码失败目标不变；CSV/向量/embedding 行为与第二轮一致。
+
+### 9.5 仍未做（建议下一轮）
+
+1. `QAbstractTableModel` 迁移（一次性解决填充/状态/主题/内存，当前靠批量刷新达标）。
+2. Q-40/Q-41：长文按块做 RAG（关键词取前 8k 或逐块合并）、失败块部分缓存。
+3. R-30 `domain` 过滤与 `examples` 注入；多译法在 UI 中的选择。
+4. R-23 真正 append-only 分片索引；R-27 全量范数校验（当前抽样 64 行）。
+5. X-01 剩余字节形态（空元素/实体/属性引号）与混合换行。
+6. X-12 可配置 50MB 上限；MCM 大文件流式解析。
+7. 真实网络下的端到端回归（LLM/embedding 429/超时/断网），以及 CI 在 GitHub 上的首次运行。
+8. R-38 关键词请求的 JSON mode/temperature 参数（client 已支持 `response_format`，`extract` 尚未启用）；R-33 sidecar 内容未纳入词表指纹。
+9. 单实例、打包路径、异步日志队列。
+
