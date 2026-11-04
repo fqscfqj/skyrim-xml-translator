@@ -181,7 +181,10 @@ class TranslatorRuntimeTagTests(unittest.TestCase):
         source = ("This is a sentence that should be translated naturally. " * 90).strip()
         self.assertGreater(len(source), 4000)
         self.assertLess(len(source), 8000)
-        llm = _SequenceLLMClient(['{"translation":"译文"}'])
+        # Per-chunk coverage/quality gating requires a translation proportional
+        # to the chunk; keep the fixture long enough for both chunks.
+        long_translation = "译文" * 750
+        llm = _SequenceLLMClient(['{"translation":"%s"}' % long_translation])
         translator = _make_translator(llm, _DummyRAGEngine(_DummyConfig({
             ("general", "long_text_chunking_enabled"): True,
             ("general", "long_text_chunk_threshold_chars"): 4000,
@@ -191,7 +194,7 @@ class TranslatorRuntimeTagTests(unittest.TestCase):
         result = translator.translate_text(source, use_rag=False, max_retries=0)
 
         self.assertGreater(llm.calls, 1)
-        self.assertEqual("译文" * llm.calls, result)
+        self.assertEqual(long_translation * llm.calls, result)
         second_user_prompt = llm.messages_seen[1][1]["content"]
         self.assertIn("前文候选译文", second_user_prompt)
         self.assertLess(

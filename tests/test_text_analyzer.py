@@ -151,7 +151,9 @@ class TextAnalyzerPercentProtectionTests(unittest.TestCase):
 
         self.assertEqual(["%s", " ", "%d"], list(shell.tokens))
 
-    def test_relaxed_spaces_policy_still_freezes_newlines(self):
+    def test_pure_newline_is_not_frozen_but_structural_whitespace_is(self):
+        # Q-36: pure line breaks are content, not sentinels, so paragraph
+        # breaks can be translated/restored instead of silently dropped.
         source = "Line one\nLine two"
 
         shell = self.analyzer.build_protected_format_shell(
@@ -159,7 +161,13 @@ class TextAnalyzerPercentProtectionTests(unittest.TestCase):
             whitespace_policy=TextAnalyzer.WHITESPACE_POLICY_RELAXED_SPACES,
         )
 
-        self.assertEqual(["\n"], list(shell.tokens))
+        self.assertEqual([], list(shell.tokens))
+
+        structural = self.analyzer.build_protected_format_shell(
+            "Line one \nLine two",
+            whitespace_policy=TextAnalyzer.WHITESPACE_POLICY_RELAXED_SPACES,
+        )
+        self.assertEqual([" \n"], list(structural.tokens))
 
     def test_cjk_runtime_tag_normalizer_does_not_touch_xml_tags(self):
         text = "前言 <p align=\"left\"> 世界 </p>"
@@ -273,19 +281,36 @@ class PromptBuilderGlossaryContextTests(unittest.TestCase):
 
         self.assertIn("Follower -> <Alias=NPC> 追随者", context)
 
-    def test_build_adds_dialogue_whitespace_rule_for_relaxed_spaces(self):
+    def test_build_adds_dialogue_whitespace_rule_for_dialogue_text(self):
+        # Q-47: relaxed spacing alone is not enough; dialogue rules require
+        # dialogue context (text_kind / record type / quoted dialogue).
         builder = PromptBuilder(_DummyPromptManager(), _DummyConfig())
 
         _system_prompt, user_prompt = builder.build(
             " A  little more seriousness, please.",
             {},
             context_hint={
+                "text_kind": "dialogue",
                 "whitespace_policy": TextAnalyzer.WHITESPACE_POLICY_RELAXED_SPACES,
             },
         )
 
         self.assertIn("普通对话空白上下文", user_prompt)
         self.assertIn("受保护标记保持结构关系", user_prompt)
+
+    def test_build_does_not_add_dialogue_whitespace_rule_for_non_dialogue(self):
+        builder = PromptBuilder(_DummyPromptManager(), _DummyConfig())
+
+        _system_prompt, user_prompt = builder.build(
+            "Warning: this setting changes the game.",
+            {},
+            context_hint={
+                "text_kind": "document",
+                "whitespace_policy": TextAnalyzer.WHITESPACE_POLICY_RELAXED_SPACES,
+            },
+        )
+
+        self.assertNotIn("普通对话空白上下文", user_prompt)
 
     def test_mcm_prompt_uses_control_function_instead_of_fixed_word_pairs(self):
         builder = PromptBuilder(_DummyPromptManager(), _DummyConfig())

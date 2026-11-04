@@ -16,13 +16,28 @@ class QualityIssueType(Enum):
     PLACEHOLDER_MISMATCH = "placeholder"
 
 
-_MODEL_REFUSAL_PATTERNS = (
+# Chinese refusals are only high-confidence when the response also carries
+# task/meta context.  A faithful game line such as "我无法处理这个请求。" must
+# not be mistaken for a model refusal (Q-34).
+_CJK_MODEL_REFUSAL_PATTERNS = (
     re.compile(
         r"(?:抱歉|对不起)?[^。！？\n]{0,30}"
         r"(?:无法|不能|不便)(?:协助|帮助)?(?:翻译|处理|提供|满足)"
         r"[^。！？\n]{0,40}(?:内容|文本|请求|要求|任务)",
         re.IGNORECASE,
     ),
+    re.compile(
+        r"(?:该|此|这个)(?:请求|内容|任务)[^。！？\n]{0,20}"
+        r"(?:超出|超过)[^。！？\n]{0,20}(?:能力|处理范围)",
+        re.IGNORECASE,
+    ),
+)
+_MODEL_REFUSAL_CONTEXT_RE = re.compile(
+    r"翻译|译文|译成|译为|翻译任务|语言模型|模型|作为\s*AI|人工智能|提示词|系统提示|原文|抱歉|对不起",
+    re.IGNORECASE,
+)
+
+_MODEL_REFUSAL_PATTERNS = (
     re.compile(
         r"(?:as an ai|i(?:'m| am) sorry|i apologize)[^.!?\n]{0,80}"
         r"(?:cannot|can't|unable to|not able to)[^.!?\n]{0,40}"
@@ -40,11 +55,6 @@ _MODEL_REFUSAL_PATTERNS = (
         r"(?:outside|beyond)[^.!?\n]{0,30}(?:my\s+)?(?:capabilities|ability|scope)",
         re.IGNORECASE,
     ),
-    re.compile(
-        r"(?:该|此|这个)(?:请求|内容|任务)[^。！？\n]{0,20}"
-        r"(?:超出|超过)[^。！？\n]{0,20}(?:能力|处理范围)",
-        re.IGNORECASE,
-    ),
 )
 
 
@@ -54,7 +64,10 @@ def is_model_refusal(text: str, original_text: str = "") -> bool:
     original = str(original_text or "").strip()
     if not candidate or (original and candidate.casefold() == original.casefold()):
         return False
-    for pattern in _MODEL_REFUSAL_PATTERNS:
+    patterns = list(_MODEL_REFUSAL_PATTERNS)
+    if _MODEL_REFUSAL_CONTEXT_RE.search(candidate):
+        patterns.extend(_CJK_MODEL_REFUSAL_PATTERNS)
+    for pattern in patterns:
         match = pattern.search(candidate)
         if match is None:
             continue
@@ -89,6 +102,20 @@ class QualityChecker:
     )
     _WHITESPACE_RE = re.compile(r"\s+")
     _ALLOW_CONNECTORS = {"of", "the", "and", "de", "la", "du", "da"}
+    _ANY_CJK_RE = re.compile(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]")
+    _PARAGRAPH_BREAK_RE = re.compile(r"(?:\r\n|\n|\r)[ \t]*(?:\r\n|\n|\r)")
+    _VERSION_TOKEN_RE = re.compile(r"^[vV]?\d+(?:\.\d+)+[A-Za-z0-9]*$")
+    _CAMEL_IDENTIFIER_TOKEN_RE = re.compile(r"^[A-Z][a-z]+(?:[A-Z][a-z0-9]*)+$")
+    _ALL_CAPS_LABEL_RE = re.compile(r"^[A-Z0-9][A-Z0-9 .\-_/&'+:]*$")
+    # Known abbreviations / product tokens that legitimately stay unchanged
+    # (Q-30).  Common UI words (Health/Armor/...) are deliberately NOT here:
+    # they are translation targets, not proper nouns.
+    _ACCEPTABLE_UNCHANGED_TOKENS = {
+        "ai", "bsa", "bodyslide", "dds", "esp", "esl", "esm", "fnis", "fps",
+        "hp", "id", "ini", "json", "mcm", "nemesis", "nif", "npc", "ok",
+        "papyrus", "pex", "racemenu", "skse", "skse64", "skyui", "sseedit",
+        "ui", "url", "vk", "xedit", "xp",
+    }
     _OUTER_WRAPPER_GROUPS = (
         ("paren", (("(", ")"), ("（", "）"))),
         ("square", (("[", "]"), ("【", "】"))),
@@ -130,7 +157,7 @@ class QualityChecker:
                 issue_type=QualityIssueType.UNTRANSLATED,
                 severity="error",
                 details="Translation is empty",
-                rule_id="empty",
+                rule_id="empty_visible",
             ))
             issues.extend(self._check_format_preservation(
                 source_text,
@@ -154,6 +181,7 @@ class QualityChecker:
             translation_text,
             reference_id=reference_id,
             target_lang=target_lang,
+            matched_terms=matched_terms,
         )
         if issue:
             issues.append(issue)
@@ -210,7 +238,8 @@ class QualityChecker:
 
     def _check_untranslated(self, source: str, translation: str,
                             reference_id: Optional[str] = None,
-                            target_lang: str = "zh") -> Optional[QualityIssue]:
+                            target_lang: str = "zh",
+                            matched_terms: Optional[dict] = None) -> Optional[QualityIssue]:
         source_visible = self._visible_text(source)
         translation_visible = self._visible_text(translation)
         source_clean = source_visible.lower()
@@ -219,51 +248,101 @@ class QualityChecker:
         if source_clean == translation_clean:
             if self._text_analyzer.should_preserve_identity_translation(
                     source, translation, reference_id=reference_id):
-                return QualityIssue(
-                    issue_type=QualityIssueType.UNTRANSLATED,
-                    severity="warning",
-                    details="Identifier-like text preserved as-is",
-                    rule_id="identity_identifier",
-                )
+                return self._make_issue(
+                    "warning", "Identifier-like text preserved as-is",
+                    "identity_identifier")
+
+            if self._is_cjk_passthrough_source(source_visible, target_lang):
+                return self._make_issue(
+                    "warning", "CJK source preserved as-is (passthrough)",
+                    "identity_cjk_passthrough")
 
             if self._looks_like_proper_noun_label(source):
-                return QualityIssue(
-                    issue_type=QualityIssueType.UNTRANSLATED,
-                    severity="warning",
-                    details="Proper-noun-like label preserved as-is",
-                    rule_id="identity_proper_noun",
-                )
+                return self._make_issue(
+                    "warning", "Proper-noun-like label preserved as-is",
+                    "identity_proper_noun")
 
-            return QualityIssue(
-                issue_type=QualityIssueType.UNTRANSLATED,
-                severity="error",
-                details="Translation is identical to source text",
-                rule_id="identity",
+            if self._is_acceptable_unchanged_label(source_visible):
+                return self._make_issue(
+                    "warning", "Known acronym/UI token preserved as-is",
+                    "identity_acronym")
+
+            return self._make_issue(
+                "error", "Translation is identical to source text", "identity",
+                fragments=self._latin_fragments(translation_visible))
+
+        # Q-04: markup-only or punctuation-only output is never a translation.
+        if source_visible and not self._has_visible_letter_content(translation_visible):
+            return self._make_issue(
+                "error",
+                "Translation visible content is empty or only punctuation/symbols",
+                "empty_visible",
             )
 
+        containment_issue = None
         if len(source_clean) > 10 and len(translation_clean) > 10:
             if source_clean in translation_clean or translation_clean in source_clean:
-                # Downgrade to warning when translation mixes CJK + Latin
-                # (e.g. "Screenshot 截图" is a valid mixed-lang result)
-                has_cjk = bool(self._CJK_CHAR_RE.search(translation_visible))
-                has_alpha = bool(self._ALPHA_RE.search(translation_visible))
-                if has_cjk and has_alpha:
-                    return QualityIssue(
-                        issue_type=QualityIssueType.UNTRANSLATED,
-                        severity="warning",
-                        details="Translation contains source text but also has CJK+Latin mix (possibly intentional)",
-                        rule_id="containment",
-                    )
-                return QualityIssue(
-                    issue_type=QualityIssueType.UNTRANSLATED,
-                    severity="error",
-                    details="Translation contains/is contained by source text",
-                    rule_id="containment",
+                severity, reason = self._containment_severity(
+                    source_visible, translation_visible)
+                containment_issue = self._make_issue(
+                    severity,
+                    f"Translation contains/is contained by source text ({reason})",
+                    "containment",
+                    fragments=self._latin_fragments(translation_visible),
                 )
 
-        # Check if translation is mostly English when it shouldn't be
-        if not self._should_check_latin_ratio(target_lang):
-            return None
+        # Q-01: a long source translated into a tiny fragment is truncated.
+        coverage_issue = None
+        if len(source_visible) >= 200:
+            ratio = len(translation_visible) / max(1, len(source_visible))
+            if ratio < 0.25:
+                coverage_issue = self._make_issue(
+                    "error",
+                    f"coverage {ratio:.2f} < 0.25 "
+                    f"(src={len(source_visible)}, tgt={len(translation_visible)})",
+                    "coverage",
+                )
+
+        zero_cjk_issue = self._check_zero_cjk_translation(
+            source_visible,
+            translation_visible,
+            target_lang=target_lang,
+            matched_terms=matched_terms,
+        )
+
+        latin_issue = None
+        if self._should_check_latin_ratio(target_lang):
+            latin_issue = self._check_latin_ratio(source_visible, translation_visible)
+
+        # Never let containment short-circuit the latin-ratio check (Q-03).
+        for issue in (coverage_issue, zero_cjk_issue, containment_issue, latin_issue):
+            if issue is not None and issue.severity == "error":
+                return issue
+        return coverage_issue or zero_cjk_issue or containment_issue or latin_issue
+
+    @staticmethod
+    def _make_issue(severity: str, details: str, rule_id: str,
+                    fragments: Optional[list[str]] = None) -> QualityIssue:
+        return QualityIssue(
+            issue_type=QualityIssueType.UNTRANSLATED,
+            severity=severity,
+            details=details,
+            rule_id=rule_id,
+            fragments=list(fragments or []),
+        )
+
+    def _check_latin_ratio(self, source_visible: str,
+                           translation_visible: str) -> Optional[QualityIssue]:
+        # Q-31: a capitalized common UI/stat word left inside otherwise
+        # translated text is a missed translation, not a proper noun.
+        residual_ui = self._residual_ui_tokens(source_visible, translation_visible)
+        if residual_ui:
+            return self._make_issue(
+                "error",
+                f"Common UI/stat tokens left untranslated: {residual_ui}",
+                "latin_ratio",
+                fragments=residual_ui,
+            )
 
         text_only = self._strip_safe_latin_spans(
             source_visible,
@@ -279,14 +358,174 @@ class QualityChecker:
                 if alpha_chars > chinese_chars * self._latin_ratio_threshold or (
                     chinese_chars == 0 and alpha_chars > 5
                 ):
-                    return QualityIssue(
-                        issue_type=QualityIssueType.UNTRANSLATED,
-                        severity="error",
-                        details=f"Translation appears mostly untranslated (alpha={alpha_chars}, cjk={chinese_chars}, cjk_ratio={cjk_ratio:.2f}<{required:.2f})",
-                        rule_id="latin_ratio",
+                    return self._make_issue(
+                        "error",
+                        f"Translation appears mostly untranslated (alpha={alpha_chars}, "
+                        f"cjk={chinese_chars}, cjk_ratio={cjk_ratio:.2f}<{required:.2f})",
+                        "latin_ratio",
+                        fragments=self._latin_fragments(translation_visible),
                     )
-
         return None
+
+    def _residual_ui_tokens(self, source_visible: str,
+                            translation_visible: str) -> list[str]:
+        if not self._CJK_CHAR_RE.search(translation_visible):
+            return []
+        source_lower = str(source_visible or "").lower()
+        fragments: list[str] = []
+        for match in re.finditer(r"[A-Za-z][A-Za-z'\-]+", translation_visible):
+            token = match.group(0)
+            if len(token) < 3 or token.upper() == token:
+                continue
+            if token.lower() not in self._text_analyzer._COMMON_UI_TOKENS:
+                continue
+            if token.lower() not in source_lower:
+                continue
+            if self._is_inside_quotes(translation_visible, match.start()):
+                continue
+            if token not in fragments:
+                fragments.append(token)
+        return fragments
+
+    def _check_zero_cjk_translation(
+            self,
+            source_visible: str,
+            translation_visible: str,
+            target_lang: str = "zh",
+            matched_terms: Optional[dict] = None) -> Optional[QualityIssue]:
+        """zh/ja/ko targets must not return pure Latin for a Latin source."""
+        if not self._should_check_latin_ratio(target_lang):
+            return None
+        if not self._ALPHA_RE.search(source_visible):
+            return None
+        if self._ANY_CJK_RE.search(translation_visible):
+            return None
+        if self._is_latin_only_allowlisted(
+                translation_visible, matched_terms=matched_terms):
+            return None
+        return self._make_issue(
+            "error",
+            "Target-language translation contains no CJK characters",
+            "latin_ratio",
+            fragments=self._latin_fragments(translation_visible),
+        )
+
+    def _is_latin_only_allowlisted(
+            self,
+            translation_visible: str,
+            matched_terms: Optional[dict] = None) -> bool:
+        cleaned = str(translation_visible or "").strip()
+        if not cleaned:
+            return False
+
+        keep_original: set[str] = set()
+        if isinstance(matched_terms, dict):
+            for term, value in matched_terms.items():
+                if not isinstance(term, str) or not term.strip() or value is None:
+                    continue
+                if str(value).strip().casefold() == term.strip().casefold():
+                    keep_original.add(term.strip().casefold())
+        if cleaned.casefold() in keep_original:
+            return True
+
+        for token in cleaned.split():
+            stripped = token.strip("()[]{}<>\"'“”‘’「」『』.,!?;:。，、！？；：")
+            if not stripped or not self._ALPHA_RE.search(stripped):
+                continue
+            if stripped.casefold() in keep_original:
+                continue
+            if len(stripped) >= 2 and stripped.upper() == stripped:
+                continue
+            if self._VERSION_TOKEN_RE.fullmatch(stripped):
+                continue
+            if self._is_path_like_token(stripped):
+                continue
+            if self._text_analyzer.looks_like_internal_identifier(stripped):
+                continue
+            if self._CAMEL_IDENTIFIER_TOKEN_RE.fullmatch(stripped):
+                continue
+            return False
+        return True
+
+    @staticmethod
+    def _is_path_like_token(token: str) -> bool:
+        if not token:
+            return False
+        if "\\" in token or "://" in token:
+            return True
+        if ":" in token and "/" not in token:
+            return True
+        return "/" in token and " " not in token and not token.startswith("/")
+
+    def _containment_severity(self, source_visible: str,
+                              translation_visible: str) -> tuple[str, str]:
+        cjk_chars = len(self._CJK_CHAR_RE.findall(translation_visible))
+        alpha_chars = len(self._ALPHA_RE.findall(translation_visible))
+        total = cjk_chars + alpha_chars
+        if total and cjk_chars / total >= 0.5:
+            return "warning", "substantial CJK content"
+
+        source_clean = source_visible.lower()
+        translation_clean = translation_visible.lower()
+        if source_clean and source_clean in translation_clean:
+            pos = translation_clean.find(source_clean)
+            leftover = (
+                translation_visible[:pos]
+                + translation_visible[pos + len(source_clean):]
+            )
+            leftover_cjk = len(self._CJK_CHAR_RE.findall(leftover))
+            if leftover_cjk >= 4 and leftover_cjk * 2 >= cjk_chars:
+                return "warning", "non-contained content translated"
+        return "error", "source-language content preserved"
+
+    def _has_visible_letter_content(self, text: str) -> bool:
+        return any(ch.isalpha() for ch in str(text or ""))
+
+    def _is_cjk_passthrough_source(self, source_visible: str,
+                                   target_lang: str) -> bool:
+        if not (target_lang or "").strip().lower().startswith("zh"):
+            return False
+        cjk_chars = len(self._CJK_CHAR_RE.findall(source_visible))
+        alpha_chars = len(self._ALPHA_RE.findall(source_visible))
+        total = cjk_chars + alpha_chars
+        return total > 0 and cjk_chars / total >= 0.8
+
+    def _is_acceptable_unchanged_label(self, text: str) -> bool:
+        cleaned = self._visible_text(text)
+        if not cleaned:
+            return False
+        if cleaned.casefold() in self._ACCEPTABLE_UNCHANGED_TOKENS:
+            return True
+        return bool(
+            len(cleaned) <= 24
+            and self._ALL_CAPS_LABEL_RE.fullmatch(cleaned)
+        )
+
+    def _latin_fragments(self, text: str, limit: int = 8) -> list[str]:
+        fragments: list[str] = []
+        for match in self._LATIN_SPAN_RE.finditer(str(text or "")):
+            span = self._WHITESPACE_RE.sub(" ", match.group(0)).strip()
+            if span and span not in fragments:
+                fragments.append(span)
+            if len(fragments) >= limit:
+                break
+        return fragments
+
+    def check_paragraph_preservation(
+            self, source: str, translation: str) -> Optional[QualityIssue]:
+        """Q-36: long text must not lose blank-line paragraph breaks."""
+        source_breaks = len(self._PARAGRAPH_BREAK_RE.findall(str(source or "")))
+        if source_breaks <= 0:
+            return None
+        translation_breaks = len(
+            self._PARAGRAPH_BREAK_RE.findall(str(translation or "")))
+        if translation_breaks >= source_breaks:
+            return None
+        return self._make_issue(
+            "error",
+            f"Paragraph breaks lost: src={source_breaks}, tgt={translation_breaks}",
+            "paragraph_loss",
+        )
 
     def _visible_text(self, text: str) -> str:
         visible = self._text_analyzer.normalize_text(text)
@@ -323,7 +562,9 @@ class QualityChecker:
                 continue
             if (
                     self._looks_like_proper_noun_label(span)
-                    or self._text_analyzer.looks_like_internal_identifier(span)):
+                    or self._text_analyzer.looks_like_internal_identifier(span)
+                    or self._is_acceptable_unchanged_label(span)
+                    or self._looks_brand_like_source_token(span)):
                 spans_to_strip.add(span)
 
         for span in sorted(spans_to_strip, key=len, reverse=True):
@@ -334,6 +575,19 @@ class QualityChecker:
             text = pattern.sub("", text)
 
         return self._WHITESPACE_RE.sub(" ", text).strip()
+
+    @staticmethod
+    def _looks_brand_like_source_token(span: str) -> bool:
+        """True for mixed-case/numbered tokens that are kept unchanged by design.
+
+        ``SkyUI``/``BodySlide``/``SKSE64`` are product names, not untranslated
+        prose; they may legitimately sit inside an otherwise Chinese label
+        (e.g. ``SkyUI 界面``) and must not inflate the latin-ratio count.
+        """
+        text = str(span or "").strip()
+        if len(text) < 3 or not text.isascii():
+            return False
+        return any(ch.isupper() for ch in text[1:]) or any(ch.isdigit() for ch in text)
 
     def _looks_like_proper_noun_label(self, text: str) -> bool:
         """Heuristic for labels like location/NPC names that may legitimately stay romanized."""
@@ -410,34 +664,81 @@ class QualityChecker:
 
     def _check_untranslated_fragments(self, source: str, translation: str,
                                        matched_terms: Optional[dict] = None) -> Optional[QualityIssue]:
-        """Flag possible untranslated glossary fragments (advisory only)."""
+        """Flag glossary terms that should have been translated but survived (Q-06)."""
         if not matched_terms:
             return None
 
-        untranslated = []
+        untranslated: list[str] = []
         for term, expected_tl in matched_terms.items():
             if not term or not expected_tl:
                 continue
-            # Only check English terms (2+ alpha chars)
-            if not self._ALPHA_RE.search(term) or len(term.strip()) < 2:
+            term_text = str(term).strip()
+            expected_text = str(expected_tl).strip()
+            # Only check terms that actually occur in the source and contain
+            # alphabetic content (2+ alpha chars).
+            if not self._ALPHA_RE.search(term_text) or len(term_text) < 2:
                 continue
-            # Skip if the expected translation itself contains the English term
-            if term.lower() in (expected_tl or "").lower():
+            if not self._term_present_in_source(term_text, source):
                 continue
-            # Check if the English term still appears verbatim in translation
-            pattern = re.compile(r"(?<![a-zA-Z])" + re.escape(term) + r"(?![a-zA-Z])", re.IGNORECASE)
-            if pattern.search(translation):
-                untranslated.append(term)
+            # Keep-original glossary entries are intentional.
+            if expected_text.casefold() == term_text.casefold():
+                continue
+            if term_text.casefold() in expected_text.casefold():
+                continue
+            if self._text_analyzer.is_common_ui_token(term_text):
+                continue
+            # All-caps abbreviations are acceptable source-language tokens.
+            if len(term_text) >= 2 and term_text.upper() == term_text:
+                continue
+
+            pattern = re.compile(
+                r"(?<![a-zA-Z])" + re.escape(term_text) + r"(?![a-zA-Z])",
+                re.IGNORECASE,
+            )
+            if any(
+                not self._is_inside_quotes(translation, match.start())
+                for match in pattern.finditer(translation)
+            ):
+                untranslated.append(term_text)
 
         if untranslated:
             return QualityIssue(
                 issue_type=QualityIssueType.UNTRANSLATED,
-                severity="warning",
-                details=f"Possible untranslated glossary fragments: {untranslated}",
+                severity="error",
+                details=f"Untranslated glossary fragments: {untranslated}",
                 rule_id="glossary_fragment",
                 fragments=untranslated,
             )
         return None
+
+    _QUOTE_PAIRS = (('"', '"'), ("“", "”"), ("「", "」"), ("『", "』"), ("‘", "’"))
+
+    @classmethod
+    def _is_inside_quotes(cls, text: str, index: int) -> bool:
+        source = str(text or "")
+        if index <= 0 or index > len(source):
+            return False
+        prefix = source[:index]
+        for open_ch, close_ch in cls._QUOTE_PAIRS:
+            if open_ch == close_ch:
+                if prefix.count(open_ch) % 2 == 1:
+                    return True
+            elif prefix.count(open_ch) > prefix.count(close_ch):
+                return True
+        return False
+
+    @staticmethod
+    def _term_present_in_source(term: str, source: str) -> bool:
+        if not term or not source:
+            return False
+        try:
+            pattern = re.compile(
+                r"(?<![A-Za-z0-9_])" + re.escape(term) + r"(?![A-Za-z0-9_])",
+                re.IGNORECASE,
+            )
+        except re.error:
+            return term.casefold() in str(source).casefold()
+        return bool(pattern.search(str(source)))
 
     # --- Layer 3: Format preservation ---
 

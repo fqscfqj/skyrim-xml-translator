@@ -117,23 +117,25 @@ class ResponseParserTests(unittest.TestCase):
         self.assertEqual(result, "Hi")
         self.assertTrue(any("Rejected unsafe plain-text" in message for message in logs), logs)
 
-    def test_plain_text_fallback_rejects_english_translation_preamble(self):
+    def test_plain_text_fallback_extracts_english_translation_preamble(self):
+        # Q-21: a meta marker is no longer a reason to discard the payload;
+        # the text after the marker is the translation.
         result, logs = self._parse_with_logs(
             "Here is the translation: 你好",
             original_text="Hello",
         )
 
-        self.assertEqual(result, "Hello")
-        self.assertTrue(any("Rejected unsafe plain-text" in message for message in logs), logs)
+        self.assertEqual(result, "你好")
+        self.assertFalse(any("Rejected unsafe plain-text" in message for message in logs), logs)
 
-    def test_plain_text_fallback_rejects_chinese_translation_preamble(self):
+    def test_plain_text_fallback_extracts_chinese_translation_preamble(self):
         result, logs = self._parse_with_logs(
             "以下是翻译：你好",
             original_text="Hello",
         )
 
-        self.assertEqual(result, "Hello")
-        self.assertTrue(any("Rejected unsafe plain-text" in message for message in logs), logs)
+        self.assertEqual(result, "你好")
+        self.assertFalse(any("Rejected unsafe plain-text" in message for message in logs), logs)
 
     def test_non_string_json_translation_is_not_stringified(self):
         for value in (None, True, 42, {"text": "你好"}, ["你好"]):

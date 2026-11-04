@@ -34,6 +34,27 @@ class ResponseParser:
         r")\s*[:：\-—]?\s*",
         flags=re.IGNORECASE,
     )
+    # Q-21: meta commentary may appear ANYWHERE, not only as a prefix.
+    _META_TRANSLATION_MARKER_RE = re.compile(
+        r"(?:"
+        r"here(?:'s|\s+is)\s+(?:the\s+)?(?:translation|translated\s+text|result)|"
+        r"the\s+translation\s+is|"
+        r"i\s+translated\s+(?:it|this)\s+as|"
+        r"以下(?:是|为)(?:最终)?(?:翻译|译文)|"
+        r"(?:最终)?(?:中文)?(?:译文|翻译)|"
+        r"translated\s+text|translation"
+        r")\s*[:：\-—]\s*",
+        flags=re.IGNORECASE,
+    )
+    _TEMPLATE_PLACEHOLDER_VALUES = frozenset({
+        "", "这里填写译文", "填写译文", "...", "…", "……",
+    })
+    _PROMPT_LEAK_MARKERS = (
+        "这里填写译文", "只输出合法 json", "仅输出 json", "输出锚点", "任务锚点",
+        "待译原文", "<<<source_text>>>", "<<<end_source_text>>>",
+        "json：{\"translation\"", "json:{\"translation\"",
+        "respond only", "output only", "extract the",
+    )
 
     def __init__(self, config_manager=None):
         self.config = config_manager
@@ -50,6 +71,10 @@ class ResponseParser:
                      module="response_parser", func="parse")
             return ""
 
+        # Q-24: a JSON-shaped source echoed unchanged is the translation.
+        if self._is_json_shaped_source_echo(clean_response, original_text):
+            return clean_response
+
         if is_model_refusal(clean_response, original_text):
             raise ModelRefusalError("Model returned a task-level refusal")
 
@@ -59,30 +84,38 @@ class ResponseParser:
                      module="response_parser", func="parse")
             raise ValueError(f"Broken JSON fragment response: {clean_response[:120]}")
 
-        # raw_decode first for leading JSON plus trailing chatter.
-        data = self._try_parse_first_json_object(clean_response, required_keys=("translation",))
-        found, translation = self._extract_translation_value(data)
+        # raw_decode first for leading JSON plus trailing chatter.  Candidate
+        # selection skips template placeholders/prompt leakage and prefers the
+        # LAST valid translation object (Q-18/Q-19).
+        data = self._try_parse_first_json_object(
+            clean_response, required_keys=("translation",))
+        found, translation = self._extract_usable_translation(data)
         if found:
             return self._ensure_not_refusal(translation, original_text)
 
-        # Direct JSON fallback.
+        # Direct JSON fallback.  Scalars / empty containers are not
+        # translations (Q-20).
         try:
-            data = json.loads(clean_response)
-            found, translation = self._extract_translation_value(data)
-            if found:
-                return self._ensure_not_refusal(translation, original_text)
+            parsed_json = json.loads(clean_response)
+            json_ok = True
         except json.JSONDecodeError:
-            pass
+            json_ok = False
+        if json_ok:
+            if isinstance(parsed_json, str):
+                if parsed_json.strip():
+                    return self._ensure_not_refusal(parsed_json, original_text)
+                return ""
+            if isinstance(parsed_json, dict):
+                found, translation = self._extract_usable_translation(parsed_json)
+                if found:
+                    return self._ensure_not_refusal(translation, original_text)
+            # null / true / false / numbers / arrays / empty objects
+            return ""
 
-        # Accept valid leading JSON even when extra explanatory text is appended.
-        data = self._try_parse_first_json_object(clean_response, required_keys=("translation",))
-        found, translation = self._extract_translation_value(data)
-        if found:
-            return self._ensure_not_refusal(translation, original_text)
-
-        # Try extracting JSON substring
-        data = self._try_parse_first_json_object(response_text, required_keys=("translation",))
-        found, translation = self._extract_translation_value(data)
+        # Try extracting JSON substring from the raw response.
+        data = self._try_parse_first_json_object(
+            response_text, required_keys=("translation",))
+        found, translation = self._extract_usable_translation(data)
         if found:
             return self._ensure_not_refusal(translation, original_text)
 
@@ -90,6 +123,12 @@ class ResponseParser:
         result = self._try_relaxed_json_extract(response_text, log_callback)
         if result is not None:
             return self._ensure_not_refusal(result, original_text)
+
+        # Q-21: meta commentary ("这句话是问候语。译文：你好") may appear at any
+        # position; extract the part after the marker or fail empty.
+        meta_result = self._try_meta_translation_extract(clean_response, log_callback)
+        if meta_result is not None:
+            return self._ensure_not_refusal(meta_result, original_text)
 
         # Try asking LLM to reformat as JSON
         if llm_client:
@@ -127,6 +166,132 @@ class ResponseParser:
             raise ModelRefusalError("Model returned a task-level refusal")
         return translation
 
+    @staticmethod
+    def _is_json_shaped_source_echo(response_text: str, original_text: str) -> bool:
+        original = str(original_text or "").strip()
+        if not original or response_text.strip() != original:
+            return False
+        if not original.startswith(("{", "[")):
+            return False
+        try:
+            json.loads(original)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return False
+        return True
+
+    def _try_meta_translation_extract(
+            self, text: str,
+            log_callback: Optional[Callable] = None) -> Optional[str]:
+        """Extract text after a meta marker anywhere in the response (Q-21).
+
+        Returns None when no marker exists, and "" when the marker is present
+        but carries no usable translation.
+        """
+        clean = str(text or "").strip()
+        if not clean:
+            return None
+        match = self._META_TRANSLATION_MARKER_RE.search(clean)
+        if match is None:
+            return None
+        tail = clean[match.end():].strip()
+        if tail.startswith("```"):
+            tail = self._strip_code_fences(tail)
+        tail = tail.strip()
+        if not tail or tail.startswith("{"):
+            log_emit(log_callback, self.config, "WARNING",
+                     "Meta translation marker without usable translation",
+                     module="response_parser", func="_try_meta_translation_extract")
+            return ""
+        log_emit(log_callback, self.config, "DEBUG",
+                 "Recovered translation after meta commentary marker",
+                 module="response_parser", func="_try_meta_translation_extract")
+        return tail
+
+    @classmethod
+    def _extract_usable_translation(cls, data: object) -> tuple[bool, str]:
+        found, value = cls._extract_translation_value(data)
+        if not found:
+            return False, ""
+        if not cls._is_usable_translation_value(value):
+            return False, ""
+        return True, value
+
+    @classmethod
+    def _is_usable_translation_value(cls, value: object) -> bool:
+        if not isinstance(value, str):
+            return False
+        text = value.strip()
+        if not text:
+            return False
+        if text.casefold() in cls._TEMPLATE_PLACEHOLDER_VALUES:
+            return False
+        if re.fullmatch(r"[.。…·\s]+", text):
+            return False
+        lowered = text.casefold()
+        if any(marker in lowered for marker in cls._PROMPT_LEAK_MARKERS):
+            return False
+        return True
+
+    @staticmethod
+    def _repair_trailing_commas(text: str) -> str:
+        """Remove trailing commas only in the JSON envelope (Q-22).
+
+        String contents are scanned and preserved verbatim; only structural
+        ``','`` immediately before ``}``/``]`` is dropped.
+        """
+        source = str(text or "")
+        out: list[str] = []
+        idx = 0
+        in_string = False
+        escaped = False
+        length = len(source)
+        while idx < length:
+            ch = source[idx]
+            if in_string:
+                out.append(ch)
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == '"':
+                    in_string = False
+                idx += 1
+                continue
+            if ch == '"':
+                in_string = True
+                out.append(ch)
+                idx += 1
+                continue
+            if ch == ",":
+                probe = idx + 1
+                while probe < length and source[probe] in " \t\r\n":
+                    probe += 1
+                if probe < length and source[probe] in "}]":
+                    idx += 1
+                    continue
+            out.append(ch)
+            idx += 1
+        return "".join(out)
+
+    @staticmethod
+    def _unquote_bare_value(raw: str) -> str:
+        value = str(raw or "").strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            if value[0] == '"':
+                try:
+                    return str(json.loads(value))
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    pass
+            else:
+                try:
+                    parsed = ast.literal_eval(value)
+                    if isinstance(parsed, str):
+                        return parsed
+                except (ValueError, SyntaxError):
+                    pass
+            value = value[1:-1]
+        return value.replace('\\"', '"').replace("\\'", "'").strip()
+
     def parse_batch(self, response: str,
                     log_callback: Optional[Callable] = None,
                     expected_ids: Optional[object] = None) -> Optional[dict[int, str]]:
@@ -160,12 +325,19 @@ class ResponseParser:
         raw_items = data if isinstance(data, list) else data.get("translations")
         parsed: dict[int, str] = {}
 
+        missing_id = False
         if isinstance(raw_items, list):
             for pos, item in enumerate(raw_items):
                 if isinstance(item, dict):
+                    if "id" not in item:
+                        missing_id = True
                     raw_id = item.get("id", pos)
                     value = item.get("translation", "")
                 else:
+                    # Positional mapping without an id is untrustworthy when
+                    # the caller knows the expected ids (Q-27).
+                    if expected_ids is not None:
+                        missing_id = True
                     raw_id = pos
                     value = item
                 try:
@@ -199,15 +371,32 @@ class ResponseParser:
                      module="response_parser", func="parse_batch")
             return None
         if expected_ids is not None:
+            expected: Optional[set[int]] = None
             try:
-                expected = set(range(expected_ids)) if isinstance(expected_ids, int) else {int(x) for x in expected_ids}
-                if set(parsed.keys()) != expected:
+                expected = (
+                    set(range(expected_ids))
+                    if isinstance(expected_ids, int)
+                    else {int(x) for x in expected_ids}
+                )
+            except Exception:
+                expected = None
+            if expected is not None:
+                if missing_id:
                     log_emit(log_callback, self.config, "WARNING",
-                             f"Batch ID set mismatch: got {sorted(parsed)} expected {sorted(expected)}",
+                             "Batch items are missing explicit ids; positional "
+                             "mapping is untrusted",
                              module="response_parser", func="parse_batch")
                     return None
-            except Exception:
-                pass
+                missing = expected - set(parsed.keys())
+                extra = set(parsed.keys()) - expected
+                for item_id in extra:
+                    parsed.pop(item_id, None)
+                if missing:
+                    log_emit(log_callback, self.config, "WARNING",
+                             f"Batch response is partial; missing ids: {sorted(missing)}",
+                             module="response_parser", func="parse_batch")
+                if not parsed:
+                    return None
         return parsed
 
     @staticmethod
@@ -215,6 +404,13 @@ class ResponseParser:
         if not text:
             return True
         compact = text.strip()
+        # Complete, valid JSON is never a broken fragment; scalar/empty
+        # containers are handled as empty responses (Q-20).
+        try:
+            json.loads(compact)
+            return False
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
         if compact in {"{", "}", "[", "]", "\"", "'", "{\"", "\"}"}:
             return True
         if compact.startswith("{") and "translation" not in compact.lower() and len(compact) < 8:
@@ -223,14 +419,22 @@ class ResponseParser:
             return True
         return False
 
-    @staticmethod
-    def _try_parse_first_json_object(text: str,
-                                     required_keys: Optional[tuple[str, ...]] = None) -> Optional[dict]:
-        """Parse first JSON object via raw_decode; require quoted keys."""
+    @classmethod
+    def _try_parse_first_json_object(
+            cls, text: str,
+            required_keys: Optional[tuple[str, ...]] = None) -> Optional[dict]:
+        """Parse a JSON object via raw_decode; require quoted keys.
+
+        For translation objects, invalid placeholder/leak candidates are
+        skipped and the LAST valid candidate wins (Q-18/Q-19).  Generic
+        callers (no required keys) keep first-match semantics.
+        """
         if not text:
             return None
 
         decoder = json.JSONDecoder()
+        require_translation = bool(required_keys) and any(
+            str(key).lower() == "translation" for key in required_keys)
 
         def _matches(parsed: object, raw: str) -> bool:
             if not isinstance(parsed, dict):
@@ -244,14 +448,39 @@ class ResponseParser:
                 if not re.search(r'"' + re.escape(str(key)) + r'"', raw, flags=re.IGNORECASE):
                     if not re.search(r"'" + re.escape(str(key)) + r"'", raw):
                         return False
+            if require_translation:
+                found, _value = cls._extract_usable_translation(parsed)
+                if not found:
+                    return False
             return True
 
+        if not require_translation:
+            compact = text.lstrip()
+            if compact.startswith("{"):
+                try:
+                    parsed, end = decoder.raw_decode(compact)
+                    if _matches(parsed, compact[:end]):
+                        return parsed
+                except json.JSONDecodeError:
+                    pass
+
+            for match in re.finditer(r"\{", text):
+                try:
+                    parsed, end = decoder.raw_decode(text[match.start():])
+                    if _matches(parsed, text[match.start():match.start() + end]):
+                        return parsed
+                except json.JSONDecodeError:
+                    continue
+
+            return None
+
+        candidates: list[dict] = []
         compact = text.lstrip()
         if compact.startswith("{"):
             try:
                 parsed, end = decoder.raw_decode(compact)
                 if _matches(parsed, compact[:end]):
-                    return parsed
+                    candidates.append(parsed)
             except json.JSONDecodeError:
                 pass
 
@@ -259,11 +488,11 @@ class ResponseParser:
             try:
                 parsed, end = decoder.raw_decode(text[match.start():])
                 if _matches(parsed, text[match.start():match.start() + end]):
-                    return parsed
+                    candidates.append(parsed)
             except json.JSONDecodeError:
                 continue
 
-        return None
+        return candidates[-1] if candidates else None
 
     @staticmethod
     def _try_parse_first_json_array(text: str) -> Optional[list]:
@@ -307,11 +536,13 @@ class ResponseParser:
             return True, ""
         return True, value if value.strip() else ""
 
-    @staticmethod
-    def _coerce_batch_translation(value: object) -> str:
+    @classmethod
+    def _coerce_batch_translation(cls, value: object) -> str:
         if not isinstance(value, str) or not value.strip():
             return ""
         if is_model_refusal(value):
+            return ""
+        if not cls._is_usable_translation_value(value):
             return ""
         return value
 
@@ -322,14 +553,14 @@ class ResponseParser:
         if len(clean) > 200_000:
             return None
 
-        # Fix trailing commas: {"translation": "text",} -> {"translation": "text"}
-        fixed = re.sub(r",\s*}", "}", clean)
-        fixed = re.sub(r",\s*]", "]", fixed)
+        # Q-22: repair trailing commas structurally, so commas inside JSON
+        # strings are never touched.
+        fixed = self._repair_trailing_commas(clean)
         try:
             m = self._JSON_EXTRACT_RE.search(fixed)
             if m:
                 data = json.loads(m.group(0))
-                found, result = self._extract_translation_value(data)
+                found, result = self._extract_usable_translation(data)
                 if found:
                     log_emit(log_callback, self.config, "DEBUG",
                              "Recovered translation via trailing-comma fix",
@@ -342,7 +573,7 @@ class ResponseParser:
         if fixed.startswith("{") and fixed.endswith("}") and "'" in fixed:
             try:
                 data = ast.literal_eval(fixed)
-                found, result = self._extract_translation_value(data)
+                found, result = self._extract_usable_translation(data)
                 if found:
                     log_emit(log_callback, self.config, "DEBUG",
                              "Recovered translation via literal-eval fix",
@@ -351,19 +582,25 @@ class ResponseParser:
             except Exception:
                 pass
 
-        # Match "translation": "value" or 'translation': 'value' pattern
-        m = self._TRANSLATION_KV_RE.search(clean)
-        if m:
+        # Match "translation": "value" or 'translation': 'value' pattern.
+        # Prefer the LAST valid candidate so draft objects do not win (Q-18).
+        kv_result: Optional[str] = None
+        for match in self._TRANSLATION_KV_RE.finditer(clean):
+            candidate = self._unquote_bare_value(match.group("value"))
+            if self._is_usable_translation_value(candidate):
+                kv_result = candidate
+        if kv_result is not None:
             log_emit(log_callback, self.config, "DEBUG",
                      "Recovered translation via KV regex",
                      module="response_parser", func="_try_relaxed_json_extract")
-            return m.group("value")
+            return kv_result
 
         # Match bare translation: empty value is empty response.
-        m = self._BARE_TRANSLATION_RE.search(clean)
-        if m:
+        matches = list(self._BARE_TRANSLATION_RE.finditer(clean))
+        if matches:
+            m = matches[-1]
             raw_value = m.group(1) or ""
-            result = raw_value.strip().strip("\"").strip("'").strip()
+            result = self._unquote_bare_value(raw_value)
             if not result:
                 log_emit(log_callback, self.config, "WARNING",
                          "Empty bare translation value treated as empty response",

@@ -205,8 +205,10 @@ class QualityCheckerPlaceholderResidueTests(unittest.TestCase):
             relaxed_issues,
         )
 
-    def test_relaxed_spaces_policy_still_rejects_newline_loss(self):
-        source = "First line\nSecond line"
+    def test_relaxed_spaces_policy_still_rejects_structural_newline_loss(self):
+        # Pure "\n" is no longer sentinel-protected (Q-36); structural
+        # whitespace such as " \n" still must survive.
+        source = "First line \nSecond line"
         translation = "第一行 第二行"
 
         issues = self.checker.check(

@@ -261,7 +261,7 @@ class PromptBuilderStyleProfileTests(unittest.TestCase):
 
         self.assertIn("证据不足时不擅自确立或否定关系", system_prompt)
         self.assertIn("身体感受与情绪评价按语境区分", system_prompt)
-        self.assertIn("保持其语义角色，以自然中文重组", system_prompt)
+        self.assertIn("保持其语义角色，以自然的", system_prompt)
         self.assertIn("必要所属不得省略", system_prompt)
         self.assertIn("不把疼痛、恐惧或喘息无依据改成快感", system_prompt)
 

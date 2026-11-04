@@ -89,12 +89,25 @@ class TextAnalyzer:
     _BRACKET_PLACEHOLDER_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_:-]*$")
     _IDENTIFIER_CHAR_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_:-]*$")
     _WHITESPACE_RE = re.compile(r"\s+")
+    # Common UI / stat / action words.  These must NOT be treated as proper
+    # nouns (Q-29/Q-31): "Health", "Armor", "Lockpicking" are translation
+    # targets, not untouchable names.
     _COMMON_UI_TOKENS = {
-        "apply", "back", "cancel", "confirm", "continue", "default", "defaults",
-        "disable", "disabled", "enable", "enabled", "exit", "fast", "game",
-        "load", "menu", "new", "next", "no", "off", "ok", "on", "option",
-        "options", "previous", "quit", "reset", "save", "setting", "settings",
-        "start", "travel", "yes",
+        "absorb", "absorbed", "action", "actions", "apply", "armor", "armour",
+        "attack", "back", "balance", "block", "buy", "cancel", "carry",
+        "close", "closed", "confirm", "continue", "damage", "default",
+        "defaults", "disease", "disable", "disabled", "drop", "enable",
+        "enabled", "endurance", "equip", "equipment", "exit", "fast", "fire",
+        "fortify", "frost", "game", "health", "heavy", "help", "hp",
+        "increase", "item", "items", "light", "load", "locked", "lockpicking",
+        "magic", "magicka", "menu", "name", "new", "next", "no", "off", "ok",
+        "on", "open", "option", "options", "pickpocket", "poison", "potion",
+        "potions", "power", "previous", "price", "protection", "quit",
+        "regenerate", "regeneration", "reset", "resist", "resistance",
+        "restore", "save", "sell", "setting", "settings", "shield", "shock",
+        "skill", "skills", "sneak", "speed", "spell", "spells", "stamina",
+        "start", "steal", "take", "travel", "unlocked", "use", "value",
+        "weapon", "weapons", "weight", "yes",
     }
 
     @classmethod
@@ -298,6 +311,9 @@ class TextAnalyzer:
         boundary_patterns = (
             re.compile(r"(?:\r?\n){2,}\s*"),
             re.compile(r"[.!?。！？]+(?:[\"'\)\]\}”’》」』]*)\s+"),
+            # CJK sentence punctuation is a boundary without trailing
+            # whitespace (Q-37): Chinese prose has no spaces after 。！？；
+            re.compile(r"[。！？；]+(?:[”’》」』）】]*)"),
             re.compile(r"[;；:：,，、]\s+"),
             self._WHITESPACE_RE,
         )
@@ -537,7 +553,15 @@ class TextAnalyzer:
         if policy == self.WHITESPACE_POLICY_RELAXED_ALL:
             return False
 
-        if "\n" in token or "\r" in token or "\t" in token:
+        if "\t" in token:
+            return True
+        if "\n" in token or "\r" in token:
+            # Q-36: a token that is only line breaks must not be frozen as a
+            # sentinel, otherwise paragraph breaks are silently dropped when
+            # the model does not echo them.  Keep mixed structural whitespace
+            # (e.g. " \n\n" around markup or indentation) protected.
+            if set(token) <= {"\n", "\r"}:
+                return False
             return True
         if policy == self.WHITESPACE_POLICY_RELAXED_SPACES:
             if not self._is_plain_space_token(token):
