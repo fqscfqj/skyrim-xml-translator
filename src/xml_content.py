@@ -12,6 +12,40 @@ _TAG_TOKEN_RE = re.compile(
     r"\s*(?P<selfclosing>/)?>"
 )  # 属性引号感知，容忍>出现在引号内
 
+# XML 1.0 合法字符：Tab/LF/CR + >=0x20，排除代理区与 U+FFFE/U+FFFF
+_XML_ILLEGAL_CHARS_RE = re.compile(
+    "[\u0000-\u0008\u000b\u000c\u000e-\u001f\ud800-\udfff\ufffe\uffff]"
+)
+
+
+class IllegalXMLCharacterError(ValueError):
+    """Translation contains characters that XML 1.0 cannot represent."""
+
+
+def contains_illegal_xml_char(value: Any) -> bool:
+    """Return whether *value* contains an XML 1.0-illegal code point."""
+    text = "" if value is None else str(value)
+    return _XML_ILLEGAL_CHARS_RE.search(text) is not None
+
+
+def sanitize_xml_text(value: Any, strict: bool = False) -> str:
+    """Return *value* normalized for XML 1.0.
+
+    Illegal code points are stripped by default; with ``strict=True`` the call
+    raises IllegalXMLCharacterError instead, so callers can leave the target
+    node untouched and report the row as failed.
+    """
+    text = "" if value is None else str(value)
+    match = _XML_ILLEGAL_CHARS_RE.search(text)
+    if match is None:
+        return text
+    if strict:
+        raise IllegalXMLCharacterError(
+            "translation contains XML 1.0-illegal character U+%04X at offset %d"
+            % (ord(match.group(0)), match.start())
+        )
+    return _XML_ILLEGAL_CHARS_RE.sub("", text)
+
 
 def get_node_inner_content(node: Any, etree_module: Any) -> str:
     """Return node inner content including child XML and child tails."""
@@ -43,14 +77,10 @@ def set_node_text_content(node: Any, value: str, etree_module: Any = None) -> No
     if node is None:
         return
 
+    content = sanitize_xml_text(value, strict=True)  # 非法码点在清空节点前拒绝
     preserve_cdata = _node_text_uses_cdata(node, etree_module)
     _clear_node_children(node)
-    _assign_node_text(
-        node,
-        "" if value is None else str(value),
-        etree_module,
-        preserve_cdata=preserve_cdata,
-    )
+    _assign_node_text(node, content, etree_module, preserve_cdata=preserve_cdata)
 
 
 def set_node_inner_content(node: Any, value: str, etree_module: Any) -> None:
@@ -62,34 +92,65 @@ def set_node_inner_content(node: Any, value: str, etree_module: Any) -> None:
     if node is None:
         return
 
+    content = sanitize_xml_text(value, strict=True)  # 非法码点在清空节点前拒绝
     preserve_cdata = _node_text_uses_cdata(node, etree_module)
-    _clear_node_children(node)
-    node.text = None
-
-    content = "" if value is None else str(value)
     if preserve_cdata:
+        # CDATA标记只存在于节点自身，直接赋值才能保留CDATA段
+        _clear_node_children(node)
+        node.text = None
         _assign_node_text(node, content, etree_module, preserve_cdata=True)
-        return
-    if not content:
-        node.text = ""
         return
 
     nsmap = getattr(node, "nsmap", None)  # fragment校验继承父nsmap
-    last_child = None
-    for fragment_type, fragment in _iter_content_fragments(content, etree_module, nsmap):
-        if fragment_type == "text":
-            if last_child is None:
-                node.text = (node.text or "") + fragment
-            else:
-                last_child.tail = (last_child.tail or "") + fragment
-            continue
 
-        child = _parse_fragment(fragment, etree_module, nsmap)
+    def _fill(staging: Any) -> None:
+        if not content:
+            staging.text = ""
+            return
+
+        last_child = None
+        for fragment_type, fragment in _iter_content_fragments(content, etree_module, nsmap):
+            if fragment_type == "text":
+                if last_child is None:
+                    staging.text = (staging.text or "") + fragment
+                else:
+                    last_child.tail = (last_child.tail or "") + fragment
+                continue
+
+            child = _parse_fragment(fragment, etree_module, nsmap)
+            staging.append(child)
+            last_child = child
+
+        if staging.text is None and last_child is None:
+            staging.text = ""
+
+    _replace_node_content(node, _fill)
+
+
+def _replace_node_content(node: Any, fill: Any) -> None:
+    """Build new content on a detached element and swap it in only on success."""
+    staging_factory = getattr(node, "makeelement", None)
+    staging = None
+    if callable(staging_factory):
+        try:
+            staging = staging_factory("_dest_staging")
+        except Exception:
+            staging = None
+
+    if staging is None:  # 非lxml元素退回直接写入
+        _clear_node_children(node)
+        node.text = None
+        fill(node)
+        return
+
+    fill(staging)  # 失败在此抛出，原节点完全未改动
+
+    _clear_node_children(node)
+    node.text = None
+    if staging.text is not None:
+        node.text = staging.text
+    for child in list(staging):
         node.append(child)
-        last_child = child
-
-    if node.text is None and last_child is None:
-        node.text = ""
 
 
 def _clear_node_children(node: Any) -> None:

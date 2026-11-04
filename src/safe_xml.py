@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Any
+from typing import Any, Optional
 
 try:
     from lxml import etree  # type: ignore
@@ -22,13 +22,15 @@ _MAX_XML_BYTES = 50 * 1024 * 1024  # 50MB上限防DoS大文件
 _PREDOCTYPE_SCAN_BYTES = 512 * 1024  # DOCTYPE在序言区，仅扫头部即可
 _COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 _CDATA_RE = re.compile(r"<!\[CDATA\[.*?\]\]>", re.DOTALL)
+_PI_RE = re.compile(r"<\?.*?\?>", re.DOTALL)  # 处理指令内容不是声明，先剥离防误拒
 _DOCTYPE_RE = re.compile(r"<!\s*DOCTYPE\b", re.IGNORECASE)
 _ENTITY_RE = re.compile(r"<!\s*ENTITY\b", re.IGNORECASE)
 
 
 def _strip_comment_and_cdata(text: str) -> str:
     text = _COMMENT_RE.sub("", text)  # 注释内声明文本不算攻击
-    return _CDATA_RE.sub("", text)  # CDATA内声明文本不算攻击
+    text = _CDATA_RE.sub("", text)  # CDATA内声明文本不算攻击
+    return _PI_RE.sub("", text)  # PI内 <!DOCTYPE 字样是合法内容，不算攻击
 
 
 def _precheck_no_doctype(cleaned_path: str) -> None:
@@ -50,8 +52,23 @@ def _precheck_no_doctype(cleaned_path: str) -> None:
         raise UnsafeXMLDeclarationError("DOCTYPE/ENTITY declarations are not allowed")
 
 
+_FORBID_DTD_SUPPORTED: Optional[bool] = None  # lxml能力探测结果缓存
+
+
+def _supports_forbid_dtd() -> bool:
+    # 只有当前安装的lxml真正接受forbid_dtd时才传它，否则TypeError会打断解析
+    global _FORBID_DTD_SUPPORTED
+    if _FORBID_DTD_SUPPORTED is None:
+        try:
+            etree.XMLParser(forbid_dtd=True)  # type: ignore[arg-type]
+            _FORBID_DTD_SUPPORTED = True
+        except Exception:
+            _FORBID_DTD_SUPPORTED = False
+    return bool(_FORBID_DTD_SUPPORTED)
+
+
 def _build_parser():  # type: ignore[no-untyped-def]
-    # hardened解析器：禁DTD/实体/网络/巨树
+    # hardened解析器：禁DTD/实体/网络/巨树；DTD另有预检+docinfo双重兜底
     hardened = dict(
         remove_blank_text=False,
         strip_cdata=False,
@@ -64,21 +81,9 @@ def _build_parser():  # type: ignore[no-untyped-def]
         compact=True,
         recover=False,  # 显式禁容错解析
     )
-    try:
-        # 新版lxml禁DTD最彻底
-        return etree.XMLParser(forbid_dtd=True, **hardened)  # type: ignore
-    except TypeError:
-        # 旧版无forbid_dtd靠事前检查兜底
-        return etree.XMLParser(  # type: ignore
-            remove_blank_text=False,
-            strip_cdata=False,
-            resolve_entities=False,
-            load_dtd=False,
-            no_network=True,
-            huge_tree=False,
-            compact=True,
-            recover=False,
-        )
+    if _supports_forbid_dtd():
+        return etree.XMLParser(forbid_dtd=True, **hardened)  # type: ignore[call-arg]
+    return etree.XMLParser(**hardened)  # type: ignore[arg-type]
 
 
 def parse_xml_file(file_path: str) -> Any:

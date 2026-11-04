@@ -92,9 +92,49 @@ def _extract_id_text(string_node: Any) -> str:
     return ""
 
 
-def _write_tree_atomic(tree: Any, target: str) -> bool:
-    # 原子写tmp+fsync+replace，旧文件留.bak
+_BOM_UTF8 = b"\xef\xbb\xbf"
+_BOM_UTF16_LE = b"\xff\xfe"
+_BOM_UTF16_BE = b"\xfe\xff"
+
+
+def _read_source_bom(path: Optional[str]) -> bytes:
+    if not path:
+        return b""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(3)
+    except Exception:
+        return b""
+    for bom in (_BOM_UTF8, _BOM_UTF16_LE, _BOM_UTF16_BE):
+        if head.startswith(bom):
+            return bom
+    return b""
+
+
+def _bom_matches_encoding(bom: bytes, encoding: str) -> bool:
+    # 只在编码族与BOM一致时回填，避免把UTF-16 BOM写到UTF-8字节前
+    enc = str(encoding or "").strip().lower().replace("_", "-")
+    if bom == _BOM_UTF8:
+        return enc in ("utf-8", "utf8", "utf-8-sig")
+    if bom in (_BOM_UTF16_LE, _BOM_UTF16_BE):
+        return enc.startswith("utf-16") or enc.startswith("utf16")
+    return False
+
+
+def _serialize_tree_bytes(tree: Any, encoding: str) -> bytes:
+    try:
+        return etree.tostring(tree, encoding=encoding, xml_declaration=True, pretty_print=False)
+    except TypeError:
+        return etree.tostring(tree, encoding=encoding, xml_declaration=True)
+
+
+def _write_tree_atomic(tree: Any, target: str, source_path: Optional[str] = None) -> bool:
+    # 原子写tmp+fsync+replace；.bak只保留一代且仅在tmp写完后创建
     directory = os.path.dirname(os.path.abspath(target)) or "."
+    try:
+        cfg = ConfigManager()
+    except Exception:
+        cfg = None
     try:
         os.makedirs(directory, exist_ok=True)
     except Exception:
@@ -102,31 +142,45 @@ def _write_tree_atomic(tree: Any, target: str) -> bool:
     fd, tmp_path = tempfile.mkstemp(suffix=".tmp", dir=directory)
     os.close(fd)
     try:
+        docinfo = getattr(tree, "docinfo", None)
+        encoding = str(getattr(docinfo, "encoding", "") or "").strip() if docinfo is not None else ""
+        if not encoding:
+            encoding = "utf-8"
+        payload: bytes
         try:
-            cfg = ConfigManager()
-        except Exception:
-            cfg = None
-        try:
-            tree.write(tmp_path, encoding="utf-8", xml_declaration=True, pretty_print=False)
-        except TypeError:
-            tree.write(tmp_path, encoding="utf-8", xml_declaration=True)
-        with open(tmp_path, "rb") as f:  # fsync确保落盘
+            payload = _serialize_tree_bytes(tree, encoding)  # X-01 复用源文件声明编码
+        except (LookupError, ValueError):
+            encoding = "utf-8"
+            payload = _serialize_tree_bytes(tree, encoding)
+        bom = _read_source_bom(source_path or target)  # 源文件有BOM则回填
+        if bom and _bom_matches_encoding(bom, encoding) and not payload.startswith(bom):
+            payload = bom + payload
+        with open(tmp_path, "wb") as f:  # 先完整写tmp，失败不碰目标/.bak
+            f.write(payload)
+            f.flush()
             try:
                 os.fsync(f.fileno())
             except Exception:
                 pass
-        if os.path.exists(target):  # 覆盖前留.bak
+        backup_path = target + ".bak"
+        created_backup = False
+        if os.path.exists(target) and not os.path.exists(backup_path):  # X-02 不覆盖已有备份
             try:
-                shutil.copy2(target, target + ".bak")
+                shutil.copy2(target, backup_path)
+                created_backup = True
             except Exception as e:
                 log_emit(None, cfg, "WARNING", f"Backup .bak failed: {e}", module="xml_processor", func="save_file")
-        os.replace(tmp_path, target)
+        try:
+            os.replace(tmp_path, target)
+        except Exception:
+            if created_backup:  # 保存失败时不留下新备份
+                try:
+                    os.remove(backup_path)
+                except Exception:
+                    pass
+            raise
         return True
     except Exception as e:
-        try:
-            cfg = ConfigManager()
-        except Exception:
-            cfg = None
         log_emit(None, cfg, 'ERROR', f"Error saving XML: {e}", exc=e, module='xml_processor', func='save_file')
         return False
     finally:
@@ -194,17 +248,28 @@ class XMLProcessor:
 
     def update_dest(self, string_node, translation: str, overwrite: bool = False) -> None:
         dest_node = _find_child(string_node, "Dest")
+        created = False
         if dest_node is None:
             dest_node = etree.SubElement(string_node, "Dest")
+            created = True
 
         # Normalize translation to string and guard against None
         safe_translation = _decode_translation_text(translation)
         existing_content = get_node_inner_content(dest_node, etree)
-        if overwrite or not str(existing_content or "").strip():  # 空白统一视为空
+        if not (overwrite or not str(existing_content or "").strip()):  # 空白统一视为空
+            return
+        try:
             if _has_whitelisted_markup(safe_translation):  # 以译文白名单标签为准
                 set_node_inner_content(dest_node, safe_translation, etree)
             else:
                 set_node_text_content(dest_node, safe_translation, etree)
+        except Exception:
+            if created:  # 新建的Dest写入失败时回滚，避免留下空节点
+                try:
+                    string_node.remove(dest_node)
+                except Exception:
+                    pass
+            raise  # P0-04 向上抛错，由调用方标记该行失败
 
     def save_file(self, output_path=None):
         target = str(output_path or self.file_path or "").strip() or None
@@ -212,4 +277,7 @@ class XMLProcessor:
             return False
         if not self.tree:
             return False
-        return _write_tree_atomic(self.tree, target)
+        if not _write_tree_atomic(self.tree, target, self.file_path):
+            return False
+        self.file_path = target  # X-03 另存为后切换写回目标
+        return True
