@@ -7,7 +7,41 @@ import time
 import random
 from email.utils import parsedate_to_datetime
 
-import openai
+
+_openai_module = None
+
+
+def _get_openai():
+    """Import ``openai`` lazily.
+
+    ``retry`` is pulled in by the GUI startup path via ``rag``; importing the
+    openai SDK here cost ~364ms before the first request (F-18).  The module is
+    imported once, on the first *failed* API call that needs classification.
+    """
+    global _openai_module
+    if _openai_module is None:
+        import openai as _openai
+
+        _openai_module = _openai
+    return _openai_module
+
+
+def is_response_truncated_error(exc: Exception) -> bool:
+    """True for ``src.llm.client.ResponseTruncatedError`` without importing it.
+
+    ``client`` imports ``retry``, so a module-level import here would be a
+    cycle.  The class name / MRO check is enough and also recognises
+    subclasses; the local import is only a fallback for renamed aliases.
+    """
+    for cls in type(exc).__mro__:
+        if cls.__name__ == "ResponseTruncatedError":
+            return True
+    try:  # pragma: no cover - fallback for exotic proxies
+        from src.llm.client import ResponseTruncatedError
+
+        return isinstance(exc, ResponseTruncatedError)
+    except Exception:
+        return False
 
 
 class ErrorType(Enum):
@@ -246,6 +280,11 @@ def classify_error(exc: Exception) -> ErrorType:
     """Classify an OpenAI/API exception into an ErrorType."""
     if isinstance(exc, RetryTimeBudgetExceeded):
         return ErrorType.UNKNOWN
+    # A truncated (HTTP 200, finish_reason=length / incomplete) response will
+    # not get better by repeating the identical request: never retry it.
+    if is_response_truncated_error(exc):
+        return ErrorType.INVALID_REQUEST
+    openai = _get_openai()
     # Timeout must be checked BEFORE its parent APIConnectionError, otherwise
     # timeouts are retried with the much more aggressive connection policy.
     if isinstance(exc, openai.APITimeoutError):

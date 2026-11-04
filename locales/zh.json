@@ -207,6 +207,8 @@
     "msg_loading_file": "正在加载文件: {path}",
     "msg_failed_load_xml": "加载 XML 文件失败。",
     "msg_failed_load_mcm": "加载 MCM 文本失败。",
+    "msg_load_failed_detail": "加载失败：{error}",
+    "msg_glossary_corrupt": "词库文件无法读取，已隔离并备份到：{path}。原因：{error}",
     "msg_raw_plugin_not_supported": "不支持直接加载原始插件文件（{ext}）。请先在 xTranslator 或 ESP-ESM Translator 中导出为 XML，再打开导出的 XML 文件。",
     "msg_unsupported_translation_file": "不支持的文件类型：{ext}。当前仅支持 XML 翻译文件（*.xml）和 MCM 文本文件（*.txt）。",
     "msg_loaded_strings": "已加载 {count} 个字符串。",
@@ -214,6 +216,7 @@
     "msg_file_saved": "文件保存成功。",
     "msg_mcm_saved_path": "MCM 已保存到: {path}",
     "msg_mcm_auto_export_done": "MCM 自动输出完成: {path}",
+    "msg_save_warning": "保存警告：{warning}",
     "title_success": "成功",
     "title_warning": "警告",
     "title_info": "提示",
@@ -318,4 +321,13 @@
     ,"msg_glossary_task_already_running": "已有术语库任务正在运行。"
     ,"msg_loading_in_progress": "文件仍在加载，请稍候。"
     ,"msg_config_save_failed": "配置文件保存失败，请检查配置目录是否可写后重试。"
+    ,"msg_no_extension": "（无扩展名）"
+    ,"msg_rag_index_initializing": "正在后台构建术语索引..."
+    ,"msg_rag_index_ready": "术语索引已就绪。"
+    ,"msg_rag_index_init_failed": "术语索引初始化失败：{error}"
+    ,"msg_rag_analyzing": "正在分析 RAG 流程..."
+    ,"msg_rag_analyzing_hint": "分析完成后将显示 RAG 详情，主窗口可继续使用。"
+    ,"msg_rag_analysis_failed": "RAG 分析失败"
+    ,"msg_import_preview_parsing": "正在解析术语文件（预览）..."
+    ,"msg_added_term_index_pending": "已添加术语：{source}。向量索引更新未完成（{error}），请重建索引以恢复语义检索。"
 }

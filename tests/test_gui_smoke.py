@@ -403,3 +403,290 @@ def test_invalid_mcm_suffix_reports_config_error():
     message = str(excinfo.value)
     assert "Chinese (Simplified)" in message
     assert "suffix" in message.lower() or "后缀" in message
+
+
+# --- F-08/F-09/F-10/F-12/F-13/Q-46: third-round GUI regressions ---------------
+
+class _FakeConfigManager:
+    """Config stand-in that keeps all persistence inside ``tmp_path``."""
+
+    def __init__(self, root):
+        self.config_path = str(root / "config.json")
+        self._values = {
+            ("general", "language"): "en",
+            ("general", "color_mode"): "light",
+            ("general", "log_file"): str(root / "logs" / "app.log"),
+            ("general", "log_level"): "ERROR",
+            ("cache", "cache_persist_dir"): str(root / "cache"),
+            ("cache", "translation_cache_size"): 100,
+            ("rag", "glossary_file"): str(root / "glossary" / "glossary.json"),
+            ("paths", "glossary_file"): str(root / "glossary" / "glossary.json"),
+            ("paths", "vector_index_file"): str(root / "glossary" / "vector_index.npy"),
+        }
+
+    def get(self, section, key, default=None):
+        return self._values.get((section, key), default)
+
+
+class _FakeLLMClientForWindow:
+    def __init__(self, config_manager, log_callback=None):
+        self.config = config_manager
+        self.cost_tracker = None
+
+    def close_clients(self):
+        pass
+
+    def reload_config(self):
+        pass
+
+
+class _FakeRagEngine:
+    def __init__(self, config_manager, llm_client):
+        self.config = config_manager
+        self.llm_client = llm_client
+        self.glossary = {"Sword": "剑", "Shield": "盾"}
+
+    def get_vector_index_status(self):
+        return types.SimpleNamespace(is_ready=True, is_stale=False, reason="", detail="")
+
+
+def _make_test_window(monkeypatch, tmp_path):
+    import src.gui_main as gui
+
+    monkeypatch.setattr(gui, "ConfigManager", lambda: _FakeConfigManager(tmp_path))
+    monkeypatch.setattr(gui, "LLMClient", _FakeLLMClientForWindow)
+    return gui.MainWindow()
+
+
+def test_rag_is_deferred_then_becomes_ready(qt_app, monkeypatch, tmp_path):
+    from src.i18n import i18n
+    import src.gui_main as gui
+
+    window = _make_test_window(monkeypatch, tmp_path)
+    try:
+        # Before show()/the 0ms timer fires the engine must not be built.
+        assert window.rag_engine.is_ready is False
+        assert window._rag_ready is False
+        assert window._ensure_rag_ready(notify=False) is None
+        assert window.start_btn.isEnabled() is False
+        assert window.statusBar().currentMessage() == i18n.t("msg_rag_index_initializing")
+
+        window._rag_engine_factory = lambda: _FakeRagEngine(
+            window.config_manager, window.llm_client)
+        window._lazy_init_rag()
+
+        assert window.rag_engine.is_ready is True
+        assert window._rag_ready is True
+        assert window._ensure_rag_ready(notify=False) is window.rag_engine
+        assert window.start_btn.isEnabled() is True
+        # Idempotent: a second call does not rebuild.
+        engine = window.rag_engine.get_engine()
+        window._lazy_init_rag()
+        assert window.rag_engine.get_engine() is engine
+    finally:
+        window.close()
+
+
+def test_theme_switch_with_10k_rows_is_under_half_second(qt_app, monkeypatch, tmp_path):
+    import time
+
+    window = _make_test_window(monkeypatch, tmp_path)
+    try:
+        table = window.trans_table
+        table.setUpdatesEnabled(False)
+        try:
+            table.setRowCount(10000)
+            for row in range(10000):
+                for column in range(3):
+                    table.setItem(row, column, QTableWidgetItem(f"cell-{row}-{column}"))
+                window.row_status_map[row] = [
+                    MainWindow.ROW_STATUS_UNTRANSLATED,
+                    MainWindow.ROW_STATUS_SUCCESS,
+                    MainWindow.ROW_STATUS_WARNING,
+                    MainWindow.ROW_STATUS_FAILED,
+                ][row % 4]
+                if row % 7 == 0:
+                    window.row_error_map[row] = "failed to translate"
+        finally:
+            table.setUpdatesEnabled(True)
+
+        started = time.perf_counter()
+        window._apply_dynamic_styles()
+        elapsed = time.perf_counter() - started
+
+        assert elapsed < 0.5, f"theme switch took {elapsed * 1000:.0f}ms"
+        assert table.item(0, 0).background().color().isValid()
+        assert table.item(7, 0).toolTip() == "failed to translate"
+        assert table.item(1, 0).toolTip() == ""
+    finally:
+        window.close()
+
+
+def test_glossary_search_keystroke_is_cheap_and_cached(qt_app, monkeypatch, tmp_path):
+    import time
+
+    window = _make_test_window(monkeypatch, tmp_path)
+    try:
+        class _HugeGlossary:
+            glossary = {f"term{i}": f"translation {i}" for i in range(100000)}
+
+        window.rag_engine._engine = _HugeGlossary()
+        window._rag_ready = True
+        window._invalidate_glossary_search_cache()
+        window.refresh_term_list()  # builds the lower-cased cache once
+
+        started = time.perf_counter()
+        for _ in range(20):
+            window._schedule_glossary_search()
+        per_keystroke = (time.perf_counter() - started) / 20
+        assert per_keystroke < 0.003, f"keystroke handler cost {per_keystroke * 1000:.2f}ms"
+        assert window._glossary_search_timer.isActive() is True
+        window._glossary_search_timer.stop()
+
+        window.search_input.setText("term999")
+        started = time.perf_counter()
+        window.refresh_term_list()
+        filtered = time.perf_counter() - started
+        window._glossary_search_timer.stop()
+        assert filtered < 0.05, f"filtered refresh took {filtered * 1000:.0f}ms"
+    finally:
+        window.close()
+
+
+def test_glossary_worker_reuses_preview_parse(qt_app, monkeypatch, tmp_path):
+    from src.rag.glossary_import import ParsedGlossaryImport
+    import src.gui_main as gui
+
+    glossary_file = tmp_path / "terms.csv"
+    glossary_file.write_text("term,translation\nA,甲\n", encoding="utf-8")
+    parsed = ParsedGlossaryImport(terms={"A": "甲"}, format_kind="csv_header")
+    batched = []
+
+    engine = types.SimpleNamespace(
+        config=_FakeConfigManager(tmp_path),
+        add_terms_batch=lambda terms, **kwargs: batched.append((terms, kwargs)),
+    )
+
+    def _must_not_reparse(*_args, **_kwargs):
+        raise AssertionError("preview result should be reused instead of re-parsed")
+
+    monkeypatch.setattr("src.rag.glossary_import.parse_glossary_file", _must_not_reparse)
+    worker = gui.GlossaryWorker(
+        engine, "import", data=str(glossary_file), parsed=parsed)
+    worker.run()
+
+    assert worker.parsed_result is parsed
+    assert worker.task_result["imported_terms"] == 1
+    assert batched and batched[0][0] == {"A": "甲"}
+
+
+def test_add_term_worker_reports_embedding_failure(qt_app):
+    from src.gui_main import AddTermWorker
+
+    class _FailedEngine:
+        def add_term(self, term, translation):
+            raise RuntimeError("embedding endpoint down")
+
+    events = []
+    worker = AddTermWorker(_FailedEngine(), "Sword", "剑")
+    worker.completed.connect(lambda *args: events.append(args))
+    worker.run()
+
+    assert events == [("Sword", "剑", "embedding endpoint down")]
+
+
+def test_add_term_worker_marks_stale_index(qt_app):
+    from src.gui_main import AddTermWorker
+
+    class _StaleIndexEngine:
+        def add_term(self, term, translation):
+            return None
+
+        def get_vector_index_status(self):
+            return types.SimpleNamespace(
+                is_ready=False, is_stale=True, reason="vector_unavailable", detail="")
+
+    events = []
+    worker = AddTermWorker(_StaleIndexEngine(), "Sword", "剑")
+    worker.completed.connect(lambda *args: events.append(args))
+    worker.run()
+
+    assert events and events[0][2], "a stale index must surface an error"
+
+
+def test_worker_thread_log_is_forwarded_to_gui_thread(qt_app, monkeypatch, tmp_path):
+    import threading
+    import time
+
+    window = _make_test_window(monkeypatch, tmp_path)
+    try:
+        worker = threading.Thread(target=lambda: window.log("cross-thread-hello"))
+        worker.start()
+        worker.join(timeout=5)
+
+        deadline = time.time() + 3.0
+        while time.time() < deadline and "cross-thread-hello" not in window.log_output.toPlainText():
+            qt_app.processEvents()
+            time.sleep(0.01)
+
+        assert "cross-thread-hello" in window.log_output.toPlainText()
+    finally:
+        window.close()
+
+
+def test_rag_visualization_dialog_does_not_block_on_llm(qt_app):
+    import time
+
+    from src.gui_main import RAGVisualizationDialog
+
+    class _SlowTranslator:
+        def get_rag_debug_info(self, text, use_rag=True, context_hint=None):
+            time.sleep(0.3)
+            return {"rag_tasks": ["Sword"], "matched_terms": {"Sword": "剑"}}
+
+    started = time.perf_counter()
+    dialog = RAGVisualizationDialog(None, "Sword", "剑", _SlowTranslator())
+    construction = time.perf_counter() - started
+    try:
+        # The constructor must return immediately (skeleton shown), not wait
+        # for the 0.3s "HTTP" request (F-11).
+        assert construction < 0.2, f"dialog construction blocked for {construction:.2f}s"
+        assert dialog.rag_tree.topLevelItemCount() == 1
+
+        deadline = time.time() + 5.0
+        while time.time() < deadline and not dialog.debug_info:
+            qt_app.processEvents()
+            time.sleep(0.01)
+
+        assert dialog.debug_info, "background RAG analysis never delivered a result"
+        qt_app.processEvents()
+        assert dialog.rag_tree.topLevelItemCount() > 0
+    finally:
+        dialog.close()
+
+
+def test_dialogue_context_carries_previous_source(qt_app):
+    from src.file_formats import FILE_TYPE_ESP_XML
+
+    window = MainWindow.__new__(MainWindow)
+    table = QTableWidget(3, 3)
+    for row, source in enumerate(("Hello there.", "General, we need you.", "General, we need you.")):
+        table.setItem(row, 0, QTableWidgetItem(str(row + 1)))
+        table.setItem(row, 1, QTableWidgetItem(source))
+        dest_item = QTableWidgetItem("译文")
+        dest_item.setData(Qt.ItemDataRole.UserRole, object())
+        table.setItem(row, 2, dest_item)
+    window.trans_table = table
+    window.current_file_type = FILE_TYPE_ESP_XML
+    window.esp_xml_processor = types.SimpleNamespace(
+        get_entry_context=lambda _node: {"record_type": "DIAL", "field_type": "NAM1"})
+
+    context = window._build_translation_context(1)
+    assert context["text_kind"] == "dialogue"
+    assert context["previous_source"] == "Hello there."
+
+    # First row has no predecessor.
+    assert "previous_source" not in window._build_translation_context(0)
+
+    # Identical adjacent source lines do not get a previous_source hint.
+    assert "previous_source" not in window._build_translation_context(2)

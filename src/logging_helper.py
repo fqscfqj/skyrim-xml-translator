@@ -122,6 +122,9 @@ def _ensure_log_dir(directory: Optional[str]) -> None:
     """Create the log directory at most once per resolved path."""
     if not directory:
         return
+    # Lock-free fast path: after the first call this is a plain set lookup.
+    if directory in _ENSURED_LOG_DIRS:
+        return
     with _ENSURED_LOG_DIRS_LOCK:
         if directory in _ENSURED_LOG_DIRS:
             return
@@ -207,7 +210,9 @@ def _write_log_to_disk(path: Optional[str], message: str) -> None:
     try:
         log_dir = os.path.dirname(path)
         _ensure_log_dir(log_dir)
-        _write_via_rotating(path, text)
+        # Handler.handle()'s formatter already appends the record terminator;
+        # passing the trailing "\n" too doubled every line (F-14).
+        _write_via_rotating(path, text[:-1] if text.endswith("\n") else text)
         return
     except Exception as main_err:
         print(f"[logging] WARNING main log path failed {path}: {main_err}",
@@ -292,17 +297,23 @@ def emit(log_callback: Optional[Callable[[str], None]], config_manager, level: s
     # Best-effort caller deduction; prefer explicit module/func from callers.
     if not module or not func:
         try:
-            # inspect stack: 0: emit, 1: caller of emit, 2: maybe wrapper; choose index 2
-            st = inspect.stack()
-            if len(st) > 2:
-                frame = st[2]
-                mod = inspect.getmodule(frame[0])
-                if not module and mod and hasattr(mod, '__name__'):
-                    module = mod.__name__
+            # inspect.stack() walks and resolves every frame (~50µs/line).  One
+            # frame hop is enough for the fallback and keeps logging cheap.
+            frame = inspect.currentframe()
+            caller = frame.f_back if frame is not None else None
+            frame = None
+            if caller is not None:
+                # f_globals["__name__"] is a dict lookup; inspect.getmodule()
+                # scans sys.modules files and cost ~35µs per line here.
+                if not module:
+                    mod_name = caller.f_globals.get("__name__")
+                    if mod_name:
+                        module = str(mod_name)
                 if not func:
-                    func = frame.function
+                    func = caller.f_code.co_name
                 if not lineno:
-                    lineno = frame.lineno
+                    lineno = caller.f_lineno
+                del caller
         except Exception:
             pass
 

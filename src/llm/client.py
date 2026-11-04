@@ -1,10 +1,35 @@
 """OpenAI-compatible LLM API client with unified retry logic and cost tracking."""
 
+from __future__ import annotations
+
 from threading import RLock
 
-from openai import OpenAI
 from time import monotonic
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover - typing only; keeps startup free of openai
+    from openai import OpenAI
+
+
+def __getattr__(name: str):
+    """Resolve ``OpenAI`` lazily so ``patch("src.llm.client.OpenAI")`` still works."""
+    if name == "OpenAI":
+        from openai import OpenAI
+
+        globals()["OpenAI"] = OpenAI
+        return OpenAI
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def _openai_class():
+    """Return the SDK class, importing it on first use (F-18)."""
+    cls = globals().get("OpenAI")
+    if cls is None:
+        from openai import OpenAI
+
+        globals()["OpenAI"] = OpenAI
+        cls = OpenAI
+    return cls
 
 from src.logging_helper import emit as log_emit
 from src.llm.retry import (
@@ -124,6 +149,10 @@ class LLMClient:
         if timeout <= 0:
             timeout = 120
         try:
+            # Imported on first real client construction (not import time): the
+            # openai package costs ~364ms and is not needed before a request.
+            OpenAI = _openai_class()
+
             # Use one retry strategy path only (src.llm.retry) to avoid retry amplification.
             kwargs: dict[str, Any] = {"api_key": api_key, "timeout": timeout, "max_retries": 0}
             if base_url:

@@ -75,6 +75,7 @@ from src.file_formats import (
     FILE_TYPE_UNSUPPORTED,
     FILE_TYPE_XML,
     describe_extension,
+    detect_translation_file_type,
     detect_translation_file_type_from_extension,
 )
 from src.logging_helper import emit as log_emit
@@ -114,6 +115,18 @@ def determine_translation_completion_state(
     if was_stopped or untranslated > 0:
         return TASK_COMPLETION_STATE_WARNING
     return TASK_COMPLETION_STATE_SUCCESS
+
+
+def _window_rag_ready(window, notify: bool = True) -> bool:
+    """True when ``window`` may use RAG state.
+
+    Test doubles built with ``types.SimpleNamespace`` have no lazy-init method;
+    they are treated as ready so pure-Python call paths stay testable.
+    """
+    ensure = getattr(window, "_ensure_rag_ready", None)
+    if not callable(ensure):
+        return True
+    return ensure(notify=notify) is not None
 
 
 def read_glossary_csv(
@@ -282,7 +295,7 @@ class GlossaryWorker(QThread):
     finished = pyqtSignal()
 
     def __init__(self, rag_engine: RAGEngine, mode: str, data: Optional[str] = None, num_threads: int = 1,
-                 confirm_deletes: bool = False, dry_run: bool = False):
+                 confirm_deletes: bool = False, dry_run: bool = False, parsed=None):
         super().__init__()
         self.rag_engine = rag_engine
         self.mode = mode # 'rebuild' or 'import'
@@ -292,6 +305,11 @@ class GlossaryWorker(QThread):
         self.confirm_deletes = bool(confirm_deletes)
         # dry_run parses + reports without touching glossary/vectors.
         self.dry_run = bool(dry_run)
+        # F-09: a preview dry-run can hand its parse result to the real import,
+        # so the file is never parsed twice.
+        self.parsed = parsed
+        self.parsed_result = None
+        self.preview_text = ""
         self.completion_state = TASK_COMPLETION_STATE_SUCCESS
         self.task_result = None
         self.completion_message = ""
@@ -375,21 +393,25 @@ class GlossaryWorker(QThread):
                         "rag", "glossary_import_max_rows", 0)
                     max_field_chars = self.rag_engine.config.get(
                         "rag", "glossary_import_max_field_chars", 0)
-                    try:
-                        parsed = parse_glossary_file(
-                            self.data,
-                            max_rows=max_rows,
-                            max_field_chars=max_field_chars,
-                            progress_callback=self.progress.emit,
-                            should_stop=lambda: self._stop_event.is_set(),
-                        )
-                    except GlossaryImportError as parse_error:
-                        self.completion_state = TASK_COMPLETION_STATE_FAILURE
-                        self.completion_message = i18n.t("msg_error_importing").format(error=parse_error)
-                        self.task_result = {"error": str(parse_error)}
-                        log_emit(self.log.emit, self.rag_engine.config, 'ERROR', self.completion_message, exc=parse_error, module='gui_main', func='GlossaryWorker.run')
-                        self.finished.emit()
-                        return
+                    parsed = self.parsed
+                    if parsed is None:
+                        try:
+                            parsed = parse_glossary_file(
+                                self.data,
+                                max_rows=max_rows,
+                                max_field_chars=max_field_chars,
+                                progress_callback=self.progress.emit,
+                                should_stop=lambda: self._stop_event.is_set(),
+                            )
+                        except GlossaryImportError as parse_error:
+                            self.completion_state = TASK_COMPLETION_STATE_FAILURE
+                            self.completion_message = i18n.t("msg_error_importing").format(error=parse_error)
+                            self.task_result = {"error": str(parse_error)}
+                            log_emit(self.log.emit, self.rag_engine.config, 'ERROR', self.completion_message, exc=parse_error, module='gui_main', func='GlossaryWorker.run')
+                            self.finished.emit()
+                            return
+                    self.parsed_result = parsed
+                    self.preview_text = summarize_import(parsed)
                     terms, invalid_rows, limited_rows = parsed.terms, parsed.invalid_rows, parsed.limited_rows
                     skipped_rows = invalid_rows + limited_rows
                     self.task_result = {
@@ -550,6 +572,38 @@ class GlossaryWorker(QThread):
             pass
         self._sync_engine_flags()
         log_emit(self.log.emit, self.rag_engine.config, 'INFO', i18n.t("msg_task_resumed"), module='gui_main', func='GlossaryWorker.resume')
+
+class AddTermWorker(QThread):
+    """F-10: add a glossary term (and its embedding) off the UI thread."""
+
+    completed = pyqtSignal(str, str, str)  # source, dest, error ("" = success)
+
+    def __init__(self, rag_engine, term: str, translation: str):
+        super().__init__()
+        self.rag_engine = rag_engine
+        self.term = term
+        self.translation = translation
+
+    def run(self) -> None:
+        error = ""
+        try:
+            self.rag_engine.add_term(self.term, self.translation)
+            # Engine.add_term swallows embedding failures; reflect them through
+            # the index status so the GUI can warn and mark the index incomplete.
+            try:
+                status = self.rag_engine.get_vector_index_status()
+                if not getattr(status, "is_ready", False) or getattr(status, "is_stale", False):
+                    error = str(
+                        getattr(status, "detail", "")
+                        or getattr(status, "reason", "")
+                        or "vector index incomplete"
+                    )
+            except Exception:
+                pass
+        except Exception as exc:
+            error = str(exc)
+        self.completed.emit(self.term, self.translation, error)
+
 
 class Worker(QThread):
     progress = pyqtSignal(int)
@@ -1197,6 +1251,21 @@ class XmlLoadWorker(QThread):
             if self._stop_event.is_set():
                 return
             file_type = detect_translation_file_type_from_extension(self.file_path)
+            if file_type == FILE_TYPE_MCM:
+                # M-10: content-aware check.  The GUI used to trust ``.txt``
+                # blindly and feed arbitrary text to MCMProcessor.
+                try:
+                    detected_type = detect_translation_file_type(self.file_path)
+                except Exception:
+                    detected_type = FILE_TYPE_MCM
+                if detected_type != FILE_TYPE_MCM:
+                    self.load_failed.emit(
+                        i18n.t(
+                            "msg_unsupported_translation_file",
+                            "Unsupported file type: {ext}.",
+                        ).format(ext=describe_extension(self.file_path))
+                    )
+                    return
             if file_type == FILE_TYPE_XML:
                 try:
                     tree = parse_xml_file(self.file_path)
@@ -1224,7 +1293,12 @@ class XmlLoadWorker(QThread):
             else:
                 proc = XMLProcessor()
             if not proc.load_file(self.file_path):
-                self.load_failed.emit("load_file returned False")
+                detail = str(getattr(proc, "last_load_error", "") or "").strip()
+                self.load_failed.emit(
+                    i18n.t("msg_load_failed_detail", "Failed to load: {error}").format(
+                        error=detail or self.file_path
+                    )
+                )
                 return
             strings = list(proc.get_strings())
             self.loaded.emit(file_type, proc, strings)
@@ -1365,6 +1439,86 @@ class LogHighlighter(QSyntaxHighlighter):
             self.setCurrentBlockState(self.STATE_ERROR)
 
 
+class RAGNotReadyError(RuntimeError):
+    """Raised when RAG-backed state is used before the background load finishes."""
+
+
+class _DeferredRAGEngine:
+    """Cheap stand-in for ``RAGEngine`` until the lazy startup load runs (F-13).
+
+    Building ``RAGEngine`` loads the glossary/vector index synchronously, which
+    dominated ``MainWindow()`` for large glossaries (601ms at 30k terms).  The
+    proxy exposes ``config``/``llm_client`` immediately so ``Translator`` can be
+    constructed, forwards everything else to the real engine once
+    ``initialize()`` ran, and raises ``RAGNotReadyError`` before that so GUI
+    callers are forced through ``MainWindow._ensure_rag_ready()``.
+    """
+
+    def __init__(self, config_manager, llm_client, factory=None):
+        self.config = config_manager
+        self.llm_client = llm_client
+        self._factory = factory
+        self._engine = None
+        self._lock = threading.RLock()
+
+    @property
+    def is_ready(self) -> bool:
+        return self._engine is not None
+
+    def get_engine(self):
+        return self._engine
+
+    def initialize(self):
+        with self._lock:
+            if self._engine is None:
+                factory = self._factory
+                if callable(factory):
+                    engine = factory()
+                else:
+                    # Local import keeps the module import itself cheap and lets
+                    # tests monkeypatch either symbol.
+                    from src.rag.engine import RAGEngine as _RealRAGEngine
+
+                    engine = _RealRAGEngine(self.config, self.llm_client)
+                self._engine = engine
+            return self._engine
+
+    def __getattr__(self, name):
+        try:
+            engine = object.__getattribute__(self, "_engine")
+        except AttributeError as exc:  # pragma: no cover - construction order only
+            raise AttributeError(name) from exc
+        if engine is None:
+            raise RAGNotReadyError(
+                f"RAG engine is still initializing (attribute {name!r} is unavailable)"
+            )
+        return getattr(engine, name)
+
+
+_ACTIVE_RAG_DEBUG_WORKERS: set = set()
+
+
+class _RAGDebugWorker(QThread):
+    """F-11: computes RAG debug info (which may issue an LLM request) off-thread."""
+
+    ready = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, translator, original_text: str, context_hint=None):
+        super().__init__()
+        self._translator = translator
+        self._original_text = original_text
+        self._context_hint = context_hint
+
+    def run(self) -> None:
+        try:
+            debug_info = self._translator.get_rag_debug_info(
+                self._original_text, use_rag=True, context_hint=self._context_hint)
+            self.ready.emit(debug_info)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class RAGVisualizationDialog(QDialog):
     """对话框用于可视化展示RAG处理过程"""
     def __init__(self, parent, original_text, translated_text, translator,
@@ -1376,13 +1530,56 @@ class RAGVisualizationDialog(QDialog):
         self.cached_debug_info = cached_debug_info
         self.context_hint = context_hint
         self.debug_info = None
-        
+        self._debug_worker: Optional[_RAGDebugWorker] = None
+
         self.setWindowTitle(i18n.t("title_rag_visualization"))
         self.resize(1100, 800)
-        
+
         self._setup_ui()
+        if self.cached_debug_info:
+            self._load_rag_info()
+        else:
+            # F-11: never block the GUI thread on the (possibly 120s) request;
+            # show the dialog skeleton immediately and fill it when ready.
+            self._show_loading_skeleton()
+            self._start_debug_worker()
+
+    def _show_loading_skeleton(self) -> None:
+        self.rag_tree.clear()
+        item = QTreeWidgetItem([i18n.t("msg_rag_analyzing"), ""])
+        self.rag_tree.addTopLevelItem(item)
+        self.detail_title.setText(i18n.t("msg_rag_analyzing"))
+        self.detail_text.setPlainText(i18n.t("msg_rag_analyzing_hint"))
+
+    def _start_debug_worker(self) -> None:
+        worker = _RAGDebugWorker(self.translator, self.original_text, self.context_hint)
+        worker.ready.connect(self._on_debug_info_ready)
+        worker.failed.connect(self._on_debug_info_failed)
+        # Keep a module-level reference so closing the dialog cannot destroy a
+        # still-running QThread (Qt aborts in that case).
+        _ACTIVE_RAG_DEBUG_WORKERS.add(worker)
+        worker.finished.connect(lambda w=worker: _ACTIVE_RAG_DEBUG_WORKERS.discard(w))
+        worker.finished.connect(worker.deleteLater)
+        self._debug_worker = worker
+        worker.start()
+
+    def _on_debug_info_ready(self, debug_info) -> None:
+        self.debug_info = debug_info if isinstance(debug_info, dict) else {}
+        self.rag_tree.clear()
         self._load_rag_info()
-    
+
+    def _on_debug_info_failed(self, message: str) -> None:
+        self.rag_tree.clear()
+        self.rag_tree.addTopLevelItem(
+            QTreeWidgetItem([f"{i18n.t('msg_rag_analysis_failed')}: {message}", ""]))
+        self.detail_title.setText(i18n.t("msg_rag_analysis_failed"))
+        self.detail_text.setPlainText(str(message or ""))
+
+    def closeEvent(self, event) -> None:
+        # The worker is owned by the module-level live set, so a slow request
+        # may finish after the dialog closes without destroying a running thread.
+        super().closeEvent(event)
+
     def _setup_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -1804,7 +2001,9 @@ class RAGVisualizationDialog(QDialog):
         """加载并显示RAG处理信息"""
         try:
             # 优先使用缓存的RAG调试信息，避免重复翻译
-            if self.cached_debug_info:
+            if self.debug_info:
+                debug_info = self.debug_info
+            elif self.cached_debug_info:
                 debug_info = self.cached_debug_info
             else:
                 # 如果没有缓存，才重新获取RAG调试信息
@@ -2166,6 +2365,11 @@ class RAGVisualizationDialog(QDialog):
 
 
 class MainWindow(QMainWindow):
+    # F-14: worker threads must not touch GUI-thread QTimers.  ``log()`` emits
+    # this signal from a non-GUI thread and the (queued) slot runs in the GUI
+    # thread, so ``QTimer.start()`` is always called from the right thread.
+    _log_forward = pyqtSignal(str)
+
     ROW_STATUS_UNTRANSLATED = "untranslated"
     ROW_STATUS_SUCCESS = "success"
     ROW_STATUS_WARNING = "warning"
@@ -2216,6 +2420,7 @@ class MainWindow(QMainWindow):
         self._log_flush_timer = QTimer(self)
         self._log_flush_timer.setInterval(self.LOG_FLUSH_INTERVAL_MS)
         self._log_flush_timer.timeout.connect(self._flush_log_buffer)
+        self._log_forward.connect(self._append_log_text)
 
         # F-02: coalesce status summary label refreshes (100ms).
         self._summary_timer = QTimer(self)
@@ -2224,7 +2429,17 @@ class MainWindow(QMainWindow):
         self._summary_timer.timeout.connect(self._refresh_status_summary_labels)
 
         self.llm_client = LLMClient(self.config_manager, log_callback=self.log)
-        self.rag_engine = RAGEngine(self.config_manager, self.llm_client)
+        # F-13: constructing RAGEngine loads the full glossary/vector index and
+        # used to dominate startup.  A deferred proxy is installed immediately
+        # and the real engine is built once the window is shown.
+        self._rag_engine_factory = None
+        self.rag_engine = _DeferredRAGEngine(self.config_manager, self.llm_client)
+        self._rag_ready = False
+        self._rag_init_scheduled = False
+        # F-08: cached lower-cased glossary display strings + search debounce.
+        self._glossary_search_cache: list[tuple[str, str]] = []
+        self._glossary_search_cache_key = None
+        self._glossary_revision = 0
         self.xml_processor = XMLProcessor()
         self.esp_xml_processor = ESPXMLProcessor()
         self.mcm_processor = MCMProcessor()
@@ -2238,6 +2453,8 @@ class MainWindow(QMainWindow):
         self.search_fallback_param_controls = {}
         self.worker = None  # Translation worker reference
         self.glossary_worker = None  # Glossary worker reference
+        self._import_preview_worker = None
+        self._import_preview_path = ""
         self.stop_receiving_results = False  # Flag to immediately stop receiving translation results
         self._translation_task_active = False
         self._glossary_task_active = False
@@ -2274,6 +2491,141 @@ class MainWindow(QMainWindow):
         self.items_per_page = 200
 
         self.init_ui()
+
+    # --- F-13: lazy RAG startup -------------------------------------------
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._schedule_lazy_rag_init()
+
+    def _schedule_lazy_rag_init(self) -> None:
+        if self._rag_ready or self._rag_init_scheduled:
+            return
+        self._rag_init_scheduled = True
+        # 0ms: run as soon as the window has painted, never on the startup path.
+        QTimer.singleShot(0, self._lazy_init_rag)
+
+    def _lazy_init_rag(self) -> None:
+        """Build the real RAGEngine after the window is visible (F-13)."""
+        if self._rag_ready:
+            return
+        self._rag_init_scheduled = True
+        proxy = self.rag_engine
+        factory = getattr(self, "_rag_engine_factory", None)
+        if callable(factory) and hasattr(proxy, "_factory"):
+            try:
+                proxy._factory = factory
+            except Exception:
+                pass
+        try:
+            proxy.initialize()
+        except Exception as exc:
+            self._rag_ready = False
+            log_emit(self.log, self.config_manager, 'ERROR',
+                     i18n.t("msg_rag_index_init_failed").format(error=exc),
+                     exc=exc, module='gui_main', func='_lazy_init_rag')
+            self._show_status_hint(i18n.t("msg_rag_index_init_failed").format(error=exc))
+            self._set_rag_dependent_controls_enabled(False)
+            return
+        self._rag_ready = True
+        self._set_rag_dependent_controls_enabled(True)
+        self._show_status_hint(i18n.t("msg_rag_index_ready"), timeout_ms=4000)
+        log_emit(self.log, self.config_manager, 'INFO',
+                 i18n.t("msg_rag_index_ready"),
+                 module='gui_main', func='_lazy_init_rag')
+        try:
+            self._warn_if_glossary_corrupt()
+        except Exception:
+            pass
+        try:
+            self.refresh_term_list()
+        except Exception:
+            pass
+        try:
+            self.update_translate_buttons_enabled()
+        except Exception:
+            pass
+
+    def _warn_if_glossary_corrupt(self) -> None:
+        """G-01: surface a quarantined glossary/sidecar instead of a silent empty DB."""
+        engine = None
+        try:
+            get_engine = getattr(self.rag_engine, "get_engine", None)
+            if callable(get_engine):
+                engine = get_engine()
+        except Exception:
+            engine = None
+        manager = getattr(engine, "_glossary_mgr", None)
+        get_status = getattr(manager, "get_corruption_status", None)
+        if not callable(get_status):
+            return
+        try:
+            status = get_status() or {}
+        except Exception:
+            return
+
+        first_message = ""
+        for key in ("glossary", "sidecar"):
+            info = status.get(key)
+            if not isinstance(info, dict) or not info:
+                continue
+            message = i18n.t(
+                "msg_glossary_corrupt",
+                "The glossary file could not be read and was quarantined to: {path}. Reason: {error}",
+            ).format(
+                path=str(info.get("quarantined_to") or info.get("path") or ""),
+                error=str(info.get("error") or ""),
+            )
+            log_emit(self.log, self.config_manager, 'WARNING', message,
+                     module='gui_main', func='_warn_if_glossary_corrupt')
+            if not first_message:
+                first_message = message
+        if first_message:
+            QMessageBox.warning(self, i18n.t("title_warning"), first_message)
+
+    def _ensure_rag_ready(self, notify: bool = True):
+        """Return the live engine, or None + a hint while it is still loading."""
+        engine = getattr(self, "rag_engine", None)
+        if engine is not None:
+            ready_flag = getattr(engine, "is_ready", None)
+            # Objects without an is_ready flag are assumed to be real engines
+            # (e.g. tests injecting one directly).
+            if ready_flag is None or ready_flag:
+                return engine
+        if notify:
+            self._show_status_hint(i18n.t("msg_rag_index_initializing"))
+        if not getattr(self, "_rag_init_scheduled", False):
+            self._schedule_lazy_rag_init()
+        return None
+
+    def _show_status_hint(self, message: str, timeout_ms: int = 0) -> None:
+        try:
+            status_bar = self.statusBar()
+        except Exception:
+            status_bar = None
+        if status_bar is not None:
+            status_bar.showMessage(str(message or ""), int(timeout_ms))
+
+    def _set_rag_dependent_controls_enabled(self, enabled: bool) -> None:
+        for name in (
+            "start_btn",
+            "trans_sel_btn",
+            "visualize_rag_btn",
+            "add_term_btn",
+            "delete_term_btn",
+            "import_glossary_btn",
+            "rebuild_index_btn",
+        ):
+            widget = getattr(self, name, None)
+            if widget is not None:
+                try:
+                    widget.setEnabled(bool(enabled))
+                except Exception:
+                    pass
+        if enabled:
+            try:
+                self.update_translate_buttons_enabled()
+            except Exception:
+                pass
 
     @staticmethod
     def _build_dark_palette() -> QPalette:
@@ -2552,13 +2904,18 @@ class MainWindow(QMainWindow):
 
     def _apply_dynamic_styles(self) -> None:
         is_dark = self._is_dark_palette()
-        self.setStyleSheet(self._get_window_stylesheet(is_dark))
-        self._apply_config_tab_style_sheet()
-        self._update_summary_title_style()
-        self._update_status_filter_bubble_styles()
-        if hasattr(self, "row_status_map"):
-            for row in range(self.trans_table.rowCount() if hasattr(self, "trans_table") else 0):
-                self._apply_row_status_style(row)
+        # F-12: theme switching used to restyle every row (and repaint the whole
+        # window) per row.  Batch the whole window + all rows into one repaint.
+        self.setUpdatesEnabled(False)
+        try:
+            self.setStyleSheet(self._get_window_stylesheet(is_dark))
+            self._apply_config_tab_style_sheet()
+            self._update_summary_title_style()
+            self._update_status_filter_bubble_styles()
+            if hasattr(self, "row_status_map"):
+                self._restyle_all_rows(is_dark)
+        finally:
+            self.setUpdatesEnabled(True)
         if self._log_highlighter is not None:
             self._log_highlighter.update_colors(self._is_dark_palette())
 
@@ -3080,6 +3437,8 @@ class MainWindow(QMainWindow):
         workers = (
             ("xml load", getattr(self, "_xml_load_worker", None), "request_stop"),
             ("glossary", getattr(self, "glossary_worker", None), "stop"),
+            ("import preview", getattr(self, "_import_preview_worker", None), "stop"),
+            ("add term", getattr(self, "_add_term_worker", None), "quit"),
             ("translation", getattr(self, "worker", None), "stop"),
         )
         for label, worker, stop_method in workers:
@@ -3291,7 +3650,10 @@ class MainWindow(QMainWindow):
 
         main_layout.addWidget(splitter)
         self._flush_log_buffer()
-
+        # F-13: RAG-backed controls stay disabled until the deferred index load
+        # finishes (see _lazy_init_rag); the status bar explains why.
+        self._set_rag_dependent_controls_enabled(False)
+        self._show_status_hint(i18n.t("msg_rag_index_initializing"))
     def create_translate_tab(self):
         widget = QWidget()
         layout = QVBoxLayout()
@@ -3627,35 +3989,38 @@ class MainWindow(QMainWindow):
         hidden = selected != "all" and status != selected
         self.trans_table.setRowHidden(row, hidden)
 
-    def _apply_row_status_style(self, row: int) -> None:
-        status = self.row_status_map.get(row, self.ROW_STATUS_UNTRANSLATED)
-        is_dark = self._is_dark_palette()
+    def _row_status_colors(self, is_dark: bool) -> dict[str, QColor]:
         if is_dark:
-            if status == self.ROW_STATUS_SUCCESS:
-                color = QColor("#1a5c30")
-            elif status == self.ROW_STATUS_WARNING:
-                color = QColor("#5c4500")
-            elif status == self.ROW_STATUS_FAILED:
-                color = QColor("#5c1c1c")
-            else:
-                color = QColor("#1e2228")
-        else:
-            if status == self.ROW_STATUS_SUCCESS:
-                color = QColor("#E8F5E9")
-            elif status == self.ROW_STATUS_WARNING:
-                color = QColor("#FFF9C4")
-            elif status == self.ROW_STATUS_FAILED:
-                color = QColor("#FFEBEE")
-            else:
-                color = QColor("#F5F5F5")
+            return {
+                self.ROW_STATUS_SUCCESS: QColor("#1a5c30"),
+                self.ROW_STATUS_WARNING: QColor("#5c4500"),
+                self.ROW_STATUS_FAILED: QColor("#5c1c1c"),
+                self.ROW_STATUS_UNTRANSLATED: QColor("#1e2228"),
+            }
+        return {
+            self.ROW_STATUS_SUCCESS: QColor("#E8F5E9"),
+            self.ROW_STATUS_WARNING: QColor("#FFF9C4"),
+            self.ROW_STATUS_FAILED: QColor("#FFEBEE"),
+            self.ROW_STATUS_UNTRANSLATED: QColor("#F5F5F5"),
+        }
+
+    def _apply_row_status_style(self, row: int, is_dark: Optional[bool] = None) -> None:
+        table = getattr(self, "trans_table", None)
+        if table is None:
+            return
+        if is_dark is None:
+            is_dark = self._is_dark_palette()
+        colors = self._row_status_colors(bool(is_dark))
+        status = self.row_status_map.get(row, self.ROW_STATUS_UNTRANSLATED)
+        color = colors.get(status, colors[self.ROW_STATUS_UNTRANSLATED])
 
         error_text = self.row_error_map.get(row, "")
         # P1-19: styling must not emit itemChanged (which would be mistaken
         # for a user edit and could downgrade a FAILED/WARNING row).
-        was_blocked = self.trans_table.blockSignals(True)
+        was_blocked = table.blockSignals(True)
         try:
-            for col in range(self.trans_table.columnCount()):
-                item = self.trans_table.item(row, col)
+            for col in range(table.columnCount()):
+                item = table.item(row, col)
                 if item is None:
                     continue
                 item.setBackground(color)
@@ -3664,7 +4029,47 @@ class MainWindow(QMainWindow):
                 else:
                     item.setToolTip("")
         finally:
-            self.trans_table.blockSignals(was_blocked)
+            table.blockSignals(was_blocked)
+
+    def _restyle_all_rows(self, is_dark: Optional[bool] = None) -> None:
+        """F-12: restyle every table row in one batched, signal-free pass.
+
+        The previous implementation called ``_apply_row_status_style`` per row,
+        which re-read the application palette, blocked/unblocked signals and
+        forced a repaint for each of up to 10k rows (theme switch ~2s).
+        """
+        table = getattr(self, "trans_table", None)
+        if table is None:
+            return
+        row_count = table.rowCount()
+        if row_count <= 0:
+            return
+        if is_dark is None:
+            is_dark = self._is_dark_palette()
+        colors = self._row_status_colors(bool(is_dark))
+        fallback_color = colors[self.ROW_STATUS_UNTRANSLATED]
+        status_map = getattr(self, "row_status_map", {})
+        error_map = getattr(self, "row_error_map", {})
+        failure_states = {self.ROW_STATUS_FAILED, self.ROW_STATUS_WARNING}
+        column_count = table.columnCount()
+
+        was_blocked = table.blockSignals(True)
+        table.setUpdatesEnabled(False)
+        try:
+            for row in range(row_count):
+                status = status_map.get(row, self.ROW_STATUS_UNTRANSLATED)
+                color = colors.get(status, fallback_color)
+                error_text = error_map.get(row, "")
+                tooltip = error_text if error_text and status in failure_states else ""
+                for col in range(column_count):
+                    item = table.item(row, col)
+                    if item is None:
+                        continue
+                    item.setBackground(color)
+                    item.setToolTip(tooltip)
+        finally:
+            table.setUpdatesEnabled(True)
+            table.blockSignals(was_blocked)
 
     def _sync_translation_progress_bar(self) -> None:
         if not hasattr(self, "progress_bar"):
@@ -3696,6 +4101,7 @@ class MainWindow(QMainWindow):
         self.term_dest = QLineEdit()
         add_btn = QPushButton(i18n.t("btn_add_save"))
         add_btn.clicked.connect(self.add_term)
+        self.add_term_btn = add_btn
         
         add_layout.addRow(i18n.t("label_source"), self.term_source)
         add_layout.addRow(i18n.t("label_dest"), self.term_dest)
@@ -3707,7 +4113,12 @@ class MainWindow(QMainWindow):
         search_layout = QHBoxLayout()
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText(i18n.t("placeholder_search_term"))
-        self.search_input.textChanged.connect(self.refresh_term_list)
+        # F-08: debounce keystrokes; the actual filter runs once after 150ms.
+        self._glossary_search_timer = QTimer(self)
+        self._glossary_search_timer.setSingleShot(True)
+        self._glossary_search_timer.setInterval(150)
+        self._glossary_search_timer.timeout.connect(self._run_glossary_search)
+        self.search_input.textChanged.connect(self._schedule_glossary_search)
         search_layout.addWidget(QLabel(i18n.t("label_search")))
         search_layout.addWidget(self.search_input)
         layout.addLayout(search_layout)
@@ -4859,11 +5270,24 @@ class MainWindow(QMainWindow):
         if not self._log_queue and self._log_dropped_count <= 0 and self._log_flush_timer.isActive():
             self._log_flush_timer.stop()
 
-    def log(self, message):
-        formatted = self._format_compat_log_line(str(message))
+    def _append_log_text(self, formatted: str) -> None:
+        """GUI-thread log sink; queues lines and (re)starts the flush timer."""
         self._enqueue_log_text(formatted)
         if not self._log_flush_timer.isActive():
             self._log_flush_timer.start()
+
+    def log(self, message):
+        formatted = self._format_compat_log_line(str(message))
+        # F-14: QTimer.start() is only legal in the owning (GUI) thread.  Worker
+        # threads hop through a queued signal instead of touching the timer.
+        try:
+            in_gui_thread = QThread.currentThread() is self.thread()
+        except Exception:
+            in_gui_thread = True
+        if not in_gui_thread:
+            self._log_forward.emit(formatted)
+            return
+        self._append_log_text(formatted)
 
     def _check_index_fingerprint_before_translate(self) -> bool:
         """Check if the vector index model matches current config before translation.
@@ -4871,6 +5295,8 @@ class MainWindow(QMainWindow):
         Returns True if translation can proceed, False if the user chose to
         rebuild the index instead.
         """
+        if self._ensure_rag_ready(notify=False) is None:
+            return True
         try:
             status = self.rag_engine.get_vector_index_status()
         except Exception:
@@ -4921,6 +5347,8 @@ class MainWindow(QMainWindow):
         return True
 
     def start_translation(self):
+        if not _window_rag_ready(self):
+            return
         # Bug #5: Prevent concurrent translation tasks
         if self._translation_task_active:
             log_emit(self.log, self.config_manager, 'WARNING',
@@ -5178,9 +5606,14 @@ class MainWindow(QMainWindow):
             self._xml_load_worker = None
 
     def _on_xml_load_failed(self, error: str):
-        self.log(i18n.t("msg_failed_load_xml") + f": {error}")
-        QMessageBox.warning(self, i18n.t("title_error"),
-                            i18n.t("msg_failed_load_xml"))
+        detail = str(error or "").strip()
+        self.log(i18n.t("msg_failed_load_xml") + f": {detail}")
+        message = i18n.t("msg_failed_load_xml")
+        if detail:
+            # X-10: surface the real reason (missing lxml, DTD, encoding...)
+            # instead of a generic "load_file returned False".
+            message = f"{message}\n\n{detail[:400]}"
+        QMessageBox.warning(self, i18n.t("title_error"), message)
 
     def _on_xml_load_finished(self, file_type: str, proc, strings: list):
         if file_type in {FILE_TYPE_RAW_PLUGIN, FILE_TYPE_UNSUPPORTED}:
@@ -5333,15 +5766,29 @@ class MainWindow(QMainWindow):
         self.update_translate_buttons_enabled()
         return True
 
+    def _log_save_warnings(self, processor) -> None:
+        """X-01: surface non-fatal fidelity fallbacks (encoding downgrade...)."""
+        warnings = getattr(processor, "last_save_warnings", None)
+        if not warnings:
+            return
+        for warning in list(warnings)[:5]:
+            self.log(
+                i18n.t("msg_save_warning", "Save warning: {warning}").format(
+                    warning=warning
+                )
+            )
+
     def save_xml_file(self):
         self.log(i18n.t("msg_saving_file"))
         try:
             if self.current_file_type == FILE_TYPE_MCM:
                 output_path = self._save_mcm_with_configured_suffix()
                 self.log(i18n.t("msg_mcm_saved_path").format(path=output_path))
+                self._log_save_warnings(self.mcm_processor)
             else:
                 if not self.current_processor.save_file():
                     raise RuntimeError(i18n.t("msg_failed_save").format(error="save failed"))
+                self._log_save_warnings(self.current_processor)
             self.log(i18n.t("msg_file_saved"))
             QMessageBox.information(self, i18n.t("title_success"), i18n.t("msg_file_saved_short"))
         except Exception as e:
@@ -5365,10 +5812,13 @@ class MainWindow(QMainWindow):
             self.log(i18n.t("msg_saving_as").format(path=fname))
             try:
                 if self.current_file_type == FILE_TYPE_MCM:
-                    self.mcm_processor.save_file(fname)
+                    if not self.mcm_processor.save_file(fname):
+                        raise RuntimeError(i18n.t("msg_failed_save").format(error="save failed"))
+                    self._log_save_warnings(self.mcm_processor)
                 else:
                     if not self.current_processor.save_file(fname):
                         raise RuntimeError(i18n.t("msg_failed_save").format(error="save failed"))
+                    self._log_save_warnings(self.current_processor)
                 self.log(i18n.t("msg_file_saved"))
                 QMessageBox.information(self, i18n.t("title_success"), i18n.t("msg_file_saved_short"))
             except Exception as e:
@@ -5603,6 +6053,14 @@ class MainWindow(QMainWindow):
             "text_kind": text_kind,
             "whitespace_policy": whitespace_policy,
         }
+        # Q-46: dialogue lines get the previous line as an anaphora/honorific
+        # hint.  Deliberately not part of Worker._translation_context_signature:
+        # identical source lines must keep deduping even with different neighbours.
+        if text_kind == "dialogue" and row > 0:
+            prev_item = self.trans_table.item(row - 1, 1)
+            prev_source = str(prev_item.text() or "").strip() if prev_item is not None else ""
+            if prev_source and prev_source != str(source_text or "").strip():
+                context["previous_source"] = prev_source[:400]
         if self.current_file_type == FILE_TYPE_ESP_XML and node is not None:
             context.update(self.esp_xml_processor.get_entry_context(node))
         elif self.current_file_type == FILE_TYPE_XML:
@@ -5697,18 +6155,75 @@ class MainWindow(QMainWindow):
             self._play_task_completion_sound(completion_state)
 
     def add_term(self):
+        if not _window_rag_ready(self):
+            return
         source = self.term_source.text().strip()
         dest = self.term_dest.text().strip()
-        if source and dest:
-            self.rag_engine.add_term(source, dest)
-            self.term_source.clear()
-            self.term_dest.clear()
-            self.refresh_term_list()
-            self.log(i18n.t("msg_added_term").format(source=source, dest=dest))
-        else:
+        if not (source and dest):
             QMessageBox.warning(self, i18n.t("title_error"), i18n.t("msg_empty_source_dest"))
+            return
+
+        add_btn = getattr(self, "add_term_btn", None)
+        if add_btn is not None:
+            add_btn.setEnabled(False)
+        self.term_source.clear()
+        self.term_dest.clear()
+        worker = AddTermWorker(self.rag_engine, source, dest)
+        self._add_term_worker = worker
+        worker.completed.connect(self._on_add_term_finished)
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+
+    def _on_add_term_finished(self, source: str, dest: str, error: str) -> None:
+        add_btn = getattr(self, "add_term_btn", None)
+        if add_btn is not None and self._ensure_rag_ready(notify=False) is not None:
+            add_btn.setEnabled(True)
+        self._invalidate_glossary_search_cache()
+        try:
+            self.refresh_term_list()
+        except RAGNotReadyError:
+            pass
+        if error:
+            self._mark_index_incomplete()
+            message = i18n.t("msg_added_term_index_pending").format(
+                source=source, error=error)
+            self._show_status_hint(message)
+            log_emit(self.log, self.config_manager, 'WARNING', message,
+                     module='gui_main', func='_on_add_term_finished')
+        else:
+            self.log(i18n.t("msg_added_term").format(source=source, dest=dest))
+
+    def _mark_index_incomplete(self) -> None:
+        """Best-effort 'index is missing a term' marker after an embedding failure."""
+        if self._ensure_rag_ready(notify=False) is None:
+            return
+        mark = getattr(self.rag_engine, "mark_index_incomplete", None)
+        if callable(mark):
+            try:
+                mark()
+                return
+            except Exception:
+                pass
+        engine = self._ensure_rag_ready(notify=False)
+        if engine is None:
+            return
+        store = getattr(engine, "_vector_store", None)
+        if store is None:
+            return
+        try:
+            save = getattr(store, "_save_index_metadata", None)
+            if callable(save):
+                save(complete=False, expected_term_count=max(1, len(engine.glossary)))
+        except Exception:
+            pass
+        try:
+            store.refresh_index_status()
+        except Exception:
+            pass
 
     def delete_selected_terms(self):
+        if not _window_rag_ready(self):
+            return
         selected_items = self.term_list.selectedItems()
         if not selected_items:
             return
@@ -5728,42 +6243,101 @@ class MainWindow(QMainWindow):
             
             if terms_to_delete:
                 self.rag_engine.delete_terms_batch(terms_to_delete)
+                self._invalidate_glossary_search_cache()
                 self.refresh_term_list()
                 self.log(i18n.t("msg_deleted_terms").format(count=len(terms_to_delete)))
 
+    def _schedule_glossary_search(self, _text: Optional[str] = None) -> None:
+        """F-08: coalesce keystrokes; filtering runs 150ms after the last one."""
+        timer = getattr(self, "_glossary_search_timer", None)
+        if timer is None:
+            self.refresh_term_list()
+            return
+        self.current_page = 1
+        timer.start()
+
+    def _run_glossary_search(self) -> None:
+        self.refresh_term_list()
+
+    def _invalidate_glossary_search_cache(self) -> None:
+        self._glossary_search_cache = []
+        self._glossary_search_cache_key = None
+        self._glossary_revision = int(getattr(self, "_glossary_revision", 0)) + 1
+
+    def _glossary_search_entries(self) -> list[tuple[str, str]]:
+        """Return ``(display, lowercased_display)`` for every glossary term.
+
+        The f-string + ``lower()`` pair used to be rebuilt for all terms on
+        every keystroke (21ms per key at 100k terms); cache it until the
+        glossary revision changes.
+        """
+        engine = self._ensure_rag_ready(notify=False)
+        if engine is None:
+            return []
+        try:
+            glossary = engine.glossary
+        except Exception:
+            return []
+        key = (
+            id(glossary),
+            len(glossary),
+            int(getattr(self, "_glossary_revision", 0)),
+        )
+        if self._glossary_search_cache_key == key:
+            return self._glossary_search_cache
+        entries: list[tuple[str, str]] = []
+        for term, trans in list(glossary.items()):
+            display = f"{term} -> {trans}"
+            entries.append((display, display.lower()))
+        self._glossary_search_cache = entries
+        self._glossary_search_cache_key = key
+        return entries
+
     def refresh_term_list(self):
+        if self._ensure_rag_ready(notify=False) is None:
+            # F-13: index still loading — show a hint instead of raising
+            # RAGNotReadyError from the deferred engine proxy.
+            if hasattr(self, "term_list"):
+                self.term_list.clear()
+            if hasattr(self, "page_label"):
+                self.page_label.setText(i18n.t("msg_rag_index_initializing"))
+            if hasattr(self, "prev_btn"):
+                self.prev_btn.setEnabled(False)
+            if hasattr(self, "next_btn"):
+                self.next_btn.setEnabled(False)
+            return
+
         filter_text = ""
         if hasattr(self, 'search_input'):
-            filter_text = self.search_input.text().lower()
+            filter_text = self.search_input.text().strip().lower()
 
-        # Reset to page 1 if searching (optional, but good UX)
-        # But we need to be careful not to reset if just refreshing after delete on same page
-        # For simplicity, let's keep current page unless out of bounds, but if filter changes...
-        # Let's just filter first.
-        
-        all_items = []
-        for term, trans in list(self.rag_engine.glossary.items()):
-            display_text = f"{term} -> {trans}"
-            if not filter_text or filter_text in display_text.lower():
-                all_items.append(display_text)
-        
-        total_items = len(all_items)
+        entries = self._glossary_search_entries()
+        if filter_text:
+            matched = [display for display, lowered in entries if filter_text in lowered]
+            total_items = len(matched)
+        else:
+            matched = None
+            total_items = len(entries)
+
         total_pages = (total_items + self.items_per_page - 1) // self.items_per_page
         if total_pages < 1: total_pages = 1
-        
+
         if self.current_page > total_pages:
             self.current_page = total_pages
         if self.current_page < 1:
             self.current_page = 1
-            
+
         start_idx = (self.current_page - 1) * self.items_per_page
         end_idx = start_idx + self.items_per_page
-        page_items = all_items[start_idx:end_idx]
-        
+        if matched is not None:
+            page_items = matched[start_idx:end_idx]
+        else:
+            page_items = [display for display, _lowered in entries[start_idx:end_idx]]
+
         self.term_list.clear()
         for item in page_items:
             self.term_list.addItem(item)
-            
+
         self.page_label.setText(i18n.t("pagination_status").format(current=self.current_page, total=total_pages, count=total_items))
         self.prev_btn.setEnabled(self.current_page > 1)
         self.next_btn.setEnabled(self.current_page < total_pages)
@@ -5781,6 +6355,8 @@ class MainWindow(QMainWindow):
         self.refresh_term_list()
 
     def rebuild_index(self):
+        if not _window_rag_ready(self):
+            return
         if self._glossary_task_active or (self.glossary_worker is not None and self.glossary_worker.isRunning()):
             log_emit(self.log, self.config_manager, 'WARNING',
                      i18n.t("msg_glossary_task_already_running"),
@@ -5810,6 +6386,8 @@ class MainWindow(QMainWindow):
         self.glossary_worker.start()
 
     def import_csv(self):
+        if not _window_rag_ready(self):
+            return
         if self._glossary_task_active or (self.glossary_worker is not None and self.glossary_worker.isRunning()):
             log_emit(self.log, self.config_manager, 'WARNING',
                      i18n.t("msg_glossary_task_already_running"),
@@ -5819,45 +6397,72 @@ class MainWindow(QMainWindow):
         if not fname:
             return
         self._remember_last_dir(fname)
+        # F-09: parse/preview in a worker (20k rows used to freeze the UI for
+        # ~28s); its parse result is reused for the real import below.
+        self._start_import_preview(fname)
 
-        # Dry-run preview first: parse + report without touching data.
-        try:
-            from src.rag.glossary_import import parse_glossary_file, summarize_import
-            max_rows = self.config_manager.get("rag", "glossary_import_max_rows", 0)
-            max_field_chars = self.config_manager.get("rag", "glossary_import_max_field_chars", 0)
-            preview = parse_glossary_file(fname, max_rows=max_rows, max_field_chars=max_field_chars)
-            preview_text = summarize_import(preview)
-        except Exception as parse_error:
-            QMessageBox.critical(
-                self, i18n.t("title_error"),
-                i18n.t("msg_error_importing").format(error=parse_error),
-            )
+    def _start_import_preview(self, fname: str) -> None:
+        self._import_preview_path = fname
+        self._import_preview_worker = GlossaryWorker(
+            self.rag_engine, 'import', data=fname, dry_run=True)
+        worker = self._import_preview_worker
+        worker.log.connect(self.log)
+        worker.progress.connect(self.glossary_progress.setValue)
+        worker.finished.connect(self._on_import_preview_finished)
+        self.glossary_progress.setVisible(True)
+        self.glossary_progress.setValue(0)
+        self._glossary_task_active = True
+        self._show_status_hint(i18n.t("msg_import_preview_parsing"))
+        worker.start()
+
+    def _on_import_preview_finished(self) -> None:
+        worker = self._import_preview_worker
+        self._import_preview_worker = None
+        self._glossary_task_active = False
+        self.glossary_progress.setVisible(False)
+        self._show_status_hint("", timeout_ms=1)
+        parsed = getattr(worker, "parsed_result", None)
+        fname = getattr(worker, "data", "") or self._import_preview_path
+        if worker is not None:
+            try:
+                worker.deleteLater()
+            except Exception:
+                pass
+        if parsed is None:
+            message = (
+                getattr(worker, "completion_message", "")
+                if worker is not None else ""
+            ) or i18n.t("msg_glossary_task_failed")
+            QMessageBox.critical(self, i18n.t("title_error"), message)
             return
 
+        preview_text = getattr(worker, "preview_text", "") or ""
         confirm_text = i18n.t("msg_import_preview").format(
-            imported=len(preview.terms),
-            deletes=len(preview.deletes),
-            invalid=preview.invalid_rows,
-            limited=preview.limited_rows,
+            imported=len(parsed.terms),
+            deletes=len(parsed.deletes),
+            invalid=parsed.invalid_rows,
+            limited=parsed.limited_rows,
         ) + "\n" + preview_text
-        if preview.deletes:
-            confirm_text += "\n" + i18n.t("msg_import_contains_deletes").format(count=len(preview.deletes))
+        if parsed.deletes:
+            confirm_text += "\n" + i18n.t("msg_import_contains_deletes").format(count=len(parsed.deletes))
         confirm = QMessageBox.question(
             self, i18n.t("title_import_glossary"), confirm_text,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if confirm != QMessageBox.StandardButton.Yes:
             return
-        confirm_deletes = bool(preview.deletes)
-        if preview.deletes:
+        confirm_deletes = bool(parsed.deletes)
+        if parsed.deletes:
             second = QMessageBox.question(
                 self, i18n.t("title_confirm_delete"),
-                i18n.t("msg_confirm_import_deletes").format(count=len(preview.deletes)),
+                i18n.t("msg_confirm_import_deletes").format(count=len(parsed.deletes)),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if second != QMessageBox.StandardButton.Yes:
                 return
+        self._start_glossary_import(parsed, confirm_deletes, fname)
 
+    def _start_glossary_import(self, parsed, confirm_deletes: bool, fname: str) -> None:
         self.log(i18n.t("msg_importing").format(path=fname))
         self.glossary_progress.setVisible(True)
         self.glossary_progress.setValue(0)
@@ -5876,7 +6481,7 @@ class MainWindow(QMainWindow):
             pass
         self.glossary_worker = GlossaryWorker(
             self.rag_engine, 'import', data=fname, num_threads=num_threads,
-            confirm_deletes=confirm_deletes,
+            confirm_deletes=confirm_deletes, parsed=parsed,
         )
         self.glossary_worker.log.connect(self.log)
         self.glossary_worker.progress.connect(self.glossary_progress.setValue)
@@ -5899,6 +6504,7 @@ class MainWindow(QMainWindow):
         self.resume_btn.setEnabled(False)
         if hasattr(self, "cancel_btn"):
             self.cancel_btn.setEnabled(False)
+        self._invalidate_glossary_search_cache()
         self.refresh_term_list()
         if glossary_task_was_active:
             self._play_task_completion_sound(completion_state)
@@ -6007,7 +6613,16 @@ class MainWindow(QMainWindow):
             }
 
         previous_language = self.config_manager.get("general", "language", "auto")
-        previous_embedding_fingerprint = self.rag_engine.get_embedding_fingerprint()
+        if self._ensure_rag_ready(notify=False) is not None:
+            previous_embedding_fingerprint = self.rag_engine.get_embedding_fingerprint()
+        else:
+            # F-13: settings can be saved before the deferred index is built; the
+            # engine reads the same values from config, so snapshot them here.
+            previous_embedding_fingerprint = _embedding_snapshot(
+                self.config_manager.get("embedding", "base_url", ""),
+                self.config_manager.get("embedding", "model", ""),
+                self.config_manager.get("embedding", "dimensions", 1536),
+            )
         next_embedding_fingerprint = _embedding_snapshot(
             self.embed_base.text().strip(),
             self.embed_model.text().strip(),
@@ -6135,7 +6750,7 @@ class MainWindow(QMainWindow):
             return
         self.llm_client.reload_config()
         embedding_changed = previous_embedding_fingerprint != next_embedding_fingerprint
-        if embedding_changed:
+        if embedding_changed and self._ensure_rag_ready(notify=False) is not None:
             self.rag_engine.reload_embedding_runtime(clear_embedding_cache=True)
         self._apply_color_mode(selected_color_mode)
         self._apply_dynamic_styles()
@@ -6181,6 +6796,8 @@ class MainWindow(QMainWindow):
                 self.cancel_btn.setEnabled(False)
 
     def translate_selected(self):
+        if not _window_rag_ready(self):
+            return
         # Bug #5: Prevent concurrent translation tasks
         if self._translation_task_active:
             log_emit(self.log, self.config_manager, 'WARNING',
@@ -6339,6 +6956,8 @@ class MainWindow(QMainWindow):
 
     def visualize_rag_process(self):
         """可视化显示选中行的RAG处理过程"""
+        if not _window_rag_ready(self):
+            return
         selected_rows = set()
         for item in self.trans_table.selectedItems():
             selected_rows.add(item.row())

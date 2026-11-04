@@ -208,6 +208,8 @@
     "msg_loading_file": "Loading file: {path}",
     "msg_failed_load_xml": "Failed to load XML file.",
     "msg_failed_load_mcm": "Failed to load MCM text file.",
+    "msg_load_failed_detail": "Failed to load: {error}",
+    "msg_glossary_corrupt": "The glossary file could not be read and was quarantined to: {path}. Reason: {error}",
     "msg_raw_plugin_not_supported": "Raw plugin files ({ext}) are not supported. Export them to XML in xTranslator or ESP-ESM Translator first, then open the exported XML.",
     "msg_unsupported_translation_file": "Unsupported file type: {ext}. Only XML translation files (*.xml) and MCM text files (*.txt) are supported.",
     "msg_loaded_strings": "Loaded {count} strings.",
@@ -215,6 +217,7 @@
     "msg_file_saved": "File saved successfully.",
     "msg_mcm_saved_path": "MCM saved to: {path}",
     "msg_mcm_auto_export_done": "MCM auto-export completed: {path}",
+    "msg_save_warning": "Save warning: {warning}",
     "title_success": "Success",
     "title_warning": "Warning",
     "title_info": "Info",
@@ -319,5 +322,14 @@
     "msg_translation_already_in_progress": "A translation task is already running.",
     "msg_glossary_task_already_running": "A glossary task is already running.",
     "msg_loading_in_progress": "A file is still loading; please wait.",
-    "msg_config_save_failed": "Could not save the configuration file. Check that the folder is writable and try again."
+    "msg_config_save_failed": "Could not save the configuration file. Check that the folder is writable and try again.",
+    "msg_no_extension": "(no extension)",
+    "msg_rag_index_initializing": "Building the glossary index in the background...",
+    "msg_rag_index_ready": "Glossary index ready.",
+    "msg_rag_index_init_failed": "Failed to initialize the glossary index: {error}",
+    "msg_rag_analyzing": "Analyzing RAG pipeline...",
+    "msg_rag_analyzing_hint": "RAG details will appear as soon as the analysis finishes. The main window stays usable.",
+    "msg_rag_analysis_failed": "RAG analysis failed",
+    "msg_import_preview_parsing": "Parsing glossary file (preview)...",
+    "msg_added_term_index_pending": "Added term: {source}. The vector index update is pending ({error}); rebuild the index to restore semantic recall."
 }
