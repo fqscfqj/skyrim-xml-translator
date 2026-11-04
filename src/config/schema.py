@@ -68,6 +68,13 @@ class RAGConfig:
     # Runtime keys that were previously read but missing from the schema.
     batch_prompt_max_chars: int = 12000
     glossary_entry_max_chars: int = 240
+    # R-34: short/unique strings skip the keyword-extraction LLM call and use
+    # the deterministic local glossary path instead.
+    short_text_local_keywords: bool = True
+    # Deterministic whole-text glossary scan: guarantees every term that
+    # literally occurs in the source is recalled even when the keyword LLM
+    # misses it.
+    deterministic_scan_enabled: bool = True
 
 
 @dataclass

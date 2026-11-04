@@ -104,7 +104,9 @@
         "latin_ratio_threshold": 2.0,
         "vector_index_checkpoint_terms": 1000,
         "glossary_import_max_rows": 0,
-        "glossary_import_max_field_chars": 0
+        "glossary_import_max_field_chars": 0,
+        "short_text_local_keywords": true,
+        "deterministic_scan_enabled": true
     },
     "general": {
         "log_level": "INFO",
