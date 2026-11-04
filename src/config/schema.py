@@ -33,6 +33,11 @@ class EmbeddingConfig:
     base_url: str = "https://api.openai.com/v1"
     model: str = "text-embedding-3-large"
     dimensions: int = 1536
+    # Conservative retry defaults for embedding latency; previously these were
+    # read by the runtime but missing from the schema (C-10).
+    max_retries: int = 2
+    backoff_base: float = 0.5
+    retry_total_timeout: float = 60.0
 
 
 @dataclass
@@ -60,6 +65,9 @@ class RAGConfig:
     vector_index_checkpoint_terms: int = 1000
     glossary_import_max_rows: int = 0
     glossary_import_max_field_chars: int = 0
+    # Runtime keys that were previously read but missing from the schema.
+    batch_prompt_max_chars: int = 12000
+    glossary_entry_max_chars: int = 240
 
 
 @dataclass
@@ -84,6 +92,7 @@ class GeneralConfig:
     short_text_batch_size: int = 8
     short_text_batch_circuit_min_items: int = 16
     short_text_batch_circuit_fallback_ratio: float = 0.5
+    short_text_batch_circuit_timeout_seconds: int = 300
 
 
 @dataclass
@@ -104,7 +113,7 @@ class CacheConfig:
     embedding_cache_size: int = 5000
     embedding_cache_memory_mb: int = 256
     cache_persist_dir: str = "cache"
-    cache_ttl_hours: float = 0  # 0 = no expiry
+    cache_ttl_hours: float = 0.0  # 0 = no expiry
 
 
 @dataclass
@@ -159,6 +168,9 @@ _RANGES: dict[tuple[str, str], tuple[float | None, float | None]] = {
     ("llm", "request_timeout_max"): (1, 3600),
     ("llm", "retry_total_timeout"): (1, 3600),
     ("embedding", "dimensions"): (1, 8192),
+    ("embedding", "max_retries"): (0, 10),
+    ("embedding", "backoff_base"): (0, 60),
+    ("embedding", "retry_total_timeout"): (0, 3600),
     ("rag", "similarity_threshold"): (0, 1),
     ("rag", "short_term_max_results"): (0, 100),
     ("rag", "long_term_max_results"): (0, 100),
@@ -179,12 +191,15 @@ _RANGES: dict[tuple[str, str], tuple[float | None, float | None]] = {
     ("rag", "vector_index_checkpoint_terms"): (1, 100000),
     ("rag", "glossary_import_max_rows"): (0, 1000000),
     ("rag", "glossary_import_max_field_chars"): (0, 100000),
+    ("rag", "batch_prompt_max_chars"): (1, 1000000),
+    ("rag", "glossary_entry_max_chars"): (0, 100000),
     ("general", "long_text_chunk_threshold_chars"): (1, 100000),
     ("general", "long_text_chunk_target_chars"): (1, 100000),
     ("general", "short_text_batch_max_chars"): (1, 4000),
     ("general", "short_text_batch_size"): (1, 64),
     ("general", "short_text_batch_circuit_min_items"): (2, 10000),
     ("general", "short_text_batch_circuit_fallback_ratio"): (0.1, 1.0),
+    ("general", "short_text_batch_circuit_timeout_seconds"): (1, 86400),
     ("threads", "translation"): (1, 64),
     ("threads", "vectorization"): (1, 64),
     ("cache", "translation_cache_size"): (1, 500000),

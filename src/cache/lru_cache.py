@@ -12,7 +12,9 @@ import glob
 import hashlib
 import json
 import os
+import threading
 import time
+import uuid
 from collections import OrderedDict
 from threading import Lock
 from typing import Any, Optional
@@ -49,6 +51,9 @@ class LRUCache:
                  persist_path: Optional[str] = None):
         self._cache: OrderedDict[str, tuple[Any, float]] = OrderedDict()
         self._lock = Lock()
+        # Serializes concurrent save_to_disk calls so two threads never share a
+        # temp file / os.replace target (F-16).
+        self._save_lock = Lock()
         coerced = _coerce_positive_int(max_size, 10000)
         if coerced != max_size:
             log_emit(None, None, "WARNING",
@@ -79,12 +84,23 @@ class LRUCache:
             return value
 
     def put(self, key: str, value: Any) -> None:
+        now = time.time()
         with self._lock:
+            self._sweep_expired_locked(now)
             if key in self._cache:
                 self._cache.move_to_end(key)
-            self._cache[key] = (value, time.time())
+            self._cache[key] = (value, now)
             while len(self._cache) > self._max_size:
                 self._cache.popitem(last=False)
+
+    def _sweep_expired_locked(self, now: float) -> int:
+        """Drop expired entries; caller must hold ``_lock``."""
+        if self._ttl <= 0:
+            return 0
+        victims = [k for k, (_, ts) in self._cache.items() if (now - ts) > self._ttl]
+        for key in victims:
+            self._cache.pop(key, None)
+        return len(victims)
 
     def has(self, key: str) -> bool:
         with self._lock:
@@ -121,32 +137,59 @@ class LRUCache:
     def save_to_disk(self) -> None:
         if not self._persist_path:
             return
+        with self._save_lock:
+            self._save_to_disk_serialized()
+
+    def _save_to_disk_serialized(self) -> None:
         try:
             parent = os.path.dirname(self._persist_path)
             os.makedirs(parent or ".", exist_ok=True)
+
+            now = time.time()
             with self._lock:
+                # Expired entries must not be persisted (C-08); sweep before the
+                # snapshot so the on-disk TTL set matches memory.
+                self._sweep_expired_locked(now)
                 snapshot = list(self._cache.items())
 
             # Serialize and write outside the cache lock so translation workers
             # can continue reading and updating the in-memory cache.
-            data = {}
-            skipped = 0
-            for k, (v, ts) in snapshot:
+            data = {k: {"v": v, "ts": ts} for k, (v, ts) in snapshot}
+            # Thread-unique temp path: concurrent processes/threads never share
+            # the same file, which caused WinError 32 on Windows.
+            tmp_path = (
+                f"{self._persist_path}.tmp.{os.getpid()}."
+                f"{threading.get_ident()}.{uuid.uuid4().hex}"
+            )
+            try:
                 try:
-                    json.dumps(v)  # test serializability
-                    data[k] = {"v": v, "ts": ts}
+                    # Single serialize pass; only on a TypeError/ValueError do we
+                    # pay for the filtered (per-entry) fallback.
+                    with open(tmp_path, "w", encoding="utf-8") as f:
+                        json.dump(data, f, ensure_ascii=False)
                 except (TypeError, ValueError):
-                    skipped += 1
-                    continue
-            if skipped:
-                log_emit(None, None, "WARNING",
-                         f"Skipped {skipped} non-serializable cache entries on save",
-                         module="lru_cache", func="save_to_disk")
-
-            tmp_path = f"{self._persist_path}.tmp.{os.getpid()}"
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False)
-            os.replace(tmp_path, self._persist_path)
+                    filtered: dict[str, dict] = {}
+                    skipped = 0
+                    for key, entry in data.items():
+                        try:
+                            json.dumps(entry["v"])
+                        except (TypeError, ValueError):
+                            skipped += 1
+                            continue
+                        filtered[key] = entry
+                    if skipped:
+                        log_emit(None, None, "WARNING",
+                                 f"Skipped {skipped} non-serializable cache entries on save",
+                                 module="lru_cache", func="save_to_disk")
+                    with open(tmp_path, "w", encoding="utf-8") as f:
+                        json.dump(filtered, f, ensure_ascii=False)
+                self._replace_with_retry(tmp_path, self._persist_path)
+            finally:
+                if os.path.exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except Exception:
+                        pass
         except Exception as e:
             log_emit(
                 None,
@@ -157,6 +200,24 @@ class LRUCache:
                 module="lru_cache",
                 func="save_to_disk",
             )
+
+    @staticmethod
+    def _replace_with_retry(src: str, dst: str, attempts: int = 8) -> None:
+        """``os.replace`` with a short retry on Windows sharing violations."""
+        delay = 0.01
+        for attempt in range(attempts):
+            try:
+                os.replace(src, dst)
+                return
+            except OSError as exc:
+                winerror = getattr(exc, "winerror", None)
+                # 5 = access denied, 32 = file in use; both transient on Windows.
+                if winerror not in (5, 32) and not isinstance(exc, PermissionError):
+                    raise
+                if attempt >= attempts - 1:
+                    raise
+                time.sleep(delay)
+                delay = min(delay * 2, 0.2)
 
     def load_from_disk(self) -> None:
         if not self._persist_path or not os.path.exists(self._persist_path):

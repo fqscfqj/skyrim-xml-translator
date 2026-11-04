@@ -1,10 +1,12 @@
+import glob
 import json
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from src.config.manager import ConfigManager
-from src.config.schema import AppConfig, dataclass_to_dict
+from src.config.schema import AppConfig, dataclass_to_dict, validate_config
 
 
 class TaskCompletionSoundConfigTests(unittest.TestCase):
@@ -110,6 +112,87 @@ class TaskCompletionSoundConfigTests(unittest.TestCase):
                 self.assertIn("enable_thinking", parameters)
                 self.assertIn("reasoning_effort", parameters)
                 self.assertNotIn("reasoning_budget_tokens", parameters)
+
+
+class ConfigSaveAndCoercionTests(unittest.TestCase):
+    def test_save_config_returns_true_on_success_and_false_on_failure(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = os.path.join(temp_dir, "config.json")
+            manager = ConfigManager(config_path)
+            manager.set("general", "language", "zh", save=False)
+
+            self.assertTrue(manager.save_config())
+
+            with patch(
+                "src.config.manager.os.replace",
+                side_effect=OSError("denied"),
+            ):
+                self.assertFalse(manager.save_config())
+
+            self.assertEqual(glob.glob(config_path + ".tmp*"), [])
+
+    def test_get_accepts_float_value_for_int_default(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = os.path.join(temp_dir, "config.json")
+            with open(config_path, "w", encoding="utf-8") as handle:
+                json.dump({"cache": {"cache_ttl_hours": 12.5}}, handle)
+
+            manager = ConfigManager(config_path)
+
+            self.assertEqual(
+                manager.get("cache", "cache_ttl_hours", 0), 12.5
+            )
+            self.assertEqual(
+                manager.get("cache", "cache_ttl_hours", 0.0), 12.5
+            )
+
+    def test_get_accepts_int_value_for_float_default(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = os.path.join(temp_dir, "config.json")
+            with open(config_path, "w", encoding="utf-8") as handle:
+                json.dump({"cache": {"cache_ttl_hours": 3}}, handle)
+
+            manager = ConfigManager(config_path)
+
+            value = manager.get("cache", "cache_ttl_hours", 0.0)
+            self.assertEqual(value, 3.0)
+            self.assertIsInstance(value, float)
+
+    def test_missing_runtime_embedding_and_rag_keys_are_schema_backfilled(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = os.path.join(temp_dir, "config.json")
+            manager = ConfigManager(config_path)
+            typed = manager.get_typed()
+
+            self.assertEqual(typed.embedding.max_retries, 2)
+            self.assertEqual(typed.embedding.backoff_base, 0.5)
+            self.assertEqual(typed.embedding.retry_total_timeout, 60.0)
+            self.assertEqual(typed.rag.batch_prompt_max_chars, 12000)
+            self.assertEqual(typed.rag.glossary_entry_max_chars, 240)
+            self.assertEqual(
+                typed.general.short_text_batch_circuit_timeout_seconds, 300
+            )
+            self.assertEqual(manager.validate(), [])
+            self.assertTrue(manager.save_config())
+
+            with open(config_path, "r", encoding="utf-8") as handle:
+                saved = json.load(handle)
+            self.assertIn("max_retries", saved["embedding"])
+            self.assertIn("retry_total_timeout", saved["embedding"])
+            self.assertIn("batch_prompt_max_chars", saved["rag"])
+            self.assertIn(
+                "short_text_batch_circuit_timeout_seconds", saved["general"]
+            )
+
+    def test_new_runtime_keys_validate_within_range(self):
+        config = dataclass_to_dict(AppConfig())
+        self.assertEqual(validate_config(config), [])
+
+        config["embedding"]["retry_total_timeout"] = -1
+        self.assertTrue(any(
+            "embedding.retry_total_timeout" in error
+            for error in validate_config(config)
+        ))
 
 
 if __name__ == "__main__":

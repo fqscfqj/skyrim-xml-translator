@@ -7,9 +7,64 @@ from time import monotonic
 from typing import Any, Callable, Optional
 
 from src.logging_helper import emit as log_emit
-from src.llm.retry import RetryTimeBudgetExceeded, execute_with_retry
+from src.llm.retry import (
+    ErrorType,
+    RetryTimeBudgetExceeded,
+    classify_error,
+    execute_with_retry,
+    format_provider_error,
+)
 from src.llm.cost_tracker import CostTracker
 from src.llm.reasoning import apply_reasoning_controls, strip_reasoning_controls
+
+
+# Embedding request limits / defaults.
+_EMBEDDING_MAX_BATCH_INPUTS = 2048
+_EMBEDDING_DEFAULT_RETRY_TOTAL_SECONDS = 60.0
+# Only retry a failed *batch* item-by-item up to this size; bigger batches rely
+# on the caller's fallback so a broken endpoint cannot cause O(n) request storms.
+_EMBEDDING_PER_ITEM_FALLBACK_MAX_ITEMS = 16
+# Models known to accept the OpenAI `dimensions` truncation parameter.
+_EMBEDDING_DIMENSION_MODEL_PREFIXES = ("text-embedding-3-",)
+_EMBEDDING_FATAL_ERROR_TYPES = frozenset({
+    ErrorType.AUTH_ERROR,
+    ErrorType.MODEL_NOT_FOUND,
+})
+# Non-retryable categories where retrying item-by-item cannot help.
+_EMBEDDING_NO_ITEM_FALLBACK_TYPES = frozenset({
+    ErrorType.INVALID_REQUEST,
+    ErrorType.CONTEXT_LENGTH,
+    ErrorType.CONTENT_BLOCK,
+}) | _EMBEDDING_FATAL_ERROR_TYPES
+_EMBEDDING_DIMENSION_REJECTION_MARKERS = (
+    "dimensions",
+    "unsupported parameter",
+    "unknown parameter",
+    "unrecognized request argument",
+    "extra fields",
+    "not supported",
+)
+
+
+class ResponseTruncatedError(RuntimeError):
+    """Raised when a provider stops generation before a complete answer.
+
+    Exportable from this module; callers may import it directly. The partial
+    content (when the provider returned any) is preserved on ``content``.
+    """
+
+    def __init__(self, reason: str, *, model: str = "", operation: str = "",
+                 content: Optional[str] = None):
+        self.reason = str(reason or "").strip() or "unknown"
+        # Alias for callers that know the chat-completions field name.
+        self.finish_reason = self.reason
+        self.model = str(model or "")
+        self.operation = str(operation or "")
+        self.content = content
+        super().__init__(
+            f"{self.operation or 'LLM'} response truncated "
+            f"(reason={self.reason}, model={self.model or 'unknown'})"
+        )
 
 
 def _safe_int(value: Any, default: int) -> int:
@@ -43,12 +98,25 @@ class LLMClient:
         # exposes DeepSeek/Qwen prompt-cache hit rates to the worker log.
         self.cost_tracker = cost_tracker or CostTracker()
         self._client_lock = RLock()
+        # Embedding-specific state (fatal error circuit breaker + per-model
+        # "dimensions unsupported" memory). Guarded by _embedding_lock.
+        self._embedding_lock = RLock()
+        self._embedding_fatal_error: Optional[Exception] = None
+        self._embedding_dimensions_unsupported: set[str] = set()
+        self._client_build_errors: dict[str, Exception] = {}
+        self._timeout_budget_warnings: set[tuple] = set()
         self._init_clients()
 
     def _build_client(self, section: str) -> Optional[OpenAI]:
         raw_key = self.config.get(section, "api_key")
         api_key = str(raw_key or "").strip()
         if not api_key:
+            # Not an error: this provider/section is simply not configured.
+            with self._client_lock:
+                self._client_build_errors.pop(section, None)
+            log_emit(None, self.config, "DEBUG",
+                     f"{section} API key not configured; client disabled",
+                     module="llm_client", func="_build_client")
             return None
         raw_url = self.config.get(section, "base_url")
         base_url = str(raw_url or "").strip() or None
@@ -60,9 +128,55 @@ class LLMClient:
             kwargs: dict[str, Any] = {"api_key": api_key, "timeout": timeout, "max_retries": 0}
             if base_url:
                 kwargs["base_url"] = base_url
-            return OpenAI(**kwargs)
-        except Exception:
+            client = OpenAI(**kwargs)
+            with self._client_lock:
+                self._client_build_errors.pop(section, None)
+            return client
+        except Exception as exc:
+            # Preserve the real cause so callers can distinguish a construction
+            # failure from a missing API key instead of blaming the key.
+            with self._client_lock:
+                self._client_build_errors[section] = exc
+            log_emit(None, self.config, "ERROR",
+                     f"Failed to construct {section} OpenAI client: "
+                     f"{type(exc).__name__}: {exc}",
+                     exc=exc, module="llm_client", func="_build_client")
             return None
+
+    def _client_unavailable_message(self, section: str, label: str) -> str:
+        """Explain *why* a client is missing: unconfigured key vs build failure."""
+        error = self._client_build_errors.get(section)
+        if error is not None:
+            return (
+                f"{label} client construction failed: {type(error).__name__}: "
+                f"{error}. Check the base_url/network/proxy settings."
+            )
+        return f"{label} client not initialized. Please check API Key."
+
+    def _maybe_warn_timeout_budget(self, config_section: str, timeout_base: float,
+                                   retry_total: float,
+                                   callback: Optional[Callable] = None) -> None:
+        """Warn once when the total retry budget cannot fund a full attempt."""
+        try:
+            if not (0 < retry_total < timeout_base):
+                return
+            warning_key = (
+                config_section,
+                round(float(timeout_base), 3),
+                round(float(retry_total), 3),
+            )
+        except Exception:
+            return
+        with self._client_lock:
+            if warning_key in self._timeout_budget_warnings:
+                return
+            self._timeout_budget_warnings.add(warning_key)
+        log_emit(callback if callback is not None else self.log_callback,
+                 self.config, "WARNING",
+                 f"{config_section} retry_total_timeout={retry_total:.0f}s "
+                 f"is smaller than request_timeout={timeout_base:.0f}s; later "
+                 "attempts may be cut short by the total budget",
+                 module="llm_client", func="_maybe_warn_timeout_budget")
 
     def _init_clients(self) -> None:
         # Build first, then swap to avoid a window with partial clients.
@@ -74,6 +188,39 @@ class LLMClient:
         self.search_llm_client = new_search
         self.search_fallback_llm_client = new_fallback
         self.embed_client = new_embed
+        self._reset_embedding_state()
+        self._warn_startup_timeout_budgets()
+
+    def _warn_startup_timeout_budgets(self) -> None:
+        """Emit the budget-vs-timeout warning during client construction."""
+        for section in ("llm", "llm_search", "llm_search_fallback"):
+            try:
+                if not str(self.config.get(section, "api_key") or "").strip():
+                    continue
+                timeout_raw = self.config.get(section, "request_timeout", None)
+                if timeout_raw is None:
+                    timeout_raw = self.config.get("llm", "request_timeout", 120)
+                retry_raw = self.config.get(section, "retry_total_timeout", None)
+                if retry_raw is None:
+                    retry_raw = self.config.get("llm", "retry_total_timeout", 300)
+                self._maybe_warn_timeout_budget(
+                    section,
+                    _safe_float(timeout_raw, 120.0),
+                    _safe_float(retry_raw, 300.0),
+                )
+            except Exception:
+                continue
+
+
+    def _reset_embedding_state(self) -> None:
+        """Clear per-run embedding circuit breaker / dimension memory."""
+        lock = getattr(self, "_embedding_lock", None)
+        if lock is None:
+            self._embedding_lock = RLock()
+            lock = self._embedding_lock
+        with lock:
+            self._embedding_fatal_error = None
+            self._embedding_dimensions_unsupported = set()
 
     def reload_config(self) -> None:
         lock = getattr(self, "_client_lock", None)
@@ -98,6 +245,7 @@ class LLMClient:
             self.search_llm_client = new_search
             self.search_fallback_llm_client = new_fallback
             self.embed_client = new_embed
+            self._reset_embedding_state()
         for client in old_clients:
             if client:
                 try:
@@ -186,6 +334,10 @@ class LLMClient:
             parts.append(str(body))
         message = "\n".join(parts).lower()
         return any(marker in message for marker in (
+            "reasoning",           # Responses renames controls to `reasoning`
+            "effort",              # ... and `reasoning.effort`
+            "unsupported parameter",
+            "unknown field",
             "reasoning_effort",
             "reasoning effort",
             "enable_thinking",
@@ -298,68 +450,286 @@ class LLMClient:
             ),
         }
 
+    @staticmethod
+    def _supports_embedding_dimensions(model: str) -> bool:
+        normalized = str(model or "").strip().lower()
+        return any(normalized.startswith(prefix) for prefix in _EMBEDDING_DIMENSION_MODEL_PREFIXES)
+
+    @staticmethod
+    def _is_embedding_dimension_rejection(exc: Exception) -> bool:
+        status_code = getattr(exc, "status_code", None)
+        try:
+            if status_code is not None and int(status_code) not in (400, 422):
+                return False
+        except Exception:
+            pass
+        parts = [str(exc or "")]
+        body = getattr(exc, "body", None)
+        if body is not None:
+            parts.append(str(body))
+        message = "\n".join(parts).lower()
+        return any(marker in message for marker in _EMBEDDING_DIMENSION_REJECTION_MARKERS)
+
+    @staticmethod
+    def _extract_embedding_vectors(response: Any, expected_count: int,
+                                   dimensions: int, model: str) -> list:
+        """Validate and order an embeddings response (P0-11 / L-07).
+
+        Raises a descriptive ``ValueError`` instead of silently returning a
+        short, misordered or wrong-dimension list.
+        """
+        data = getattr(response, "data", None)
+        if data is None and isinstance(response, dict):
+            data = response.get("data")
+        if data is None:
+            raise ValueError(f"Embedding response is missing 'data' (model={model})")
+        try:
+            items = list(data)
+        except TypeError:
+            raise ValueError(
+                f"Embedding response 'data' is not a sequence (model={model})"
+            ) from None
+        if len(items) != expected_count:
+            raise ValueError(
+                f"Embedding count mismatch for model={model}: requested "
+                f"{expected_count} input(s), provider returned {len(items)} vector(s)"
+            )
+
+        indexed: list[tuple[int, Any]] = []
+        all_indexed = True
+        for item in items:
+            index = getattr(item, "index", None)
+            if index is None and isinstance(item, dict):
+                index = item.get("index")
+            if isinstance(index, bool) or not isinstance(index, int):
+                all_indexed = False
+                break
+            indexed.append((index, item))
+        if all_indexed:
+            order = sorted(index for index, _ in indexed)
+            if order != list(range(expected_count)):
+                raise ValueError(
+                    f"Embedding response indexes are invalid for model={model}: {order}"
+                )
+            items = [item for _, item in sorted(indexed, key=lambda pair: pair[0])]
+
+        vectors: list = []
+        for position, item in enumerate(items):
+            embedding = getattr(item, "embedding", None)
+            if embedding is None and isinstance(item, dict):
+                embedding = item.get("embedding")
+            try:
+                length = len(embedding)
+            except Exception:
+                raise ValueError(
+                    f"Embedding vector #{position} is missing or not a sequence "
+                    f"(model={model})"
+                ) from None
+            if dimensions > 0 and length != dimensions:
+                raise ValueError(
+                    f"Embedding dimension mismatch for model={model}: expected "
+                    f"{dimensions} (embedding.dimensions) but provider returned "
+                    f"{length}. Configure a matching 'embedding.dimensions' or a "
+                    f"model that supports the dimensions parameter."
+                )
+            vectors.append(embedding)
+        return vectors
+
+    def _record_embedding_usage(self, response: Any, model: str) -> None:
+        if not self.cost_tracker:
+            return
+        try:
+            stats = self._extract_usage_stats(response)
+            prompt_tokens = stats.get("prompt_tokens")
+            total = stats.get("total_tokens")
+            tokens: Optional[int] = prompt_tokens if prompt_tokens is not None else total
+            if tokens is None:
+                usage_obj = getattr(response, "usage", None)
+                if isinstance(usage_obj, dict):
+                    tokens = usage_obj.get("prompt_tokens", usage_obj.get("total_tokens"))
+                else:
+                    raw_total = getattr(usage_obj, "total_tokens", None) if usage_obj is not None else None
+                    try:
+                        tokens = int(raw_total) if raw_total is not None else None
+                    except Exception:
+                        tokens = None
+            if tokens is not None:
+                self.cost_tracker.record(model, int(tokens), 0, "embedding")
+        except Exception:
+            pass
+
+    def _set_embedding_fatal_error(self, exc: Exception) -> None:
+        with self._embedding_lock:
+            self._embedding_fatal_error = exc
+
     def get_embedding(self, text, log_callback=None):
         """获取文本向量"""
         if not self.embed_client:
-            raise ValueError("Embedding client not initialized. Please check API Key.")
+            raise ValueError(self._client_unavailable_message("embedding", "Embedding"))
+
+        with self._embedding_lock:
+            fatal_error = self._embedding_fatal_error
+        if fatal_error is not None:
+            # Auth / model-not-found errors cannot heal by retrying each item.
+            raise RuntimeError(
+                "Embedding requests are suspended after a non-retryable provider "
+                f"error: {format_provider_error(fatal_error)}"
+            ) from fatal_error
 
         callback = log_callback if log_callback else self.log_callback
         raw_model = self.config.get("embedding", "model", "text-embedding-ada-002")
         model = str(raw_model or "").strip() or "text-embedding-ada-002"
         is_batch = isinstance(text, list)
+        inputs = list(text) if is_batch else [text]
+        if not inputs:
+            return []
 
-        def _do_embed():
+        dimensions = _safe_int(self.config.get("embedding", "dimensions", 1536), 1536)
+        if dimensions <= 0:
+            dimensions = 1536
+        supports_dimensions = self._supports_embedding_dimensions(model)
+
+        max_retries = _safe_int(self.config.get("embedding", "max_retries", 2), 2)
+        backoff_base = _safe_float(self.config.get("embedding", "backoff_base", 0.5), 0.5)
+        raw_total = self.config.get("embedding", "retry_total_timeout", None)
+        if raw_total is None:
+            retry_total = _EMBEDDING_DEFAULT_RETRY_TOTAL_SECONDS
+        else:
+            retry_total = max(
+                0.0,
+                _safe_float(raw_total, _EMBEDDING_DEFAULT_RETRY_TOTAL_SECONDS),
+            )
+        deadline = monotonic() + retry_total if retry_total > 0 else None
+
+        def _remaining_budget() -> float:
+            if deadline is None:
+                return 0.0
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                raise RetryTimeBudgetExceeded(
+                    f"embedding retry time budget exceeded ({retry_total:.2f}s)"
+                )
+            return remaining
+
+        def _do_embed(chunk: list) -> Any:
+            with self._embedding_lock:
+                use_dimensions = (
+                    supports_dimensions
+                    and model.lower() not in self._embedding_dimensions_unsupported
+                )
+            kwargs: dict[str, Any] = {"input": chunk, "model": model}
+            if use_dimensions:
+                kwargs["dimensions"] = dimensions
             if self.cost_tracker:
                 self.cost_tracker.increment_counter("embedding_api_attempts")
             try:
-                return self.embed_client.embeddings.create(input=text, model=model)
+                return self.embed_client.embeddings.create(**kwargs)
             except Exception as exc:
-                if isinstance(exc, RetryTimeBudgetExceeded):
-                    raise
+                if use_dimensions and self._is_embedding_dimension_rejection(exc):
+                    # Provider does not accept `dimensions`; remember and retry
+                    # once without it rather than failing the whole index build.
+                    with self._embedding_lock:
+                        self._embedding_dimensions_unsupported.add(model.lower())
+                    if self.cost_tracker:
+                        self.cost_tracker.increment_counter("embedding_dimension_fallbacks")
+                        self.cost_tracker.increment_counter("embedding_api_attempts")
+                    log_emit(callback, self.config, "WARNING",
+                             "Embedding provider rejected the 'dimensions' parameter; "
+                             "retrying without it (vector length will be validated)",
+                             module="llm_client", func="get_embedding")
+                    kwargs.pop("dimensions", None)
+                    return self.embed_client.embeddings.create(**kwargs)
                 raise
 
-        try:
-            max_retries = _safe_int(self.config.get("embedding", "max_retries", 2), 2)
-            backoff_base = _safe_float(self.config.get("embedding", "backoff_base", 0.5), 0.5)
-            retry_total = _safe_float(self.config.get("embedding", "retry_total_timeout", 0.0), 0.0)
+        def _run_chunk(chunk: list, attempts: int) -> list:
+            budget = _remaining_budget()
             response = execute_with_retry(
-                fn=_do_embed,
-                max_retries=max(0, max_retries),
+                fn=lambda: _do_embed(chunk),
+                max_retries=max(0, attempts),
                 backoff_base=max(0.0, backoff_base),
                 log_callback=callback,
                 log_prefix="embedding",
                 config_manager=self.config,
-                max_total_seconds=max(0.0, retry_total),
+                max_total_seconds=budget,
             )
+            vectors = self._extract_embedding_vectors(
+                response, len(chunk), dimensions, model
+            )
+            self._record_embedding_usage(response, model)
+            return vectors
 
-            if self.cost_tracker:
+        chunk_size = _EMBEDDING_MAX_BATCH_INPUTS
+        chunks = [inputs[i:i + chunk_size] for i in range(0, len(inputs), chunk_size)]
+        all_vectors: list = []
+        try:
+            for chunk in chunks:
                 try:
-                    stats = self._extract_usage_stats(response)
-                    prompt_tokens = stats.get("prompt_tokens")
-                    total = stats.get("total_tokens")
-                    tokens: Optional[int] = prompt_tokens if prompt_tokens is not None else total
-                    if tokens is None:
-                        usage_obj = getattr(response, "usage", None)
-                        if isinstance(usage_obj, dict):
-                            tokens = usage_obj.get("prompt_tokens", usage_obj.get("total_tokens"))
-                        else:
-                            raw_total = getattr(usage_obj, "total_tokens", None) if usage_obj is not None else None
-                            try:
-                                tokens = int(raw_total) if raw_total is not None else None
-                            except Exception:
-                                tokens = None
-                    if tokens is not None:
-                        self.cost_tracker.record(model, int(tokens), 0, "embedding")
-                except Exception:
-                    pass
-
-            if is_batch:
-                return [item.embedding for item in response.data]
-            return response.data[0].embedding
+                    all_vectors.extend(_run_chunk(chunk, max_retries))
+                except Exception as exc:
+                    if isinstance(exc, RetryTimeBudgetExceeded):
+                        raise
+                    error_type = classify_error(exc)
+                    if isinstance(exc, ValueError):
+                        raise
+                    if error_type in _EMBEDDING_FATAL_ERROR_TYPES:
+                        # Auth / model-not-found cannot heal by retrying; stop
+                        # the caller's per-item fallback loop immediately.
+                        self._set_embedding_fatal_error(exc)
+                        raise
+                    if error_type in _EMBEDDING_NO_ITEM_FALLBACK_TYPES:
+                        raise
+                    # Only small batches get the capped per-item fallback; large
+                    # batches must not multiply a provider outage by N requests.
+                    if 1 < len(chunk) <= _EMBEDDING_PER_ITEM_FALLBACK_MAX_ITEMS:
+                        recovered = self._embed_items_individually(
+                            chunk, _do_embed, dimensions, model, callback, _remaining_budget
+                        )
+                        if recovered is not None:
+                            all_vectors.extend(recovered)
+                            continue
+                    raise
         except Exception as e:
-            log_emit(callback, self.config, "ERROR", f"Embedding error: {e}",
+            log_emit(callback, self.config, "ERROR",
+                     f"Embedding error: {format_provider_error(e)}",
                      exc=e, module="llm_client", func="get_embedding")
             raise
+
+        if is_batch:
+            return all_vectors
+        return all_vectors[0]
+
+    def _embed_items_individually(self, chunk: list, embed_fn: Callable[[list], Any],
+                                  dimensions: int, model: str,
+                                  callback: Optional[Callable],
+                                  remaining_budget: Callable[[], float]):
+        """Capped per-item fallback for a failed small batch.
+
+        Returns the vectors on success or ``None`` when the fallback should be
+        abandoned (the caller re-raises the original batch error).
+        """
+        vectors: list = []
+        for item in chunk:
+            try:
+                response = execute_with_retry(
+                    fn=lambda item=item: embed_fn([item]),
+                    max_retries=0,
+                    backoff_base=0.0,
+                    log_callback=callback,
+                    log_prefix="embedding",
+                    config_manager=self.config,
+                    max_total_seconds=remaining_budget(),
+                )
+                vectors.extend(
+                    self._extract_embedding_vectors(response, 1, dimensions, model)
+                )
+                self._record_embedding_usage(response, model)
+            except RetryTimeBudgetExceeded:
+                raise
+            except Exception as exc:
+                if classify_error(exc) in _EMBEDDING_FATAL_ERROR_TYPES:
+                    self._set_embedding_fatal_error(exc)
+                return None
+        return vectors
 
     def _call(self, client: Optional[OpenAI], config_section: str, messages: list,
               log_callback: Optional[Callable],
@@ -370,7 +740,7 @@ class LLMClient:
         chat_completion() and chat_completion_search().
         """
         if not client:
-            raise ValueError("LLM client not initialized. Please check API Key.")
+            raise ValueError(self._client_unavailable_message(config_section, "LLM"))
 
         callback = log_callback if log_callback else self.log_callback
         raw_model = self.config.get(config_section, "model", "gpt-3.5-turbo")
@@ -406,6 +776,9 @@ class LLMClient:
             timeout_max = timeout_base
         if retry_total_timeout < 0:
             retry_total_timeout = 0.0
+        self._maybe_warn_timeout_budget(
+            config_section, timeout_base, retry_total_timeout, callback
+        )
 
         # Build final parameters
         final_params: dict[str, Any] = {}
@@ -529,6 +902,14 @@ class LLMClient:
                     f"{operation} LLM retry time budget too small "
                     f"(remaining={remaining:.2f}s)"
                 )
+            # Do not silently shorten an attempt below ~50% of the intended
+            # timeout: that almost guarantees a spurious timeout error.
+            if proposed_timeout > 0 and remaining < proposed_timeout * 0.5:
+                raise RetryTimeBudgetExceeded(
+                    f"{operation} LLM retry time budget too small for a useful "
+                    f"attempt (remaining={remaining:.2f}s < 50% of "
+                    f"proposed={proposed_timeout:.2f}s)"
+                )
             return min(proposed_timeout, remaining)
 
         def do_call():
@@ -584,7 +965,6 @@ class LLMClient:
                         else client.chat.completions.create(**call_args)
                     )
                 elif (reasoning_application.applied
-                        and reasoning_application.thinking_enabled is not False
                         and not reasoning_control_fallback["used"]
                         and self._is_reasoning_control_rejection(exc)):
                     reasoning_control_fallback["used"] = True
@@ -650,6 +1030,26 @@ class LLMClient:
                     )
             if use_responses_api:
                 content = getattr(response, "output_text", None)
+                status = str(getattr(response, "status", "") or "").strip().lower()
+                incomplete_details = getattr(response, "incomplete_details", None)
+                incomplete_reason = ""
+                if isinstance(incomplete_details, dict):
+                    incomplete_reason = str(
+                        incomplete_details.get("reason") or ""
+                    ).strip()
+                elif incomplete_details is not None:
+                    incomplete_reason = str(
+                        getattr(incomplete_details, "reason", "") or ""
+                    ).strip()
+                if status == "incomplete" and incomplete_reason.lower() in (
+                    "max_output_tokens", "content_filter",
+                ):
+                    raise ResponseTruncatedError(
+                        incomplete_reason,
+                        model=model,
+                        operation=operation,
+                        content=content if isinstance(content, str) else None,
+                    )
                 if content is None:
                     preview = str(response)[:500]
                     raise ValueError(
@@ -663,7 +1063,21 @@ class LLMClient:
                     "API returned empty choices list (possible content filter). "
                     f"Model: {model}, Response: {preview}"
                 )
-            content = response.choices[0].message.content
+            choice = response.choices[0]
+            content = choice.message.content
+            finish_reason = getattr(choice, "finish_reason", None)
+            if isinstance(finish_reason, str) and finish_reason.strip().lower() in (
+                "length", "content_filter",
+            ):
+                # Surface silent truncation instead of returning a partial string
+                # as if it were a complete translation; keep the partial text on
+                # the exception for diagnostics.
+                raise ResponseTruncatedError(
+                    finish_reason,
+                    model=model,
+                    operation=operation,
+                    content=content if isinstance(content, str) else None,
+                )
             if content is None:
                 return ""
             return content if isinstance(content, str) else str(content)
@@ -696,7 +1110,11 @@ class LLMClient:
             client = self.search_fallback_llm_client
             config_section = "llm_search_fallback"
             if not client:
-                raise ValueError("Fallback search LLM client not initialized. Please check llm_search_fallback API Key.")
+                raise ValueError(
+                    self._client_unavailable_message(
+                        "llm_search_fallback", "Fallback search LLM"
+                    )
+                )
         else:
             client = self.search_llm_client if self.search_llm_client else self.llm_client
             config_section = "llm_search" if self.search_llm_client else "llm"

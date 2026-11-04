@@ -24,6 +24,13 @@ _SHOULD_EMIT_LAST_WARN = 0.0
 _ROTATING_HANDLERS: dict[str, RotatingFileHandler] = {}
 _ROTATING_LOCK = threading.RLock()
 
+# Resolving the configured log path on every line was a hot-path cost (F-14):
+# cache the result and remember which directories were already created.
+_LOG_PATH_CACHE: dict[tuple, str] = {}
+_LOG_PATH_CACHE_LOCK = threading.Lock()
+_ENSURED_LOG_DIRS: set[str] = set()
+_ENSURED_LOG_DIRS_LOCK = threading.Lock()
+
 
 _SENSITIVE_KEY_RE = re.compile(
     r"(?i)(api[_-]?key|authorization|access[_-]?token|refresh[_-]?token|secret|password)"
@@ -80,23 +87,47 @@ def _now_ts():
 
 def _resolve_log_file_path(config_manager):
     fallback = os.path.join(os.getcwd(), 'logs', 'app.log')
-    base_dir = os.getcwd()
-    if config_manager:
-        cfg_path = getattr(config_manager, 'config_path', None)
-        if cfg_path:
-            base_dir = os.path.abspath(os.path.dirname(os.path.abspath(cfg_path)) or base_dir)
+    cfg_path = getattr(config_manager, 'config_path', None) if config_manager else None
     candidate = None
     if config_manager:
         try:
             candidate = config_manager.get('general', 'log_file')
         except Exception:
             candidate = None
+    cache_key = (id(config_manager) if config_manager is not None else 0,
+                 str(cfg_path or ""), str(candidate or ""), os.getcwd())
+    with _LOG_PATH_CACHE_LOCK:
+        cached = _LOG_PATH_CACHE.get(cache_key)
+    if cached:
+        return cached
+
+    base_dir = os.getcwd()
+    if cfg_path:
+        base_dir = os.path.abspath(os.path.dirname(os.path.abspath(cfg_path)) or base_dir)
     if not candidate:
-        return os.path.abspath(fallback)
-    candidate = os.path.expanduser(os.path.expandvars(candidate))
-    if not os.path.isabs(candidate):
-        candidate = os.path.join(base_dir, candidate)
-    return os.path.abspath(candidate)
+        resolved = os.path.abspath(fallback)
+    else:
+        expanded = os.path.expanduser(os.path.expandvars(candidate))
+        if not os.path.isabs(expanded):
+            expanded = os.path.join(base_dir, expanded)
+        resolved = os.path.abspath(expanded)
+    with _LOG_PATH_CACHE_LOCK:
+        if len(_LOG_PATH_CACHE) >= 64:
+            _LOG_PATH_CACHE.clear()
+        _LOG_PATH_CACHE[cache_key] = resolved
+    return resolved
+
+
+def _ensure_log_dir(directory: Optional[str]) -> None:
+    """Create the log directory at most once per resolved path."""
+    if not directory:
+        return
+    with _ENSURED_LOG_DIRS_LOCK:
+        if directory in _ENSURED_LOG_DIRS:
+            return
+    os.makedirs(directory, exist_ok=True)
+    with _ENSURED_LOG_DIRS_LOCK:
+        _ENSURED_LOG_DIRS.add(directory)
 
 
 def _get_rotating_handler(path: str) -> RotatingFileHandler:
@@ -135,7 +166,9 @@ def _write_via_rotating(path: str, message: str) -> None:
     try:
         record = logging.LogRecord(name="trx2", level=logging.INFO, pathname="",
                                    lineno=0, msg=message, args=(), exc_info=None)
-        handler.emit(record)
+        # Handler.handle() serializes on the handler lock; calling emit()
+        # directly let concurrent rotations interleave and lose lines (F-15).
+        handler.handle(record)
     except Exception:
         with _ROTATING_LOCK:
             stale = _ROTATING_HANDLERS.pop(key, None)
@@ -173,8 +206,7 @@ def _write_log_to_disk(path: Optional[str], message: str) -> None:
 
     try:
         log_dir = os.path.dirname(path)
-        if log_dir:
-            os.makedirs(log_dir, exist_ok=True)
+        _ensure_log_dir(log_dir)
         _write_via_rotating(path, text)
         return
     except Exception as main_err:
@@ -183,8 +215,7 @@ def _write_log_to_disk(path: Optional[str], message: str) -> None:
     for candidate in _fallback_paths(path):
         try:
             log_dir = os.path.dirname(candidate)
-            if log_dir:
-                os.makedirs(log_dir, exist_ok=True)
+            _ensure_log_dir(log_dir)
             with open(candidate, 'a', encoding='utf-8') as f:
                 f.write(text)
             return

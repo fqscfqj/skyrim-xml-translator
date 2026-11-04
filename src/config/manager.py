@@ -181,21 +181,33 @@ class ConfigManager:
             )
         return changed
 
-    def save_config(self) -> None:
+    def save_config(self) -> bool:
+        """Persist the config atomically.
+
+        Returns ``True`` on success and ``False`` on failure (callers that
+        ignored the old ``None`` return keep working). Failures are logged with
+        the real exception so the GUI can stop claiming it saved.
+        """
+        tmp_path = f"{self.config_path}.tmp.{os.getpid()}.{id(self)}"
         try:
             parent = os.path.dirname(self.config_path)
             if parent:
                 os.makedirs(parent, exist_ok=True)
-            tmp_path = f"{self.config_path}.tmp.{os.getpid()}"
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(self.config, f, indent=4, ensure_ascii=False)
             os.replace(tmp_path, self.config_path)
             self._protect_config_file()
         except Exception as e:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
             log_emit(None, None, "ERROR", f"Error saving config: {e}", exc=e,
                      module="config_manager", func="save_config")
-            return
+            return False
         self._report_validation("save")
+        return True
 
     def _protect_config_file(self) -> None:
         """Best-effort permission tightening for config files that may contain API keys."""
@@ -228,10 +240,20 @@ class ConfigManager:
             return value
         if type(default) is bool and type(value) is not bool:
             return default
-        if type(default) is int and type(value) is not int:
+        if type(default) is int:
+            if type(value) is bool:
+                return default
+            if type(value) is int:
+                return value
+            if type(value) is float:
+                # Offer compatibility with fields annotated float but whose
+                # caller passes an int default (e.g. cache_ttl_hours=12.5).
+                return int(value) if value.is_integer() else value
             return default
-        if type(default) is float and (type(value) not in (int, float) or isinstance(value, bool)):
-            return default
+        if type(default) is float:
+            if type(value) not in (int, float) or isinstance(value, bool):
+                return default
+            return float(value)
         if type(default) is str and not isinstance(value, str):
             return default
         if type(default) is dict and not isinstance(value, dict):

@@ -1,8 +1,9 @@
 import unittest
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import patch
 
-from src.llm.client import LLMClient
+from src.llm.client import LLMClient, ResponseTruncatedError
 from src.llm.cost_tracker import CostTracker
 from src.llm.retry import ErrorType
 
@@ -96,6 +97,106 @@ class _ClosableClient:
 
 def _install_fake_client(client: LLMClient, fake_client: _FakeClient):
     client.llm_client = cast(Any, fake_client)
+
+
+class _EmbeddingRejected(Exception):
+    status_code = 400
+
+    def __str__(self):
+        return "Unsupported parameter: 'dimensions' is not supported with this model."
+
+
+class _EmbeddingAuthError(Exception):
+    status_code = 401
+
+    def __str__(self):
+        return "Incorrect API key provided."
+
+
+class _EmbeddingItem:
+    def __init__(self, index, embedding):
+        self.index = index
+        self.embedding = embedding
+
+
+class _EmbeddingResponse:
+    def __init__(self, items):
+        self.data = items
+        self.usage = None
+
+
+class _FakeEmbeddings:
+    def __init__(self, handler):
+        self.calls = []
+        self._handler = handler
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        return self._handler(kwargs)
+
+
+class _FakeEmbedClient:
+    def __init__(self, handler):
+        self.embeddings = _FakeEmbeddings(handler)
+
+
+def _install_embed_client(client: LLMClient, fake_client: _FakeEmbedClient):
+    client.embed_client = cast(Any, fake_client)
+
+
+def _embed_config(**overrides):
+    values = {
+        ("embedding", "model"): "text-embedding-3-large",
+        ("embedding", "dimensions"): 1536,
+        ("embedding", "max_retries"): 0,
+        ("embedding", "retry_total_timeout"): 5,
+    }
+    for key, value in overrides.items():
+        values[("embedding", key)] = value
+    return _DummyConfig(values)
+
+
+def _raise(exc):
+    raise exc
+
+
+def _embedding_response(values, dimensions, *, reverse=False):
+    items = [
+        _EmbeddingItem(index, [float(value)] * dimensions)
+        for index, value in enumerate(values)
+    ]
+    if reverse:
+        items.reverse()
+    return _EmbeddingResponse(items)
+
+
+class _ContentMessage:
+    def __init__(self, content):
+        self.content = content
+
+
+class _TruncatedChoice:
+    def __init__(self, finish_reason, content):
+        self.finish_reason = finish_reason
+        self.message = _ContentMessage(content)
+
+
+class _TruncatedResponse:
+    usage = None
+
+    def __init__(self, finish_reason, content="partial"):
+        self.choices = [_TruncatedChoice(finish_reason, content)]
+
+
+def _content_message_response(content):
+    return _TruncatedResponse("stop", content)
+
+
+class _ReasoningRejectedWithoutThinking(Exception):
+    status_code = 400
+
+    def __str__(self):
+        return "Unsupported parameter: thinking.type"
 
 
 class LLMClientParameterOverrideTests(unittest.TestCase):
@@ -462,6 +563,355 @@ class LLMClientParameterOverrideTests(unittest.TestCase):
         calls = fake_client.chat.completions.calls
         self.assertEqual(calls[0]["timeout"], 180)
         self.assertEqual(calls[1]["timeout"], 121)
+
+
+class LLMClientEmbeddingTests(unittest.TestCase):
+    def test_sends_configured_dimensions_and_returns_vector(self):
+        dimensions = 1536
+        client = LLMClient(_embed_config(dimensions=dimensions))
+        fake_client = _FakeEmbedClient(
+            # Simulates text-embedding-3-large: 3072 dims without `dimensions`,
+            # 1536 when the configured truncation parameter is sent.
+            lambda kwargs: _embedding_response(
+                [1], kwargs.get("dimensions", 3072)
+            )
+        )
+        _install_embed_client(client, fake_client)
+
+        vector = client.get_embedding("hello")
+
+        self.assertEqual(len(vector), dimensions)
+        call = fake_client.embeddings.calls[0]
+        self.assertEqual(call["dimensions"], dimensions)
+        self.assertEqual(call["model"], "text-embedding-3-large")
+
+    def test_raises_clear_error_when_provider_ignores_dimensions(self):
+        dimensions = 1536
+        client = LLMClient(_embed_config(dimensions=dimensions))
+        fake_client = _FakeEmbedClient(
+            # Simulates text-embedding-3-large returning 3072 dims: the root
+            # cause of P0-11 was that this was silently accepted/dropped.
+            lambda kwargs: _embedding_response([1], 3072)
+        )
+        _install_embed_client(client, fake_client)
+
+        with self.assertRaises(ValueError) as ctx:
+            client.get_embedding("hello")
+
+        message = str(ctx.exception).lower()
+        self.assertIn("dimension mismatch", message)
+        self.assertIn("3072", message)
+
+    def test_provider_rejecting_dimensions_retries_once_without_and_remembers(self):
+        dimensions = 8
+        client = LLMClient(_embed_config(dimensions=dimensions))
+        fake_client = _FakeEmbedClient(
+            lambda kwargs: (
+                _raise(_EmbeddingRejected())
+                if "dimensions" in kwargs
+                else _embedding_response([2], dimensions)
+            )
+        )
+        _install_embed_client(client, fake_client)
+
+        self.assertEqual(len(client.get_embedding("a")), dimensions)
+        self.assertEqual(len(client.get_embedding("b")), dimensions)
+
+        calls = fake_client.embeddings.calls
+        self.assertEqual(len(calls), 3)
+        self.assertIn("dimensions", calls[0])
+        self.assertNotIn("dimensions", calls[1])
+        self.assertNotIn("dimensions", calls[2])
+
+    def test_batch_vectors_are_ordered_by_item_index(self):
+        dimensions = 4
+        client = LLMClient(
+            _embed_config(model="text-embedding-3-small", dimensions=dimensions)
+        )
+        fake_client = _FakeEmbedClient(
+            lambda kwargs: _embedding_response(
+                [10, 20, 30], dimensions, reverse=True
+            )
+        )
+        _install_embed_client(client, fake_client)
+
+        vectors = client.get_embedding(["a", "b", "c"])
+
+        self.assertEqual([vector[0] for vector in vectors], [10.0, 20.0, 30.0])
+
+    def test_batch_vector_count_mismatch_raises(self):
+        dimensions = 4
+        client = LLMClient(
+            _embed_config(model="text-embedding-3-small", dimensions=dimensions)
+        )
+        fake_client = _FakeEmbedClient(
+            lambda kwargs: _embedding_response([1], dimensions)
+        )
+        _install_embed_client(client, fake_client)
+
+        with self.assertRaises(ValueError) as ctx:
+            client.get_embedding(["a", "b"])
+
+        self.assertIn("count mismatch", str(ctx.exception).lower())
+
+    def test_batch_larger_than_2048_is_chunked(self):
+        dimensions = 4
+        client = LLMClient(
+            _embed_config(
+                model="text-embedding-3-small",
+                dimensions=dimensions,
+                retry_total_timeout=30,
+            )
+        )
+        fake_client = _FakeEmbedClient(
+            lambda kwargs: _embedding_response(
+                [len(text) % 7 for text in kwargs["input"]], dimensions
+            )
+        )
+        _install_embed_client(client, fake_client)
+
+        vectors = client.get_embedding([f"t{i}" for i in range(2050)])
+
+        self.assertEqual(
+            [len(call["input"]) for call in fake_client.embeddings.calls],
+            [2048, 2],
+        )
+        self.assertEqual(len(vectors), 2050)
+
+    def test_auth_failure_on_batch_skips_per_item_fallback_and_suspends(self):
+        dimensions = 4
+        client = LLMClient(
+            _embed_config(model="text-embedding-3-small", dimensions=dimensions)
+        )
+        fake_client = _FakeEmbedClient(
+            lambda kwargs: _raise(_EmbeddingAuthError())
+        )
+        _install_embed_client(client, fake_client)
+
+        with self.assertRaises(_EmbeddingAuthError):
+            client.get_embedding(["a", "b"])
+        self.assertEqual(len(fake_client.embeddings.calls), 1)
+
+        # A non-retryable auth error must not be retried item-by-item.
+        with self.assertRaises(RuntimeError) as ctx:
+            client.get_embedding("c")
+        self.assertIn("suspended", str(ctx.exception).lower())
+        self.assertEqual(len(fake_client.embeddings.calls), 1)
+
+    def test_transient_batch_failure_uses_capped_per_item_fallback(self):
+        dimensions = 4
+        client = LLMClient(
+            _embed_config(model="text-embedding-3-small", dimensions=dimensions)
+        )
+
+        def handler(kwargs):
+            if len(kwargs["input"]) > 1:
+                raise ConnectionError("temporary connection failure")
+            return _embedding_response([7], dimensions)
+
+        fake_client = _FakeEmbedClient(handler)
+        _install_embed_client(client, fake_client)
+
+        vectors = client.get_embedding(["a", "b"])
+
+        self.assertEqual(len(vectors), 2)
+        self.assertEqual(
+            [len(call["input"]) for call in fake_client.embeddings.calls],
+            [2, 1, 1],
+        )
+
+    def test_missing_total_budget_defaults_to_60_seconds(self):
+        dimensions = 4
+        config = _DummyConfig({
+            ("embedding", "model"): "text-embedding-3-small",
+            ("embedding", "dimensions"): dimensions,
+            ("embedding", "max_retries"): 0,
+        })
+        client = LLMClient(config)
+        fake_client = _FakeEmbedClient(
+            lambda kwargs: _embedding_response([1], dimensions)
+        )
+        _install_embed_client(client, fake_client)
+        captured = {}
+
+        def fake_retry(**kwargs):
+            captured.update(kwargs)
+            return kwargs["fn"]()
+
+        with patch("src.llm.client.execute_with_retry", side_effect=fake_retry):
+            client.get_embedding("a")
+
+        self.assertGreater(captured["max_total_seconds"], 59.0)
+        self.assertLessEqual(captured["max_total_seconds"], 60.0)
+
+
+class LLMClientTruncationTests(unittest.TestCase):
+    def _client(self, side_effects, overrides=None):
+        values = {("llm", "model"): "test-model", ("llm", "max_retries"): 0}
+        values.update(overrides or {})
+        client = LLMClient(_DummyConfig(values))
+        fake_client = _FakeClient(side_effects)
+        _install_fake_client(client, fake_client)
+        return client, fake_client
+
+    def test_finish_reason_length_raises_and_preserves_content(self):
+        client, _ = self._client([_TruncatedResponse("length", "half a translation")])
+
+        with self.assertRaises(ResponseTruncatedError) as ctx:
+            client.chat_completion([{"role": "user", "content": "Translate."}])
+
+        self.assertEqual(ctx.exception.reason, "length")
+        self.assertEqual(ctx.exception.content, "half a translation")
+        self.assertIsInstance(ctx.exception, RuntimeError)
+
+    def test_finish_reason_content_filter_raises(self):
+        client, _ = self._client([_TruncatedResponse("content_filter", "blocked")])
+
+        with self.assertRaises(ResponseTruncatedError) as ctx:
+            client.chat_completion([{"role": "user", "content": "Translate."}])
+
+        self.assertEqual(ctx.exception.reason, "content_filter")
+
+    def test_finish_reason_stop_returns_content(self):
+        client, _ = self._client([_content_message_response('{"translation":"ok"}')])
+
+        result = client.chat_completion([{"role": "user", "content": "Translate."}])
+
+        self.assertEqual(result, '{"translation":"ok"}')
+
+    def test_responses_incomplete_max_output_tokens_raises(self):
+        incomplete = SimpleNamespace(
+            output_text="partial",
+            usage=None,
+            status="incomplete",
+            incomplete_details=SimpleNamespace(reason="max_output_tokens"),
+        )
+        client, _ = self._client(
+            [incomplete],
+            {("llm", "api_mode"): "responses"},
+        )
+
+        with self.assertRaises(ResponseTruncatedError) as ctx:
+            client.chat_completion([{"role": "user", "content": "Translate."}])
+
+        self.assertEqual(ctx.exception.reason, "max_output_tokens")
+        self.assertEqual(ctx.exception.content, "partial")
+
+    def test_small_total_budget_below_half_attempt_raises_budget_error(self):
+        from src.llm.retry import RetryTimeBudgetExceeded
+
+        client, fake_client = self._client(
+            [_content_message_response("unused")],
+            {
+                ("llm", "request_timeout"): 120,
+                ("llm", "request_timeout_step"): 15,
+                ("llm", "request_timeout_max"): 180,
+                ("llm", "retry_total_timeout"): 300,
+            },
+        )
+
+        with (
+            patch("src.llm.client.monotonic", side_effect=[100.0, 380.0]),
+            self.assertRaises(RetryTimeBudgetExceeded),
+        ):
+            client.chat_completion([{"role": "user", "content": "Translate."}])
+
+        self.assertEqual(fake_client.chat.completions.calls, [])
+
+    def test_small_budget_warning_is_emitted_once(self):
+        client, _ = self._client(
+            [_content_message_response("ok")],
+            {
+                ("llm", "request_timeout"): 120,
+                ("llm", "retry_total_timeout"): 90,
+            },
+        )
+
+        with patch("src.llm.client.log_emit") as mocked_log:
+            client.chat_completion([{"role": "user", "content": "Translate."}])
+            client.chat_completion([{"role": "user", "content": "Translate."}])
+
+        warnings = [
+            call.args[3]
+            for call in mocked_log.call_args_list
+            if "retry_total_timeout" in str(call.args[3])
+        ]
+        self.assertEqual(len(warnings), 1)
+
+
+class LLMClientBuildFailureTests(unittest.TestCase):
+    def test_startup_warns_once_when_budget_is_smaller_than_request_timeout(self):
+        config = _DummyConfig({
+            ("llm", "api_key"): "sk-test",
+            ("llm", "request_timeout"): 120,
+            ("llm", "retry_total_timeout"): 90,
+        })
+
+        with (
+            patch("src.llm.client.OpenAI"),
+            patch("src.llm.client.log_emit") as mocked_log,
+        ):
+            client = LLMClient(config)
+            client.reload_config()
+
+        warnings = [
+            str(call.args[3])
+            for call in mocked_log.call_args_list
+            if "retry_total_timeout" in str(call.args[3])
+        ]
+        self.assertEqual(len(warnings), 1)
+
+    def test_construction_failure_is_logged_and_distinguished_from_missing_key(self):
+        config = _DummyConfig({("llm", "api_key"): "sk-test"})
+
+        with (
+            patch("src.llm.client.OpenAI", side_effect=RuntimeError("bad proxy")),
+            patch("src.llm.client.log_emit") as mocked_log,
+        ):
+            client = LLMClient(config)
+
+        self.assertIsNone(client.llm_client)
+        error_messages = [
+            str(call.args[3])
+            for call in mocked_log.call_args_list
+            if call.args[2] == "ERROR"
+        ]
+        self.assertTrue(any("bad proxy" in message for message in error_messages))
+
+        construction_message = client._client_unavailable_message("llm", "LLM")
+        self.assertIn("construction failed", construction_message)
+        with self.assertRaises(ValueError) as ctx:
+            client.chat_completion([{"role": "user", "content": "Translate."}])
+        self.assertIn("construction failed", str(ctx.exception))
+
+        missing_key_client = LLMClient(_DummyConfig({}))
+        missing_message = missing_key_client._client_unavailable_message("llm", "LLM")
+        self.assertIn("not initialized", missing_message)
+        self.assertNotIn("construction failed", missing_message)
+
+    def test_reasoning_rejection_retries_when_thinking_was_explicitly_disabled(self):
+        config = _DummyConfig({
+            ("llm", "model"): "deepseek-v4-pro",
+            ("llm", "max_retries"): 0,
+            ("llm", "parameters"): {
+                "reasoning_protocol": "deepseek",
+                "enable_thinking": False,
+            },
+        })
+        client = LLMClient(config)
+        fake_client = _FakeClient([
+            _ReasoningRejectedWithoutThinking(),
+            _Response(),
+        ])
+        _install_fake_client(client, fake_client)
+
+        result = client.chat_completion([{"role": "user", "content": "Translate."}])
+
+        self.assertEqual(result, '{"translation":"ok"}')
+        self.assertEqual(len(fake_client.chat.completions.calls), 2)
+        first, second = fake_client.chat.completions.calls
+        self.assertEqual(first["extra_body"], {"thinking": {"type": "disabled"}})
+        self.assertNotIn("extra_body", second)
 
 
 if __name__ == "__main__":

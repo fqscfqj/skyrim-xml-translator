@@ -1,5 +1,7 @@
+import json
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -61,6 +63,87 @@ class LRUCachePersistenceTests(unittest.TestCase):
 
             self.assertTrue(mocked_log.called)
             self.assertIn("Failed to persist LRU cache", mocked_log.call_args.args[3])
+
+
+class LRUCacheTTLAndConcurrencyTests(unittest.TestCase):
+    def test_put_sweeps_expired_entries(self):
+        cache = LRUCache(max_size=10, ttl_seconds=0.05)
+        cache.put("old", "value")
+        time.sleep(0.08)
+
+        cache.put("new", "value")
+
+        self.assertEqual(cache.size(), 1)
+        self.assertIsNone(cache.get("old"))
+        self.assertEqual(cache.get("new"), "value")
+
+    def test_save_filters_expired_entries(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            persist_path = Path(temp_dir) / "cache.json"
+            cache = LRUCache(
+                max_size=10, ttl_seconds=0.05, persist_path=str(persist_path)
+            )
+            cache.put("old", "expired")
+            time.sleep(0.08)
+            cache.put("fresh", "kept")
+
+            cache.save_to_disk()
+
+            with open(persist_path, "r", encoding="utf-8") as handle:
+                persisted = json.load(handle)
+            self.assertNotIn("old", persisted)
+            self.assertIn("fresh", persisted)
+
+    def test_concurrent_saves_produce_valid_file_and_leave_no_temp_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            persist_path = Path(temp_dir) / "cache.json"
+            cache = LRUCache(max_size=1000, persist_path=str(persist_path))
+            for index in range(50):
+                cache.put(f"key-{index}", {"value": index})
+
+            def save_repeatedly():
+                for _ in range(10):
+                    cache.save_to_disk()
+
+            threads = [threading.Thread(target=save_repeatedly) for _ in range(8)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=10)
+
+            self.assertTrue(all(not thread.is_alive() for thread in threads))
+            with open(persist_path, "r", encoding="utf-8") as handle:
+                persisted = json.load(handle)
+            self.assertEqual(len(persisted), 50)
+            self.assertEqual(list(Path(temp_dir).glob("cache.json.tmp*")), [])
+
+    def test_os_replace_retries_windows_sharing_violations(self):
+        def winerror(code):
+            error = OSError(f"WinError {code}")
+            error.winerror = code
+            return error
+
+        with patch(
+            "src.cache.lru_cache.os.replace",
+            side_effect=[winerror(32), winerror(5), None],
+        ) as mocked_replace:
+            LRUCache._replace_with_retry("src.tmp", "dst.json")
+
+        self.assertEqual(mocked_replace.call_count, 3)
+
+    def test_os_replace_gives_up_after_retry_budget(self):
+        def winerror(code):
+            error = OSError(f"WinError {code}")
+            error.winerror = code
+            return error
+
+        with patch(
+            "src.cache.lru_cache.os.replace", side_effect=winerror(32)
+        ) as mocked_replace:
+            with self.assertRaises(OSError):
+                LRUCache._replace_with_retry("src.tmp", "dst.json", attempts=2)
+
+        self.assertEqual(mocked_replace.call_count, 2)
 
 
 if __name__ == "__main__":

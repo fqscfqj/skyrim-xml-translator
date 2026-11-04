@@ -4,6 +4,10 @@ Key layout: ``tc_v2:<style>:<sha256>`` where sha256 covers
 (source, style, lang, context_key) via JSON encoding. Readable ``<style>``
 prefix allows per-style eviction and version-prefix drops without
 decoding hashes. No strip: source whitespace is significant.
+
+Deferred: a ``source -> keys`` side index (C-05) is intentionally not added in
+this pass because its invalidation path lives in ``translator.py``; the key
+format and ``invalidate_all`` / ``invalidate_by_style`` semantics are kept.
 """
 
 from typing import Optional
