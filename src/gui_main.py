@@ -3101,10 +3101,6 @@ class MainWindow(QMainWindow):
                 border-color: #2563eb;
                 background-color: #fbfdff;
             }
-            QComboBox::drop-down {
-                border: none;
-                width: 24px;
-            }
             QComboBox QAbstractItemView {
                 background-color: #ffffff;
                 color: #334155;
@@ -3123,13 +3119,6 @@ class MainWindow(QMainWindow):
             QAbstractSpinBox:focus {
                 border-color: #2563eb;
                 background-color: #fbfdff;
-            }
-            QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {
-                background-color: #eef2f7;
-                border: none;
-            }
-            QAbstractSpinBox::up-button:hover, QAbstractSpinBox::down-button:hover {
-                background-color: #f8fafc;
             }
             QLabel {
                 color: #334155;
@@ -3354,10 +3343,6 @@ class MainWindow(QMainWindow):
             border-color: #76a9ff;
             background-color: #111821;
         }
-        QComboBox::drop-down {
-            border: none;
-            width: 24px;
-        }
         QComboBox QAbstractItemView {
             background-color: #1e2228;
             color: #dce3ec;
@@ -3376,13 +3361,6 @@ class MainWindow(QMainWindow):
         QAbstractSpinBox:focus {
             border-color: #76a9ff;
             background-color: #111821;
-        }
-        QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {
-            background-color: #252b35;
-            border: none;
-        }
-        QAbstractSpinBox::up-button:hover, QAbstractSpinBox::down-button:hover {
-            background-color: #2e3648;
         }
         QLabel {
             color: #c8d4e4;
@@ -4236,6 +4214,18 @@ class MainWindow(QMainWindow):
                 color: #334155;
                 selection-background-color: #2563eb;
                 selection-color: #ffffff;
+                font-size: 9pt;
+            }
+            #configTab QAbstractSpinBox QLineEdit {
+                border: none;
+                border-radius: 0;
+                padding: 0;
+                min-height: 0;
+                color: #334155;
+                background-color: transparent;
+                selection-background-color: #2563eb;
+                selection-color: #ffffff;
+                font-size: 9pt;
             }
             #configTab QLineEdit:focus,
             #configTab QComboBox:focus,
@@ -4249,11 +4239,6 @@ class MainWindow(QMainWindow):
                 border-color: #dde5ef;
                 background-color: #eef2f7;
                 color: #94a3b8;
-            }
-            #configTab QComboBox::drop-down {
-                border: none;
-                width: 24px;
-                background: transparent;
             }
             #configTab QCheckBox {
                 spacing: 7px;
@@ -4334,6 +4319,18 @@ class MainWindow(QMainWindow):
             color: #f3f4f6;
             selection-background-color: #4c7dff;
             selection-color: #ffffff;
+            font-size: 9pt;
+        }
+        #configTab QAbstractSpinBox QLineEdit {
+            border: none;
+            border-radius: 0;
+            padding: 0;
+            min-height: 0;
+            color: #f3f4f6;
+            background-color: transparent;
+            selection-background-color: #4c7dff;
+            selection-color: #ffffff;
+            font-size: 9pt;
         }
         #configTab QLineEdit:focus,
         #configTab QComboBox:focus,
@@ -4347,11 +4344,6 @@ class MainWindow(QMainWindow):
             border-color: #303541;
             background-color: #262b34;
             color: #9099ab;
-        }
-        #configTab QComboBox::drop-down {
-            border: none;
-            width: 24px;
-            background: transparent;
         }
         #configTab QCheckBox {
             spacing: 7px;
@@ -4512,14 +4504,14 @@ class MainWindow(QMainWindow):
                     widget.setValue(stored_value)
 
         temp_spin = NoWheelDoubleSpinBox()
-        temp_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        temp_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         temp_spin.setRange(0.0, 2.0)
         temp_spin.setSingleStep(0.05)
         temp_spin.setValue(0.3)
         add_param_control("temperature", i18n.t("param_temperature"), temp_spin)
 
         top_p_spin = NoWheelDoubleSpinBox()
-        top_p_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        top_p_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         top_p_spin.setRange(0.0, 1.0)
         top_p_spin.setSingleStep(0.05)
         top_p_spin.setValue(1.0)
@@ -4591,14 +4583,14 @@ class MainWindow(QMainWindow):
                     widget.setValue(stored_value)
 
         s_temp_spin = NoWheelDoubleSpinBox()
-        s_temp_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        s_temp_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         s_temp_spin.setRange(0.0, 2.0)
         s_temp_spin.setSingleStep(0.05)
         s_temp_spin.setValue(0.1) # Default low temp for extraction
         add_search_param_control("temperature", i18n.t("param_temperature"), s_temp_spin)
 
         s_top_p_spin = NoWheelDoubleSpinBox()
-        s_top_p_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        s_top_p_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         s_top_p_spin.setRange(0.0, 1.0)
         s_top_p_spin.setSingleStep(0.05)
         s_top_p_spin.setValue(1.0)
@@ -4671,14 +4663,14 @@ class MainWindow(QMainWindow):
                     widget.setValue(stored_value)
 
         sf_temp_spin = NoWheelDoubleSpinBox()
-        sf_temp_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        sf_temp_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         sf_temp_spin.setRange(0.0, 2.0)
         sf_temp_spin.setSingleStep(0.05)
         sf_temp_spin.setValue(0.1)
         add_search_fallback_param_control("temperature", i18n.t("param_temperature"), sf_temp_spin)
 
         sf_top_p_spin = NoWheelDoubleSpinBox()
-        sf_top_p_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        sf_top_p_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         sf_top_p_spin.setRange(0.0, 1.0)
         sf_top_p_spin.setSingleStep(0.05)
         sf_top_p_spin.setValue(1.0)
@@ -4717,7 +4709,7 @@ class MainWindow(QMainWindow):
         self.embed_model = QLineEdit(self.config_manager.get("embedding", "model"))
         
         self.embed_dim = NoWheelSpinBox()
-        self.embed_dim.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.embed_dim.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         self.embed_dim.setRange(1, 8192)
         self.embed_dim.setValue(self.config_manager.get("embedding", "dimensions", 1536))
         self.embed_dim.setToolTip(i18n.t("tooltip_embed_dim"))
@@ -4735,13 +4727,13 @@ class MainWindow(QMainWindow):
         threads_layout.setVerticalSpacing(6)
 
         self.trans_threads = NoWheelSpinBox()
-        self.trans_threads.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.trans_threads.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         self.trans_threads.setRange(1, 99)
         self.trans_threads.setValue(self.config_manager.get("threads", "translation", 8))
         self.trans_threads.setToolTip(i18n.t("tooltip_trans_threads"))
         
         self.vec_threads = NoWheelSpinBox()
-        self.vec_threads.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.vec_threads.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         self.vec_threads.setRange(1, 99)
         self.vec_threads.setValue(self.config_manager.get("threads", "vectorization", 8))
         self.vec_threads.setToolTip(i18n.t("tooltip_vec_threads"))
@@ -4770,7 +4762,7 @@ class MainWindow(QMainWindow):
         ))
 
         self.short_text_batch_max_chars = NoWheelSpinBox()
-        self.short_text_batch_max_chars.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.short_text_batch_max_chars.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         self.short_text_batch_max_chars.setRange(1, 500)
         self.short_text_batch_max_chars.setValue(self.config_manager.get("general", "short_text_batch_max_chars", 50))
         self.short_text_batch_max_chars.setToolTip(i18n.t(
@@ -4779,7 +4771,7 @@ class MainWindow(QMainWindow):
         ))
 
         self.short_text_batch_size = NoWheelSpinBox()
-        self.short_text_batch_size.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.short_text_batch_size.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         self.short_text_batch_size.setRange(2, 50)
         self.short_text_batch_size.setValue(self.config_manager.get("general", "short_text_batch_size", 8))
         self.short_text_batch_size.setToolTip(i18n.t(
@@ -4807,21 +4799,21 @@ class MainWindow(QMainWindow):
         rag_layout.setVerticalSpacing(6)
 
         self.rag_threshold = NoWheelDoubleSpinBox()
-        self.rag_threshold.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_threshold.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         self.rag_threshold.setRange(0.0, 1.0)
         self.rag_threshold.setSingleStep(0.05)
         self.rag_threshold.setValue(self.config_manager.get("rag", "similarity_threshold", 0.75))
         self.rag_threshold.setToolTip(i18n.t("tooltip_rag_threshold"))
 
         self.rag_short_max_results = NoWheelSpinBox()
-        self.rag_short_max_results.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_short_max_results.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         self.rag_short_max_results.setRange(0, 200)
         self.rag_short_max_results.setSingleStep(1)
         self.rag_short_max_results.setValue(self.config_manager.get("rag", "short_term_max_results", 5))
         self.rag_short_max_results.setToolTip(i18n.t("tooltip_rag_short_max_results"))
 
         self.rag_long_max_results = NoWheelSpinBox()
-        self.rag_long_max_results.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_long_max_results.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         self.rag_long_max_results.setRange(0, 200)
         self.rag_long_max_results.setSingleStep(1)
         self.rag_long_max_results.setValue(self.config_manager.get("rag", "long_term_max_results", 2))
@@ -4841,7 +4833,7 @@ class MainWindow(QMainWindow):
         rag_layout.addRow(rag_advanced_title)
 
         self.rag_keyword_max_queries = NoWheelSpinBox()
-        self.rag_keyword_max_queries.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_keyword_max_queries.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         self.rag_keyword_max_queries.setRange(1, 512)
         self.rag_keyword_max_queries.setValue(self.config_manager.get("rag", "keyword_max_queries", 128))
         self.rag_keyword_max_queries.setToolTip(i18n.t("tooltip_rag_keyword_max_queries"))
@@ -4866,7 +4858,7 @@ class MainWindow(QMainWindow):
         rag_layout.addRow(self.rag_keyword_task_keep_original)
 
         self.rag_short_term_max_chars = NoWheelSpinBox()
-        self.rag_short_term_max_chars.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_short_term_max_chars.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         self.rag_short_term_max_chars.setRange(1, 1024)
         self.rag_short_term_max_chars.setSingleStep(1)
         self.rag_short_term_max_chars.setValue(self.config_manager.get("rag", "short_term_max_chars", 32))
@@ -4886,7 +4878,7 @@ class MainWindow(QMainWindow):
         rag_layout.addRow(self.rag_keyword_weight_enabled)
 
         self.rag_min_vector_score = NoWheelDoubleSpinBox()
-        self.rag_min_vector_score.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_min_vector_score.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         self.rag_min_vector_score.setRange(0.0, 1.0)
         self.rag_min_vector_score.setSingleStep(0.01)
         self.rag_min_vector_score.setValue(self.config_manager.get("rag", "min_vector_score", 0.45))
@@ -4906,28 +4898,28 @@ class MainWindow(QMainWindow):
         expert_layout.setSpacing(6)
 
         self.rag_keyword_weight_candidate_pool_size = NoWheelSpinBox()
-        self.rag_keyword_weight_candidate_pool_size.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_keyword_weight_candidate_pool_size.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         self.rag_keyword_weight_candidate_pool_size.setRange(1, 500)
         self.rag_keyword_weight_candidate_pool_size.setValue(self.config_manager.get("rag", "keyword_weight_candidate_pool_size", 24))
         self.rag_keyword_weight_candidate_pool_size.setToolTip(i18n.t("tooltip_rag_keyword_weight_candidate_pool_size"))
         expert_layout.addRow(i18n.t("label_rag_keyword_weight_candidate_pool_size", "Keyword weight candidate pool size:"), self.rag_keyword_weight_candidate_pool_size)
 
         self.rag_keyword_weight_keep_k = NoWheelSpinBox()
-        self.rag_keyword_weight_keep_k.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_keyword_weight_keep_k.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         self.rag_keyword_weight_keep_k.setRange(1, 500)
         self.rag_keyword_weight_keep_k.setValue(self.config_manager.get("rag", "keyword_weight_keep_k", 24))
         self.rag_keyword_weight_keep_k.setToolTip(i18n.t("tooltip_rag_keyword_weight_keep_k"))
         expert_layout.addRow(i18n.t("label_rag_keyword_weight_keep_k", "Keyword weight keep top-k:"), self.rag_keyword_weight_keep_k)
 
         self.rag_keyword_weight_min_primary_hits = NoWheelSpinBox()
-        self.rag_keyword_weight_min_primary_hits.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_keyword_weight_min_primary_hits.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         self.rag_keyword_weight_min_primary_hits.setRange(1, 500)
         self.rag_keyword_weight_min_primary_hits.setValue(self.config_manager.get("rag", "keyword_weight_min_primary_hits", 8))
         self.rag_keyword_weight_min_primary_hits.setToolTip(i18n.t("tooltip_rag_keyword_weight_min_primary_hits"))
         expert_layout.addRow(i18n.t("label_rag_keyword_weight_min_primary_hits", "Keyword weight min primary hits:"), self.rag_keyword_weight_min_primary_hits)
 
         self.rag_keyword_weight_exact_boost = NoWheelDoubleSpinBox()
-        self.rag_keyword_weight_exact_boost.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_keyword_weight_exact_boost.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         self.rag_keyword_weight_exact_boost.setRange(0.0, 2.0)
         self.rag_keyword_weight_exact_boost.setSingleStep(0.01)
         self.rag_keyword_weight_exact_boost.setValue(self.config_manager.get("rag", "keyword_weight_exact_boost", 0.14))
@@ -4935,7 +4927,7 @@ class MainWindow(QMainWindow):
         expert_layout.addRow(i18n.t("label_rag_keyword_weight_exact_boost", "Keyword weight exact boost:"), self.rag_keyword_weight_exact_boost)
 
         self.rag_keyword_weight_contains_boost = NoWheelDoubleSpinBox()
-        self.rag_keyword_weight_contains_boost.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_keyword_weight_contains_boost.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         self.rag_keyword_weight_contains_boost.setRange(0.0, 2.0)
         self.rag_keyword_weight_contains_boost.setSingleStep(0.01)
         self.rag_keyword_weight_contains_boost.setValue(self.config_manager.get("rag", "keyword_weight_contains_boost", 0.06))
@@ -4943,7 +4935,7 @@ class MainWindow(QMainWindow):
         expert_layout.addRow(i18n.t("label_rag_keyword_weight_contains_boost", "Keyword weight contains boost:"), self.rag_keyword_weight_contains_boost)
 
         self.rag_keyword_weight_token_boost = NoWheelDoubleSpinBox()
-        self.rag_keyword_weight_token_boost.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_keyword_weight_token_boost.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         self.rag_keyword_weight_token_boost.setRange(0.0, 2.0)
         self.rag_keyword_weight_token_boost.setSingleStep(0.01)
         self.rag_keyword_weight_token_boost.setValue(self.config_manager.get("rag", "keyword_weight_token_boost", 0.04))
@@ -4951,14 +4943,14 @@ class MainWindow(QMainWindow):
         expert_layout.addRow(i18n.t("label_rag_keyword_weight_token_boost", "Keyword weight token boost:"), self.rag_keyword_weight_token_boost)
 
         self.rag_keyword_weight_anchor_max_df = NoWheelSpinBox()
-        self.rag_keyword_weight_anchor_max_df.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_keyword_weight_anchor_max_df.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         self.rag_keyword_weight_anchor_max_df.setRange(1, 200000)
         self.rag_keyword_weight_anchor_max_df.setValue(self.config_manager.get("rag", "keyword_weight_anchor_max_df", 500))
         self.rag_keyword_weight_anchor_max_df.setToolTip(i18n.t("tooltip_rag_keyword_weight_anchor_max_df"))
         expert_layout.addRow(i18n.t("label_rag_keyword_weight_anchor_max_df", "Anchor max DF:"), self.rag_keyword_weight_anchor_max_df)
 
         self.rag_keyword_weight_anchor_boost = NoWheelDoubleSpinBox()
-        self.rag_keyword_weight_anchor_boost.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_keyword_weight_anchor_boost.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         self.rag_keyword_weight_anchor_boost.setRange(0.0, 2.0)
         self.rag_keyword_weight_anchor_boost.setSingleStep(0.01)
         self.rag_keyword_weight_anchor_boost.setValue(self.config_manager.get("rag", "keyword_weight_anchor_boost", 0.18))
@@ -4966,7 +4958,7 @@ class MainWindow(QMainWindow):
         expert_layout.addRow(i18n.t("label_rag_keyword_weight_anchor_boost", "Anchor boost:"), self.rag_keyword_weight_anchor_boost)
 
         self.rag_glossary_context_max_chars = NoWheelSpinBox()
-        self.rag_glossary_context_max_chars.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_glossary_context_max_chars.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         self.rag_glossary_context_max_chars.setRange(0, 200000)
         self.rag_glossary_context_max_chars.setSingleStep(100)
         self.rag_glossary_context_max_chars.setValue(self.config_manager.get("rag", "glossary_context_max_chars", 4000))
@@ -4977,7 +4969,7 @@ class MainWindow(QMainWindow):
         expert_layout.addRow(i18n.t("label_rag_glossary_context_max_chars", "Glossary context max chars:"), self.rag_glossary_context_max_chars)
 
         self.rag_format_extra_retries = NoWheelSpinBox()
-        self.rag_format_extra_retries.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_format_extra_retries.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         self.rag_format_extra_retries.setRange(0, 10)
         self.rag_format_extra_retries.setValue(self.config_manager.get("rag", "format_extra_retries", 2))
         self.rag_format_extra_retries.setToolTip(i18n.t(
@@ -4987,7 +4979,7 @@ class MainWindow(QMainWindow):
         expert_layout.addRow(i18n.t("label_rag_format_extra_retries", "Format extra retries:"), self.rag_format_extra_retries)
 
         self.rag_latin_ratio_threshold = NoWheelDoubleSpinBox()
-        self.rag_latin_ratio_threshold.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rag_latin_ratio_threshold.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         self.rag_latin_ratio_threshold.setRange(0.1, 20.0)
         self.rag_latin_ratio_threshold.setSingleStep(0.1)
         self.rag_latin_ratio_threshold.setValue(self.config_manager.get("rag", "latin_ratio_threshold", 2.0))

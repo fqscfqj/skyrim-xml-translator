@@ -24,8 +24,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QApplication, QTableWidget, QTableWidgetItem
+from PyQt6.QtCore import QPoint, Qt
+from PyQt6.QtTest import QTest
+from PyQt6.QtWidgets import (
+    QAbstractSpinBox, QApplication, QComboBox, QScrollArea, QTabWidget,
+    QTableWidget, QTableWidgetItem,
+)
 
 from src.gui_main import MainWindow
 
@@ -35,6 +39,7 @@ def qt_app():
     app = QApplication.instance()
     if app is None:
         app = QApplication([])
+    app.setStyle("Fusion")
     return app
 
 
@@ -456,6 +461,103 @@ def _make_test_window(monkeypatch, tmp_path):
     monkeypatch.setattr(gui, "ConfigManager", lambda: _FakeConfigManager(tmp_path))
     monkeypatch.setattr(gui, "LLMClient", _FakeLLMClientForWindow)
     return gui.MainWindow()
+
+
+def _show_settings_control(qt_app, window, widget):
+    tabs = window.findChild(QTabWidget)
+    tabs.setCurrentWidget(window.config_tab_container)
+    scroll = window.config_tab_container.findChild(QScrollArea)
+    scroll.ensureWidgetVisible(widget, 0, 20)
+    qt_app.processEvents()
+    assert not widget.visibleRegion().isEmpty()
+    return window.childAt(widget.mapTo(window, widget.rect().center()))
+
+
+@pytest.mark.parametrize("window_size", [(900, 650), (1280, 900)])
+@pytest.mark.parametrize("color_mode", ["light", "dark"])
+def test_settings_numeric_editors_are_visible_and_clickable(
+    qt_app, monkeypatch, tmp_path, window_size, color_mode,
+):
+    window = _make_test_window(monkeypatch, tmp_path)
+    try:
+        window.resize(*window_size)
+        window.show()
+        window._apply_color_mode(color_mode)
+        _show_settings_control(qt_app, window, window.rag_expert_toggle)
+        QTest.mouseClick(
+            window.rag_expert_toggle, Qt.MouseButton.LeftButton,
+            pos=QPoint(8, window.rag_expert_toggle.height() // 2),
+        )
+        assert window.rag_expert_container.isVisible()
+
+        for spin in window.config_tab_container.findChildren(QAbstractSpinBox):
+            hit = _show_settings_control(qt_app, window, spin)
+            editor = spin.lineEdit()
+            # Sending keys directly to a 1px-wide editor still works. Check
+            # visible geometry and the mouse hit target before sending input.
+            assert editor.width() >= spin.width() // 2, (
+                f"{type(spin).__name__}: editor {editor.geometry().getRect()} "
+                f"inside {spin.geometry().getRect()}"
+            )
+            assert editor.height() >= editor.fontMetrics().height()
+            assert hit is editor
+            if not spin.isEnabled():
+                continue
+            QTest.mouseClick(editor, Qt.MouseButton.LeftButton, pos=editor.rect().center())
+            assert qt_app.focusWidget() in (spin, editor)
+            QTest.keyClick(qt_app.focusWidget(), Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
+            value = spin.minimum() + spin.singleStep()
+            QTest.keyClicks(qt_app.focusWidget(), str(value))
+            QTest.keyClick(qt_app.focusWidget(), Qt.Key.Key_Tab)
+            assert spin.value() == pytest.approx(value)
+    finally:
+        window.close()
+
+
+def test_settings_dropdowns_open_and_select_with_mouse(qt_app, monkeypatch, tmp_path):
+    window = _make_test_window(monkeypatch, tmp_path)
+    try:
+        window.resize(1000, 800)
+        window.show()
+        for controls in (
+            window.model_param_controls, window.search_param_controls,
+            window.search_fallback_param_controls,
+        ):
+            for checkbox, widget in controls.values():
+                _show_settings_control(qt_app, window, checkbox)
+                if checkbox.isChecked():
+                    QTest.mouseClick(
+                        checkbox, Qt.MouseButton.LeftButton,
+                        pos=QPoint(8, checkbox.height() // 2),
+                    )
+                assert not widget.isEnabled()
+                QTest.mouseClick(
+                    checkbox, Qt.MouseButton.LeftButton,
+                    pos=QPoint(8, checkbox.height() // 2),
+                )
+                assert widget.isEnabled()
+
+        for combo in window.config_tab_container.findChildren(QComboBox):
+            hit = _show_settings_control(qt_app, window, combo)
+            assert hit is combo
+            QTest.mouseClick(combo, Qt.MouseButton.LeftButton, pos=combo.rect().center())
+            qt_app.processEvents()
+            view = combo.view()
+            assert view.isVisible()
+            # Qt ignores popup releases for roughly 500ms after opening.
+            QTest.qWait(600)
+            target = (combo.currentIndex() + 1) % combo.count()
+            index = combo.model().index(target, combo.modelColumn(), combo.rootModelIndex())
+            view.scrollTo(index)
+            qt_app.processEvents()
+            QTest.mouseClick(
+                view.viewport(), Qt.MouseButton.LeftButton,
+                pos=view.visualRect(index).center(),
+            )
+            assert combo.currentIndex() == target
+            assert not view.isVisible()
+    finally:
+        window.close()
 
 
 def test_rag_is_deferred_then_becomes_ready(qt_app, monkeypatch, tmp_path):
