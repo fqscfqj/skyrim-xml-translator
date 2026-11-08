@@ -23,7 +23,10 @@ class _DummyPromptManager:
 
 
 class _DummyGlossaryManager:
-    _COMMON_WORDS = {"a", "after", "all", "is", "it", "of", "the"}
+    _COMMON_WORDS = {
+        "a", "after", "all", "anything", "in", "is", "it", "me", "of",
+        "something", "the",
+    }
     _NORMALIZE_RE = re.compile(r"[^0-9a-zA-Z\u4e00-\u9fff]+")
     _WHITESPACE_RE = re.compile(r"\s+")
 
@@ -59,7 +62,8 @@ class _DummyGlossaryManager:
 
     @staticmethod
     def is_signal_token(token: str) -> bool:
-        return len(str(token or "")) >= 3
+        normalized = str(token or "").lower()
+        return len(normalized) >= 3 and normalized not in _DummyGlossaryManager._COMMON_WORDS
 
     def ensure_token_df(self):
         self._token_df = {}
@@ -301,6 +305,55 @@ class RAGSearchTokenContainmentDirectMatchTests(unittest.TestCase):
 
         self.assertEqual(results, {})
         self.assertIsNone(debug[0]["direct_match"])
+
+
+class RAGSearchGroundingTests(unittest.TestCase):
+    def test_dialogue_recall_drops_fragments_and_unmentioned_related_terms(self):
+        glossary = _DummyGlossaryManager({
+            "Riften": "裂谷城",
+            "Jarl": "领主",
+            "Riften Ratway": "裂谷鼠道",
+            "in": "里",
+            "of": ",",
+            "Me.": "我。",
+            "Anything?": "有东西？",
+        })
+        searcher = RAGSearcher(
+            cast(Any, _DummyVectorStore(
+                ["Riften", "Riften Ratway", "Jarl", "in", "of", "Me.", "Anything?"],
+                [0.99, 0.98, 0.97, 0.96, 0.95, 0.94, 0.93],
+            )),
+            cast(Any, glossary),
+            _DummyConfig({
+                ("rag", "keyword_weight_enabled"): False,
+                ("rag", "min_vector_score"): 0.0,
+                ("rag", "short_term_max_results"): 10,
+                ("rag", "long_term_max_results"): 10,
+            }),
+            _DummyLLMClient(),
+        )
+
+        results, _debug = cast(
+            tuple[dict[str, str], list[dict[str, Any]]],
+            searcher.search(
+                ["Riften", "Jarl"],
+                source_text="Every man in Riften wants something from me. A word with the Jarl.",
+                threshold=0.1,
+                top_k=10,
+                return_debug=True,
+            ),
+        )
+
+        self.assertEqual({"Riften": "裂谷城", "Jarl": "领主"}, results)
+        decisions = [query_debug["candidate_decisions"] for query_debug in _debug]
+        self.assertTrue(any(
+            item.get("Me.", {}).get("reason") == "low_signal_term"
+            for item in decisions
+        ))
+        self.assertTrue(any(
+            item.get("Riften Ratway", {}).get("reason") == "not_grounded_in_source"
+            for item in decisions
+        ))
 
 
 class RAGSearchCandidateRejectionDebugTests(unittest.TestCase):

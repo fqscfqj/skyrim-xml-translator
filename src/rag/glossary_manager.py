@@ -37,6 +37,7 @@ class GlossaryManager:
         'during', 'before', 'after', 'above', 'below', 'to', 'from', 'up', 'down',
         'in', 'out', 'on', 'off', 'over', 'under', 'again', 'further', 'once',
         'here', 'there', 'where', 'why', 'how', 'all', 'each', 'few', 'more',
+        'anything', 'everything', 'nothing', 'something', 'anyone', 'someone', 'everyone',
         'most', 'other', 'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same',
         'so', 'than', 'too', 'very', 'just', 'can', 'will', 'don', 'should', 'now',
         'he', 'she', 'it', 'we', 'they', 'you', 'him', 'her', 'his', 'my', 'your',

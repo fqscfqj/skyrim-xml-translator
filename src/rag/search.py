@@ -174,6 +174,8 @@ class RAGSearcher:
                 term = canonical
             if term in merged:
                 continue
+            if self._is_low_signal_term(term):
+                continue
             translation = self.glossary_manager.glossary.get(term)
             if translation is None:
                 continue
@@ -417,6 +419,18 @@ class RAGSearcher:
             if has_possessive_token and signal_count <= 1:
                 return True
         return False
+
+    def _is_low_signal_term(self, term: str) -> bool:
+        return not self._build_signal_signature(term)
+
+    def _term_is_grounded_in_source(self, term: str, source_text: str) -> bool:
+        if self._raw_term_appears_in_source(term, source_text):
+            return True
+        normalized_term = self.glossary_manager.normalize_term_key(term)
+        normalized_source = self.glossary_manager.normalize_term_key(source_text)
+        term_tokens = [token for token in normalized_term.split() if token]
+        source_tokens = [token for token in normalized_source.split() if token]
+        return self._contains_token_sequence(source_tokens, term_tokens)
 
     def _containment_weights(self) -> dict[str, float]:
         return {
@@ -1211,6 +1225,13 @@ class RAGSearcher:
                             canonical_term=canonical_term, source=candidate_source,
                         )
                     return
+                if self._is_low_signal_term(canonical_term):
+                    if return_debug:
+                        record_candidate_decision(
+                            term, raw_score, "rejected", "low_signal_term",
+                            canonical_term=canonical_term, source=candidate_source,
+                        )
+                    return
                 if self._is_sentence_like_term(canonical_term):
                     if return_debug:
                         sentence_like_candidate_terms.add(canonical_term)
@@ -1236,6 +1257,15 @@ class RAGSearcher:
                     if return_debug:
                         record_candidate_decision(
                             term, raw_score, "rejected", "no_signal_overlap",
+                            canonical_term=canonical_term, source=candidate_source,
+                        )
+                    return
+                if not direct and source_text and not self._term_is_grounded_in_source(
+                    canonical_term, source_text
+                ):
+                    if return_debug:
+                        record_candidate_decision(
+                            term, raw_score, "rejected", "not_grounded_in_source",
                             canonical_term=canonical_term, source=candidate_source,
                         )
                     return
