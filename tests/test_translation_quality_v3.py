@@ -346,22 +346,38 @@ class RichMetaTests(unittest.TestCase):
         self.assertIn("- Alpha -> 甲", context)
         self.assertIn("- Beta -> 乙", context)
 
-    def test_missing_primary_translation_is_warning_and_not_cached(self):
+    def test_glossary_primary_mismatch_is_not_quality_issue(self):
         issues = self.checker.check(
             "Dragonborn returns.",
             "归来者回来了。",
             matched_terms={"Dragonborn": "龙裔"},
             target_lang="zh",
         )
-        consistency = [i for i in issues if i.rule_id == "term_consistency"]
-        self.assertTrue(consistency, issues)
-        self.assertEqual("warning", consistency[0].severity)
+        self.assertFalse(
+            any(i.rule_id == "term_consistency" for i in issues), issues)
         self.assertFalse(self.checker.should_retry(issues))
 
         translator = object.__new__(Translator)
         translator._text_analyzer = TextAnalyzer()
-        self.assertFalse(translator._should_cache_translation(
+        self.assertTrue(translator._should_cache_translation(
             "Dragonborn returns.", "归来者回来了。", issues))
+
+    def test_natural_idiom_does_not_trigger_glossary_warning(self):
+        source = (
+            "Good. Come find me when you're ready. My doors are open to you "
+            "now, and my household knows to keep its mouth shut."
+        )
+        translation = "很好。等你准备好了就来找我。我的大门现在为你敞开，我家里的人也知道要管住嘴。"
+        issues = self.checker.check(
+            source,
+            translation,
+            matched_terms={"Ready": "准备……", "Mouth": "嘴部"},
+            target_lang="zh",
+        )
+        self.assertFalse(
+            any(i.rule_id == "term_consistency" for i in issues), issues)
+        self.assertFalse(any(i.severity == "error" for i in issues), issues)
+        self.assertFalse(any(i.severity == "warning" for i in issues), issues)
 
     def test_rich_meta_falls_back_to_glossary_manager(self):
         class _Manager:
@@ -556,7 +572,7 @@ class CachePolicyTests(unittest.TestCase):
         self.assertEqual(1, len(calls))
         self.assertEqual("success", debug["result_status"])
 
-    def test_warning_level_issues_are_not_cached(self):
+    def test_identity_warning_is_not_cached_but_glossary_mismatch_is_cached(self):
         translator = object.__new__(Translator)
         translator._text_analyzer = TextAnalyzer()
         checker = QualityChecker()
@@ -566,7 +582,8 @@ class CachePolicyTests(unittest.TestCase):
         consistency = checker.check(
             "Dragonborn returns.", "归来者回来了。",
             matched_terms={"Dragonborn": "龙裔"}, target_lang="zh")
-        self.assertFalse(translator._should_cache_translation(
+        self.assertFalse(any(i.rule_id == "term_consistency" for i in consistency))
+        self.assertTrue(translator._should_cache_translation(
             "Dragonborn returns.", "归来者回来了。", consistency))
 
     def test_periodic_cache_save_is_throttled_by_time(self):

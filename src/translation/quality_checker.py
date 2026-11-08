@@ -202,15 +202,6 @@ class QualityChecker:
         if forbidden_issue:
             issues.append(forbidden_issue)
 
-        consistency_issue = self._check_term_consistency(
-            source_text,
-            translation_text,
-            matched_terms,
-            rich_meta=rich_meta,
-        )
-        if consistency_issue:
-            issues.append(consistency_issue)
-
         residue_issue = self._check_placeholder_adjacent_latin_residue(
             source_text,
             translation_text,
@@ -866,59 +857,6 @@ class QualityChecker:
             details=f"Translation uses forbidden glossary variant(s): {found}",
             rule_id="forbidden_term",
             fragments=found,
-        )
-
-    def _check_term_consistency(
-            self,
-            source: str,
-            translation: str,
-            matched_terms: Optional[dict] = None,
-            rich_meta: Optional[dict] = None) -> Optional[QualityIssue]:
-        """Warn when a hit term's primary translation is missing (R-30).
-
-        This is advisory only: an evidence-backed synonym must remain usable,
-        but the reviewer/model should see that the preferred rendering was not
-        used.  A surviving source term is already an error from
-        ``_check_untranslated_fragments`` and is not duplicated here.
-        """
-        if not matched_terms or not isinstance(matched_terms, dict):
-            return None
-        translation_text = str(translation or "")
-        if not translation_text:
-            return None
-        translation_folded = translation_text.casefold()
-        source_text = str(source or "")
-
-        missing: list[str] = []
-        for term, expected in matched_terms.items():
-            term_text = str(term or "").strip()
-            expected_text = str(expected or "").strip()
-            if not term_text or not expected_text:
-                continue
-            if expected_text.casefold() == term_text.casefold():
-                continue
-            if not self._term_present_in_source(term_text, source_text):
-                continue
-            if expected_text.casefold() in translation_folded:
-                continue
-            # Surviving source text is a hard error elsewhere.
-            if term_text.casefold() in translation_folded:
-                continue
-            if self._text_analyzer.is_common_ui_token(term_text):
-                continue
-            if len(term_text) >= 2 and term_text.upper() == term_text:
-                continue
-            entry = f"{term_text}->{expected_text}"
-            if entry not in missing:
-                missing.append(entry)
-        if not missing:
-            return None
-        return QualityIssue(
-            issue_type=QualityIssueType.UNTRANSLATED,
-            severity="warning",
-            details=f"Preferred glossary term translation not used: {missing}",
-            rule_id="term_consistency",
-            fragments=missing,
         )
 
     _QUOTE_PAIRS = (('"', '"'), ("“", "”"), ("「", "」"), ("『", "』"), ("‘", "’"))
