@@ -102,26 +102,62 @@ class EmbeddingCache:
     def get_batch(self, texts: list[str], fingerprint: Any) -> tuple[dict[str, list[float]], list[str]]:
         """Return (cached_results, uncached_texts) for batch operations.
 
-        This allows callers to only embed the texts that aren't already cached.
+        Lookup is performed under one lock so large imports do not acquire the
+        cache lock once per term.  Results remain Python lists for API
+        compatibility with the existing search and embedding callers.
         """
         self._ensure_loaded()
         cached: dict[str, list[float]] = {}
         uncached: list[str] = []
         seen: set[str] = set()
-        for text in texts or []:
-            if text in seen:
-                continue
-            seen.add(text)
-            vec = self.get(text, fingerprint)
-            if vec is not None:
-                cached[text] = vec
-            else:
-                uncached.append(text)
+        now = time.time()
+        text_values = texts if texts is not None else ()
+        keys = [(text, self._make_key(text, fingerprint)) for text in text_values]
+        with self._lock:
+            self._sweep_expired_locked(now)
+            for text, key in keys:
+                if text in seen:
+                    continue
+                seen.add(text)
+                entry = self._data.get(key)
+                if entry is None:
+                    uncached.append(text)
+                    continue
+                vector, _timestamp = entry
+                self._data.move_to_end(key)
+                cached[text] = vector.tolist()
         return cached, uncached
 
     def put_batch(self, texts: list[str], fingerprint: Any, vectors: list[list[float]]) -> None:
-        for text, vec in zip(texts, vectors):
-            self.put(text, fingerprint, vec)
+        """Store a batch with one lock and one throttled flush."""
+        prepared: list[tuple[str, np.ndarray]] = []
+        text_values = texts if texts is not None else ()
+        vector_values = vectors if vectors is not None else ()
+        for text, vector in zip(text_values, vector_values):
+            try:
+                array = np.asarray(vector, dtype=np.float32).flatten()
+            except Exception:
+                continue
+            if array.size == 0 or not np.all(np.isfinite(array)):
+                continue
+            prepared.append((self._make_key(text, fingerprint), array))
+        if not prepared:
+            return
+
+        self._ensure_loaded()
+        now = time.time()
+        with self._lock:
+            self._sweep_expired_locked(now)
+            for key, array in prepared:
+                self._data[key] = (array, now)
+                self._data.move_to_end(key)
+                while len(self._data) > self._max_size:
+                    self._data.popitem(last=False)
+            self._dirty = True
+            self._dirty_entries += len(prepared)
+        # One throttled flush for the complete batch rather than one call per
+        # vector.  The same save thresholds still apply.
+        self.save()
 
     def clear(self) -> None:
         """Drop every in-memory entry and the persisted snapshot."""

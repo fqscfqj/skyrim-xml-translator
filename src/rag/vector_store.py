@@ -1136,9 +1136,16 @@ class VectorStore:
                 self._reconcile_normalization_state()
             self._index_status = self._evaluate_index_status()
         if self._index_status.is_stale:
-            if self.vectors is not None:
+            resumable_partial = (
+                self._index_status.reason == "partial_build"
+                and self.vectors is not None
+                and len(self.terms) == int(self.vectors.shape[0])
+                and self.vectors.ndim == 2
+                and int(self.vectors.shape[1]) == int(self.embed_dim)
+            )
+            if self.vectors is not None and not resumable_partial:
                 self._close_mmap()
-                # Keep terms for diagnostics; vectors unloaded due to staleness.
+                # Keep terms for diagnostics; unsafe stale vectors stay unloaded.
                 if self._index_status.reason in ("invalid_vector_shape", "dimension_mismatch"):
                     log_emit(None, self.config, "WARNING",
                              (
@@ -1146,7 +1153,7 @@ class VectorStore:
                                  f"({self._index_status.reason}). {self._index_status.detail}"
                              ),
                              module="vector_store", func="load")
-            else:
+            elif self.vectors is None:
                 if self._index_status.reason == "dimension_mismatch":
                     log_emit(None, self.config, "WARNING",
                              (
@@ -1652,6 +1659,43 @@ class VectorStore:
 
     # --- Batch build ---
 
+    def _embed_batches_ordered_concurrent(
+            self, new_terms: list[str], embed_fn: Callable, num_threads: int,
+            should_stop: Optional[Callable[[], bool]] = None):
+        """Embed bounded batches concurrently while preserving glossary order."""
+        stop_check = should_stop if callable(should_stop) else (lambda: self.stop_flag)
+        batches = [new_terms[i:i + 50] for i in range(0, len(new_terms), 50)]
+        workers = self._clamp_threads(num_threads)
+        if workers <= 1 or len(batches) <= 1:
+            for batch in batches:
+                if stop_check():
+                    break
+                yield batch, *self._embed_terms_ordered(
+                    batch, embed_fn, 1, should_stop=stop_check
+                )
+            return
+
+        # Keep only a small window in flight so cancellation does not queue the
+        # entire glossary and completed batches can be checkpointed promptly.
+        window_size = max(workers, workers * 2)
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            for start in range(0, len(batches), window_size):
+                if stop_check():
+                    break
+                window = batches[start:start + window_size]
+                futures = [
+                    executor.submit(
+                        self._embed_terms_ordered, batch, embed_fn, 1,
+                        should_stop=stop_check
+                    )
+                    for batch in window
+                ]
+                for batch, future in zip(window, futures):
+                    if stop_check():
+                        break
+                    ordered, errors = future.result()
+                    yield batch, ordered, errors
+
     def add_vectors_batch(self, new_terms: list[str], embed_fn: Callable,
                           num_threads: int = 1,
                           progress_callback: Optional[Callable[[int], None]] = None,
@@ -1718,11 +1762,18 @@ class VectorStore:
         fingerprint = self._normalize_embedding_fingerprint(
             embedding_fingerprint or self.current_embedding_fingerprint()
         )
+        resuming_partial = (
+            isinstance(self._index_metadata, dict)
+            and self._index_metadata.get("complete") is False
+        )
+        resume_expected = self._index_metadata.get("expected_term_count") if resuming_partial else None
         checkpoint_min = self._configured_checkpoint_min()
-        # R-23: amortize checkpoint writes.  The interval doubles with the index
-        # (1.5x growth per checkpoint), so total bytes written are O(n) instead
-        # of the old fixed-1000-rows full rewrite (≈123 GB at 200k terms).
-        next_checkpoint_at = len(self.terms) + max(checkpoint_min, len(self.terms) // 2)
+        # Start resumed builds with a small checkpoint so progress becomes durable
+        # quickly, then use adaptive intervals to limit full-matrix rewrites.
+        initial_checkpoint_interval = (
+            checkpoint_min if resuming_partial else max(checkpoint_min, len(self.terms) // 2)
+        )
+        next_checkpoint_at = len(self.terms) + initial_checkpoint_interval
         last_saved_rows = len(self.terms)
 
         def _flush_checkpoint() -> None:
@@ -1731,7 +1782,10 @@ class VectorStore:
                 return
             complete: Optional[bool] = None
             expected: Optional[int] = None
-            if started_from_empty and (stopped or failed_count > 0):
+            if resuming_partial:
+                complete = False
+                expected = int(resume_expected or 0) or None
+            elif started_from_empty and (stopped or failed_count > 0):
                 complete = False
                 expected = total
             self.save_index_state(embedding_fingerprint=fingerprint,
@@ -1741,7 +1795,8 @@ class VectorStore:
             next_checkpoint_at = len(self.terms) + max(checkpoint_min, len(self.terms) // 2)
 
         try:
-            for i in range(0, total, batch_size):
+            for batch_terms_input, ordered, errors in self._embed_batches_ordered_concurrent(
+                    new_terms, embed_fn, num_threads, should_stop=stop_check):
                 if stop_check():
                     stopped = True
                     if log_callback:
@@ -1757,11 +1812,6 @@ class VectorStore:
                         break
                 if stopped:
                     break
-
-                batch_terms_input = new_terms[i:i + batch_size]
-                ordered, errors = self._embed_terms_ordered(
-                    batch_terms_input, embed_fn, num_threads, should_stop=stop_check
-                )
 
                 batch_results = []
                 batch_terms_confirmed = []
@@ -1867,7 +1917,29 @@ class VectorStore:
             len(glossary_keys or []), self._current_glossary_expected_count()
         )
         should_full_rebuild = bool(force_full or status_before.is_stale)
-        # A glossary key-set change is repaired incrementally (add/remove the
+        # An interrupted build is resumable when its persisted terms and vector
+        # rows are aligned. Do not discard a valid partial index just because
+        # complete=False marks it as unavailable for normal search.
+        resumable_glossary_keys = set(glossary_keys or [])
+        metadata_for_resume = self._index_metadata if isinstance(self._index_metadata, dict) else {}
+        resumable_partial = (
+            not force_full
+            and metadata_for_resume.get("complete") is False
+            and self.vectors is not None
+            and len(self.terms) == int(self.vectors.shape[0])
+            and all(term in resumable_glossary_keys for term in self.terms)
+        )
+        if resumable_partial:
+            should_full_rebuild = False
+        if (
+            not force_full
+            and status_before.is_stale
+            and status_before.reason == "partial_build"
+            and self.vectors is not None
+            and len(self.terms) == int(self.vectors.shape[0])
+            and all(term in resumable_glossary_keys for term in self.terms)
+        ):
+            should_full_rebuild = False
         # difference) as long as the vectors themselves are still loaded; a full
         # re-embedding of an unchanged index would just burn API credits (R-21/22).
         if (
@@ -1968,7 +2040,6 @@ class VectorStore:
         success_count = 0
         failed_count = 0
         stopped = False
-        batch_size = 50
         checkpoint_min = self._configured_checkpoint_min()
         next_checkpoint_at = len(self.terms) + max(checkpoint_min, len(self.terms) // 2)
         last_saved_rows = len(self.terms)
@@ -1983,7 +2054,8 @@ class VectorStore:
             next_checkpoint_at = len(self.terms) + max(checkpoint_min, len(self.terms) // 2)
 
         try:
-            for i in range(0, total, batch_size):
+            for batch_terms, ordered, errors in self._embed_batches_ordered_concurrent(
+                    terms_to_process, embed_fn, num_threads, should_stop=stop_check):
                 if stop_check():
                     stopped = True
                     if log_callback:
@@ -1999,11 +2071,6 @@ class VectorStore:
                         break
                 if stopped:
                     break
-
-                batch_terms = terms_to_process[i:i + batch_size]
-                ordered, errors = self._embed_terms_ordered(
-                    batch_terms, embed_fn, num_threads, should_stop=stop_check
-                )
 
                 batch_vectors = []
                 batch_valid_terms = []

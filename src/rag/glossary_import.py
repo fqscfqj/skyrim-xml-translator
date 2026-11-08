@@ -35,6 +35,37 @@ IMPORT_FORMAT_VERSION_STR = "glossary_import_v1"
 
 _SAMPLE_INVALID_KEEP = 5
 
+# These domains commonly contain dialogue/UI fragments rather than glossary
+# entities.  Keep specialized domains permissive: terms such as ``Life`` can
+# be valid word-of-power or lore entries.
+_LOW_SIGNAL_DOMAINS = frozenset({"dialogue", "setting", "message"})
+_LOW_SIGNAL_IMPORT_WORDS = frozenset({
+    "i", "me", "of", "in", "the", "and", "or", "but",
+    "if", "then", "when", "to", "from", "up", "down", "on", "off",
+    "anything", "everything", "nothing", "something", "someone", "anyone",
+})
+
+
+def _normalized_import_term(value: str) -> str:
+    normalized = str(value or "").strip().casefold()
+    normalized = re.sub(r"[^\w\u4e00-\u9fff]+", " ", normalized, flags=re.UNICODE)
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def _is_low_signal_singleton(term: str, translation: str, rich: dict[str, Any]) -> bool:
+    """Reject generic singleton fragments while preserving specialized terms."""
+    normalized = _normalized_import_term(term)
+    if not normalized or " " in normalized:
+        return False
+    if normalized not in _LOW_SIGNAL_IMPORT_WORDS:
+        return False
+    domain = str(rich.get("domain") or "").strip().casefold()
+    if domain and domain not in _LOW_SIGNAL_DOMAINS:
+        return False
+    # Explicit domain metadata identifies low-value dialogue/settings entries;
+    # without metadata, only the known generic fragments are rejected.
+    return True
+
 
 class GlossaryImportError(FileNotFoundError):
     """Raised when an import file cannot be decoded or parsed."""
@@ -455,6 +486,9 @@ def _apply_entry(
         return
     if max_field_chars and (len(term) > max_field_chars or len(translation) > max_field_chars):
         _record_limited(result, f"{line_hint}字段超限（>{max_field_chars}字符）已截断：{term[:30]}")
+        return
+    if _is_low_signal_singleton(term, translation, rich):
+        _record_invalid(result, f"{line_hint}低信号通用词条已跳过：{term[:30]}")
         return
     norm = _normalize_import_key(term)
     existing = _find_term_key(result.terms, term, result._normalized_terms)

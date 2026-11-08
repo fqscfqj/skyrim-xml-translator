@@ -7,11 +7,14 @@ GUI/translator layers so they can run while other modules are being changed.
 import json
 import os
 import tempfile
+import threading
+import time
 import unittest
 
 import numpy as np
 
 from src.cache.embedding_cache import EmbeddingCache
+from src.rag.engine import RAGEngine
 from src.rag.vector_store import VectorStore
 
 
@@ -156,6 +159,76 @@ class CheckpointWriteVolumeTests(_StoreFixture):
         self.assertLessEqual(stats["count"], 2)
         self.assertEqual(len(store.terms), 300)
         self.assertEqual(np.asarray(store.vectors).shape, (300, 2))
+
+
+class ConcurrentBuildTests(_StoreFixture):
+    def test_full_rebuild_overlaps_embedding_batches_and_preserves_order(self):
+        store = self.make_store(dim=2)
+        active = 0
+        max_active = 0
+        lock = threading.Lock()
+
+        def embed(batch):
+            nonlocal active, max_active
+            self.assertIsInstance(batch, list)
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+            try:
+                time.sleep(0.03)
+                return [[float(index + 1), 1.0] for index, _term in enumerate(batch)]
+            finally:
+                with lock:
+                    active -= 1
+
+        terms = [f"Term {index}" for index in range(150)]
+        result = store.build_index(terms, embed, num_threads=4, force_full=True)
+
+        self.assertTrue(result.completed)
+        self.assertEqual(result.successful_terms, len(terms))
+        self.assertEqual(store.terms, terms)
+        self.assertGreaterEqual(max_active, 2)
+
+
+class EngineEmbeddingCacheTests(unittest.TestCase):
+    class _LLM:
+        def __init__(self):
+            self.calls = []
+
+        def get_embedding(self, values):
+            self.calls.append(values)
+            if isinstance(values, list):
+                return [[float(index + 1), 1.0] for index, _value in enumerate(values)]
+            return [1.0, 1.0]
+
+    class _Store:
+        def current_embedding_fingerprint(self):
+            return {"base_url": "http://embed.local/v1", "model": "model-a", "dimensions": 2}
+
+    def test_batch_embedding_uses_cache_on_repeat(self):
+        engine = RAGEngine.__new__(RAGEngine)
+        engine.llm_client = self._LLM()
+        engine._vector_store = self._Store()
+        engine._embedding_cache = EmbeddingCache(max_size=10)
+
+        first = engine._embed_with_cache(["A", "B"])
+        second = engine._embed_with_cache(["A", "B"])
+
+        self.assertEqual(len(engine.llm_client.calls), 1)
+        self.assertEqual(engine.llm_client.calls[0], ["A", "B"])
+        self.assertEqual(first, second)
+
+    def test_scalar_embedding_uses_cache_on_repeat(self):
+        engine = RAGEngine.__new__(RAGEngine)
+        engine.llm_client = self._LLM()
+        engine._vector_store = self._Store()
+        engine._embedding_cache = EmbeddingCache(max_size=10)
+
+        first = engine._embed_with_cache("A")
+        second = engine._embed_with_cache("A")
+
+        self.assertEqual(engine.llm_client.calls, ["A"])
+        self.assertEqual(first, second)
 
 
 class CorruptTermIndexTests(_StoreFixture):

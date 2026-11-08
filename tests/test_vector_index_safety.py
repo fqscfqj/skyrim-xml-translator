@@ -319,7 +319,20 @@ class RebuildSafetyTests(_IndexFixture):
 
         reloaded = self.make_store()
         self.assertEqual(reloaded.get_index_status().reason, "partial_build")
-        self.assertIsNone(reloaded.vectors)
+        self.assertIsNotNone(reloaded.vectors)
+        self.assertEqual(reloaded.vectors.shape, (2, 2))
+
+        reloaded.add_vectors_batch(
+            ["Bad"],
+            lambda term: [1.0, float(len(term) + 1)],
+            num_threads=1,
+        )
+        self.assertEqual(reloaded.terms, ["Good A", "Good B", "Bad"])
+        self.assertEqual(reloaded.vectors.shape, (3, 2))
+        with open(self.meta_path, "r", encoding="utf-8") as handle:
+            resumed_metadata = json.load(handle)
+        self.assertIs(resumed_metadata["complete"], False)
+        self.assertEqual(resumed_metadata["expected_term_count"], 3)
 
     def test_stop_mid_build_keeps_old_index_and_never_marks_complete(self):
         store, old_terms = self.load_store(count=2, dim=2)

@@ -14,6 +14,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -190,6 +191,77 @@ def bench_vector_batch() -> None:
         record("vector batch", "skipped", str(exc)[:80])
 
 
+def bench_vector_build() -> None:
+    """Measure bounded concurrent embedding batches during a full build."""
+    try:
+        from src.rag.vector_store import VectorStore
+
+        active = 0
+        max_active = 0
+        batch_calls = 0
+        lock = threading.Lock()
+
+        def embed(batch):
+            nonlocal active, max_active, batch_calls
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+                batch_calls += 1
+            try:
+                time.sleep(0.01)
+                return [[float(index + 1), 1.0] for index, _term in enumerate(batch)]
+            finally:
+                with lock:
+                    active -= 1
+
+        terms = [f"term {index}" for index in range(150)]
+        with tempfile.TemporaryDirectory() as tmp:
+            concurrent_store = VectorStore(
+                os.path.join(tmp, "vectors-concurrent.npy"),
+                os.path.join(tmp, "terms-concurrent.json"),
+                2,
+            )
+            concurrent_elapsed_ms = timed(
+                lambda: concurrent_store.build_index(
+                    terms,
+                    embed,
+                    num_threads=4,
+                    force_full=True,
+                ),
+                repeat=1,
+            )
+            concurrent_status = concurrent_store.get_index_status()
+            concurrent_batches = batch_calls
+
+            serial_store = VectorStore(
+                os.path.join(tmp, "vectors-serial.npy"),
+                os.path.join(tmp, "terms-serial.json"),
+                2,
+            )
+            serial_elapsed_ms = timed(
+                lambda: serial_store.build_index(
+                    terms,
+                    embed,
+                    num_threads=1,
+                    force_full=True,
+                ),
+                repeat=1,
+            )
+            serial_batches = batch_calls - concurrent_batches
+        speedup = serial_elapsed_ms / concurrent_elapsed_ms if concurrent_elapsed_ms else 0.0
+        record(
+            "RAG build 150 terms",
+            f"{concurrent_elapsed_ms:.1f} ms",
+            (
+                f"serial {serial_elapsed_ms:.1f} ms ({speedup:.2f}x), "
+                f"{concurrent_batches}/{serial_batches} batches, "
+                f"max concurrent {max_active}, ready={not concurrent_status.is_stale}"
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        record("RAG build 150 terms", "skipped", str(exc)[:80])
+
+
 def bench_deterministic_scan() -> None:
     try:
         from src.rag.deterministic_scan import DeterministicGlossaryScanner
@@ -297,6 +369,7 @@ def main() -> None:
     bench_text_pipeline()
     bench_xml_fidelity()
     bench_vector_batch()
+    bench_vector_build()
     bench_deterministic_scan()
     bench_table_migration()
 

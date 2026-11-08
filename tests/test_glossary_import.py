@@ -79,6 +79,24 @@ class DelimitedImportTests(unittest.TestCase):
         self.assertEqual(result.terms, {"New Term": "新词"})
         self.assertEqual(result.deletes, ["Old Term"])
 
+    def test_low_signal_generic_fragments_are_filtered(self):
+        text = (
+            "term,translation,domain\n"
+            "Me.,我。,dialogue\n"
+            "of,,setting\n"
+            "Anything?,有东西？,dialogue\n"
+            "Life,生命,word_of_power\n"
+            "Whiterun,雪漫城,location\n"
+        )
+        result = parse_delimited_text(text, delimiter=",")
+        self.assertEqual(result.terms, {"Life": "生命", "Whiterun": "雪漫城"})
+        self.assertEqual(result.invalid_rows, 3)
+
+    def test_explicit_generic_fragment_without_metadata_is_filtered(self):
+        result = parse_delimited_text("of,comma\nAnything?,有东西？\n", delimiter=",")
+        self.assertEqual(result.terms, {})
+        self.assertEqual(result.invalid_rows, 2)
+
 
 class JsonImportTests(unittest.TestCase):
     def test_json_v2_envelope_with_rich_fields(self):

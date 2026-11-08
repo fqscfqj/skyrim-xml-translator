@@ -282,11 +282,38 @@ class RAGEngine:
                      module="rag_engine", func="reload_embedding_runtime")
         return self._vector_store.get_index_status()
 
+    def _embed_with_cache(self, text):
+        """Embed one or many terms while reusing the fingerprinted cache."""
+        fingerprint = self.get_embedding_fingerprint()
+        if isinstance(text, list):
+            inputs = list(text)
+            cached, uncached = self._embedding_cache.get_batch(inputs, fingerprint)
+            if uncached:
+                vectors = self.llm_client.get_embedding(uncached)
+                if not isinstance(vectors, (list, tuple)) or len(vectors) != len(uncached):
+                    raise ValueError(
+                        f"Embedding batch returned {len(vectors) if hasattr(vectors, '__len__') else 'invalid'} "
+                        f"vectors for {len(uncached)} terms"
+                    )
+                self._embedding_cache.put_batch(uncached, fingerprint, vectors)
+                cached.update(zip(uncached, vectors))
+            try:
+                return [cached[term] for term in inputs]
+            except KeyError as exc:
+                raise ValueError(f"Embedding batch omitted term: {exc.args[0]}") from exc
+
+        cached = self._embedding_cache.get(text, fingerprint)
+        if cached is not None:
+            return cached
+        vector = self.llm_client.get_embedding(text)
+        self._embedding_cache.put(text, fingerprint, vector)
+        return vector
+
     def add_term(self, term, translation, rich_meta=None):
         """添加新术语并更新索引"""
         self._glossary_mgr.add_term(term, translation, rich_meta=rich_meta)
         try:
-            vec = self.llm_client.get_embedding(term)
+            vec = self._embed_with_cache(term)
             self._vector_store.add_vector(
                 term, vec,
                 embedding_fingerprint=self.get_embedding_fingerprint(),
@@ -382,7 +409,7 @@ class RAGEngine:
 
         self._vector_store.add_vectors_batch(
             new_terms,
-            embed_fn=self.llm_client.get_embedding,
+            embed_fn=self._embed_with_cache,
             num_threads=num_threads,
             progress_callback=progress_callback,
             log_callback=log_callback,
@@ -404,7 +431,7 @@ class RAGEngine:
         self._sync_stop_flags()
         return self._vector_store.build_index(
             glossary_keys=list(self._glossary_mgr.glossary.keys()),
-            embed_fn=self.llm_client.get_embedding,
+            embed_fn=self._embed_with_cache,
             num_threads=num_threads,
             progress_callback=progress_callback,
             log_callback=log_callback,
