@@ -49,7 +49,7 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QListWidget, QMessageBox, QGroupBox, QFormLayout, QSpinBox,
                              QTableWidgetItem, QHeaderView, QSplitter, QDoubleSpinBox,
                              QComboBox, QAbstractSpinBox, QScrollArea, QDialog, QTreeWidget, QTreeWidgetItem,
-                             QAbstractItemView, QApplication)
+                             QAbstractItemView, QApplication, QFrame)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QRectF, QEvent
 from PyQt6.QtGui import (
     QDragEnterEvent, QDropEvent, QIcon, QWheelEvent, QGuiApplication, QCloseEvent,
@@ -1534,10 +1534,11 @@ class RAGVisualizationDialog(QDialog):
         self._debug_worker: Optional[_RAGDebugWorker] = None
 
         self.setWindowTitle(i18n.t("title_rag_visualization"))
-        self.resize(1100, 800)
+        self.setMinimumSize(980, 680)
+        self.resize(1180, 860)
 
         self._setup_ui()
-        if self.cached_debug_info:
+        if isinstance(self.cached_debug_info, dict):
             self._load_rag_info()
         else:
             # F-11: never block the GUI thread on the (possibly 120s) request;
@@ -1547,10 +1548,139 @@ class RAGVisualizationDialog(QDialog):
 
     def _show_loading_skeleton(self) -> None:
         self.rag_tree.clear()
-        item = QTreeWidgetItem([i18n.t("msg_rag_analyzing"), ""])
+        item = QTreeWidgetItem([i18n.t("msg_rag_analyzing"), "", ""])
         self.rag_tree.addTopLevelItem(item)
         self.detail_title.setText(i18n.t("msg_rag_analyzing"))
+        self.detail_score.setText("")
         self.detail_text.setPlainText(i18n.t("msg_rag_analyzing_hint"))
+        self._set_rag_status(i18n.t("rag_status_analyzing"), "loading")
+        for value_label in self._summary_value_labels.values():
+            value_label.setText("-")
+
+    @staticmethod
+    def _rag_label(key: str, fallback: str) -> str:
+        return i18n.t(key, fallback)
+
+    def _set_rag_status(self, text: str, state: str = "ready") -> None:
+        self.rag_status_label.setText(str(text or ""))
+        self.rag_status_label.setProperty("state", state)
+        style = self.rag_status_label.style()
+        if style is not None:
+            style.unpolish(self.rag_status_label)
+            style.polish(self.rag_status_label)
+        self.rag_status_label.update()
+
+    def _set_summary_value(self, key: str, value: object) -> None:
+        label = self._summary_value_labels.get(key)
+        if label is not None:
+            label.setText(str(value))
+
+    def _refresh_rag_overview(self, debug_info: dict) -> None:
+        rag_tasks = debug_info.get("rag_tasks") or debug_info.get("keywords") or []
+        search_results = debug_info.get("search_results") or []
+        matched_terms = debug_info.get("matched_terms") or {}
+        candidate_count = 0
+        if isinstance(search_results, list):
+            for query_result in search_results:
+                if not isinstance(query_result, dict):
+                    continue
+                terms = set()
+                direct_match = query_result.get("direct_match")
+                if direct_match:
+                    terms.add(str(direct_match))
+                for key in ("vector_matches", "containment_matches"):
+                    for term, _score in query_result.get(key) or []:
+                        terms.add(str(term))
+                candidate_count += len(terms)
+
+        self._set_summary_value("queries", len(rag_tasks) if isinstance(rag_tasks, list) else 0)
+        self._set_summary_value("candidates", candidate_count)
+        self._set_summary_value("matched", len(matched_terms) if isinstance(matched_terms, dict) else 0)
+        self.original_meta_label.setText(
+            self._rag_label("rag_text_length", "{count} characters").format(count=len(self.original_text or ""))
+        )
+        self.translated_meta_label.setText(
+            self._rag_label("rag_text_length", "{count} characters").format(count=len(self.translated_text or ""))
+        )
+        self._set_rag_status(i18n.t("rag_status_ready"), "ready")
+
+    def _apply_visual_style(self) -> None:
+        palette = self.palette()
+        border = palette.color(QPalette.ColorRole.Mid).name()
+        panel = palette.color(QPalette.ColorRole.AlternateBase).name()
+        base = palette.color(QPalette.ColorRole.Base).name()
+        text = palette.color(QPalette.ColorRole.Text).name()
+        muted = palette.color(QPalette.ColorRole.PlaceholderText).name()
+        highlight = palette.color(QPalette.ColorRole.Highlight).name()
+        highlight_text = palette.color(QPalette.ColorRole.HighlightedText).name()
+        self.setStyleSheet(f"""
+            QGroupBox {{
+                font-weight: 600;
+                margin-top: 10px;
+                padding: 12px 8px 8px 8px;
+                border: 1px solid {border};
+                border-radius: 5px;
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px;
+            }}
+            QFrame#ragOverview {{
+                border-bottom: 1px solid {border};
+            }}
+            QLabel#ragOverviewTitle {{
+                font-size: 14px;
+                font-weight: 700;
+            }}
+            QLabel#ragMetricLabel {{
+                color: {muted};
+                font-size: 11px;
+            }}
+            QLabel#ragMetricValue {{
+                color: {text};
+                font-size: 16px;
+                font-weight: 700;
+            }}
+            QLabel#ragStatus {{
+                padding: 3px 10px;
+                border-radius: 10px;
+                font-weight: 600;
+            }}
+            QLabel#ragStatus[state="loading"] {{
+                background: {highlight};
+                color: {highlight_text};
+            }}
+            QLabel#ragStatus[state="ready"] {{
+                background: #dff3e8;
+                color: #167348;
+            }}
+            QLabel#ragStatus[state="failed"] {{
+                background: #fbe4e4;
+                color: #a32626;
+            }}
+            QTreeWidget, QTextEdit {{
+                background: {base};
+                border: 1px solid {border};
+                border-radius: 4px;
+            }}
+            QTreeWidget::item {{
+                padding: 3px 2px;
+                min-height: 23px;
+            }}
+            QTreeWidget::item:selected {{
+                background: {highlight};
+                color: {highlight_text};
+            }}
+            QLabel#ragDetailTitle {{
+                font-size: 13px;
+                font-weight: 700;
+            }}
+            QLabel#ragDetailScore {{
+                color: {muted};
+                font-weight: 600;
+            }}
+        """)
 
     def _start_debug_worker(self) -> None:
         worker = _RAGDebugWorker(self.translator, self.original_text, self.context_hint)
@@ -1572,9 +1702,11 @@ class RAGVisualizationDialog(QDialog):
     def _on_debug_info_failed(self, message: str) -> None:
         self.rag_tree.clear()
         self.rag_tree.addTopLevelItem(
-            QTreeWidgetItem([f"{i18n.t('msg_rag_analysis_failed')}: {message}", ""]))
+            QTreeWidgetItem([f"{i18n.t('msg_rag_analysis_failed')}: {message}", "", ""]))
         self.detail_title.setText(i18n.t("msg_rag_analysis_failed"))
+        self.detail_score.setText("")
         self.detail_text.setPlainText(str(message or ""))
+        self._set_rag_status(i18n.t("rag_status_failed"), "failed")
 
     def closeEvent(self, event) -> None:
         # The worker is owned by the module-level live set, so a slow request
@@ -1583,15 +1715,50 @@ class RAGVisualizationDialog(QDialog):
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setContentsMargins(14, 14, 14, 12)
         layout.setSpacing(10)
+
+        # A compact overview keeps the important result visible before users inspect the tree.
+        overview_frame = QFrame()
+        overview_frame.setObjectName("ragOverview")
+        overview_layout = QVBoxLayout(overview_frame)
+        overview_layout.setContentsMargins(12, 9, 12, 9)
+        overview_layout.setSpacing(8)
+
+        overview_header = QHBoxLayout()
+        overview_title = QLabel(i18n.t("label_rag_overview"))
+        overview_title.setObjectName("ragOverviewTitle")
+        overview_header.addWidget(overview_title)
+        overview_header.addStretch(1)
+        self.rag_status_label = QLabel("")
+        self.rag_status_label.setObjectName("ragStatus")
+        overview_header.addWidget(self.rag_status_label)
+        overview_layout.addLayout(overview_header)
+
+        metrics_layout = QHBoxLayout()
+        metrics_layout.setSpacing(28)
+        self._summary_value_labels = {}
+        for key in ("queries", "candidates", "matched"):
+            metric_label = QLabel(i18n.t(f"rag_metric_{key}"))
+            metric_label.setObjectName("ragMetricLabel")
+            metric_value = QLabel("-")
+            metric_value.setObjectName("ragMetricValue")
+            metric_row = QHBoxLayout()
+            metric_row.setSpacing(8)
+            metric_row.addWidget(metric_label)
+            metric_row.addWidget(metric_value)
+            metrics_layout.addLayout(metric_row)
+            self._summary_value_labels[key] = metric_value
+        metrics_layout.addStretch(1)
+        overview_layout.addLayout(metrics_layout)
+        layout.addWidget(overview_frame)
 
         main_splitter = QSplitter(Qt.Orientation.Vertical)
         main_splitter.setChildrenCollapsible(False)
         main_splitter.setHandleWidth(5)
-        layout.addWidget(main_splitter)
+        layout.addWidget(main_splitter, 1)
 
-        # 顶部：原文/译文并排
+        # Source and translation stay side by side for direct comparison.
         top_widget = QWidget()
         top_layout = QHBoxLayout(top_widget)
         top_layout.setContentsMargins(0, 0, 0, 0)
@@ -1599,27 +1766,43 @@ class RAGVisualizationDialog(QDialog):
 
         original_group = QGroupBox(i18n.t("label_original_text"))
         original_layout = QVBoxLayout()
+        original_layout.setContentsMargins(8, 10, 8, 8)
+        original_meta_row = QHBoxLayout()
+        original_meta_row.addStretch(1)
+        self.original_meta_label = QLabel("")
+        self.original_meta_label.setObjectName("ragMetricLabel")
+        original_meta_row.addWidget(self.original_meta_label)
+        original_layout.addLayout(original_meta_row)
         self.original_text_display = QTextEdit()
         self.original_text_display.setReadOnly(True)
         self.original_text_display.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        self.original_text_display.setPlaceholderText(i18n.t("rag_empty_text"))
         self.original_text_display.setPlainText(self.original_text)
-        original_layout.addWidget(self.original_text_display)
+        original_layout.addWidget(self.original_text_display, 1)
         original_group.setLayout(original_layout)
 
         translated_group = QGroupBox(i18n.t("label_translated_text"))
         translated_layout = QVBoxLayout()
+        translated_layout.setContentsMargins(8, 10, 8, 8)
+        translated_meta_row = QHBoxLayout()
+        translated_meta_row.addStretch(1)
+        self.translated_meta_label = QLabel("")
+        self.translated_meta_label.setObjectName("ragMetricLabel")
+        translated_meta_row.addWidget(self.translated_meta_label)
+        translated_layout.addLayout(translated_meta_row)
         self.translated_text_display = QTextEdit()
         self.translated_text_display.setReadOnly(True)
         self.translated_text_display.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        self.translated_text_display.setPlaceholderText(i18n.t("rag_empty_text"))
         self.translated_text_display.setPlainText(self.translated_text)
-        translated_layout.addWidget(self.translated_text_display)
+        translated_layout.addWidget(self.translated_text_display, 1)
         translated_group.setLayout(translated_layout)
 
         top_layout.addWidget(original_group, 1)
         top_layout.addWidget(translated_group, 1)
         main_splitter.addWidget(top_widget)
 
-        # 底部：RAG步骤树 + 详情面板
+        # The lower area separates navigation from the full selected payload.
         bottom_widget = QWidget()
         bottom_layout = QHBoxLayout(bottom_widget)
         bottom_layout.setContentsMargins(0, 0, 0, 0)
@@ -1627,62 +1810,126 @@ class RAGVisualizationDialog(QDialog):
 
         steps_group = QGroupBox(i18n.t("group_rag_steps"))
         steps_layout = QVBoxLayout()
+        steps_layout.setContentsMargins(8, 10, 8, 8)
+        tree_toolbar = QHBoxLayout()
+        tree_toolbar.setSpacing(6)
+        self.tree_filter = QLineEdit()
+        self.tree_filter.setClearButtonEnabled(True)
+        self.tree_filter.setPlaceholderText(i18n.t("rag_filter_placeholder"))
+        self.tree_filter.textChanged.connect(self._filter_tree)
+        tree_toolbar.addWidget(self.tree_filter, 1)
+        expand_btn = QPushButton(i18n.t("rag_expand_all"))
+        expand_btn.setToolTip(i18n.t("rag_expand_all"))
+        expand_btn.clicked.connect(lambda: self._set_tree_expanded(True))
+        tree_toolbar.addWidget(expand_btn)
+        collapse_btn = QPushButton(i18n.t("rag_collapse_all"))
+        collapse_btn.setToolTip(i18n.t("rag_collapse_all"))
+        collapse_btn.clicked.connect(lambda: self._set_tree_expanded(False))
+        tree_toolbar.addWidget(collapse_btn)
+        steps_layout.addLayout(tree_toolbar)
         self.rag_tree = QTreeWidget()
-        self.rag_tree.setHeaderLabels([i18n.t("group_rag_steps"), i18n.t("label_similarity_score")])
+        self.rag_tree.setHeaderLabels([
+            i18n.t("rag_tree_column_step"),
+            i18n.t("rag_status_column"),
+            i18n.t("label_similarity_score"),
+        ])
         self.rag_tree.setWordWrap(False)
         self.rag_tree.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.rag_tree.setAlternatingRowColors(True)
         self.rag_tree.setUniformRowHeights(True)
+        self.rag_tree.setIndentation(18)
         self.rag_tree.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.rag_tree.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.rag_tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         header = self.rag_tree.header()
         assert header is not None
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        header.setMinimumSectionSize(120)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setMinimumSectionSize(90)
         steps_layout.addWidget(self.rag_tree)
         steps_group.setLayout(steps_layout)
 
         detail_group = QGroupBox(i18n.t("label_details"))
-        detail_group.setMinimumWidth(360)
+        detail_group.setMinimumWidth(390)
         detail_layout = QVBoxLayout()
+        detail_layout.setContentsMargins(10, 10, 10, 8)
         self.detail_title = QLabel("")
+        self.detail_title.setObjectName("ragDetailTitle")
         self.detail_title.setTextFormat(Qt.TextFormat.PlainText)
         self.detail_title.setWordWrap(True)
         self.detail_score = QLabel("")
+        self.detail_score.setObjectName("ragDetailScore")
         self.detail_score.setTextFormat(Qt.TextFormat.PlainText)
         self.detail_text = QTextEdit()
         self.detail_text.setReadOnly(True)
         self.detail_text.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self.detail_text.setMinimumHeight(240)
-        detail_layout.addWidget(self.detail_title)
+        detail_toolbar = QHBoxLayout()
+        detail_toolbar.setSpacing(6)
+        detail_toolbar.addWidget(self.detail_title, 1)
+        copy_detail_btn = QPushButton(i18n.t("rag_copy_detail"))
+        copy_detail_btn.setToolTip(i18n.t("rag_copy_detail"))
+        copy_detail_btn.clicked.connect(self._copy_detail)
+        detail_toolbar.addWidget(copy_detail_btn)
+        detail_layout.addLayout(detail_toolbar)
         detail_layout.addWidget(self.detail_score)
         detail_layout.addWidget(self.detail_text, 1)
         detail_group.setLayout(detail_layout)
 
-        bottom_layout.addWidget(steps_group, 3)
-        bottom_layout.addWidget(detail_group, 2)
+        bottom_layout.addWidget(steps_group, 5)
+        bottom_layout.addWidget(detail_group, 4)
         main_splitter.addWidget(bottom_widget)
 
-        main_splitter.setStretchFactor(0, 1)
-        main_splitter.setStretchFactor(1, 3)
-        main_splitter.setSizes([220, 580])
+        main_splitter.setStretchFactor(0, 0)
+        main_splitter.setStretchFactor(1, 1)
+        main_splitter.setSizes([205, 565])
 
-        # 底部操作按钮
         btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
         btn_row.addStretch(1)
-
         copy_btn = QPushButton(i18n.t("btn_copy_rag_log"))
+        copy_btn.setToolTip(i18n.t("tooltip_copy_rag_log"))
         copy_btn.clicked.connect(self._copy_rag_log)
         btn_row.addWidget(copy_btn)
 
         close_btn = QPushButton(i18n.t("btn_close"))
+        close_btn.setDefault(True)
+        close_btn.setAutoDefault(True)
         close_btn.clicked.connect(self.accept)
         btn_row.addWidget(close_btn)
-
         layout.addLayout(btn_row)
 
         self.rag_tree.currentItemChanged.connect(self._update_detail_view)
+        self._apply_visual_style()
+
+    def _set_tree_expanded(self, expanded: bool) -> None:
+        def visit(parent) -> None:
+            for index in range(parent.childCount()):
+                child = parent.child(index)
+                child.setExpanded(expanded)
+                visit(child)
+
+        for index in range(self.rag_tree.topLevelItemCount()):
+            item = self.rag_tree.topLevelItem(index)
+            item.setExpanded(expanded)
+            visit(item)
+
+    def _filter_tree(self, text: str) -> None:
+        needle = str(text or "").strip().casefold()
+
+        def visit(item) -> bool:
+            matches = not needle or needle in item.text(0).casefold() or needle in item.text(1).casefold()
+            child_matches = False
+            for index in range(item.childCount()):
+                child_matches = visit(item.child(index)) or child_matches
+            item.setHidden(bool(needle) and not (matches or child_matches))
+            if child_matches and needle:
+                item.setExpanded(True)
+            return matches or child_matches
+
+        for index in range(self.rag_tree.topLevelItemCount()):
+            visit(self.rag_tree.topLevelItem(index))
 
     def _summarize_tree_label(self, value, max_length=96):
         text = re.sub(r"\s+", " ", str(value or "")).strip()
@@ -1690,57 +1937,66 @@ class RAGVisualizationDialog(QDialog):
             return text
         return f"{text[:max_length - 3].rstrip()}..."
 
-    def _create_tree_item(self, parent, label, score=None, full_text=None):
+    def _create_tree_item(self, parent, label, score=None, full_text=None, status="", detail_text=None):
         display_label = self._summarize_tree_label(label)
         score_text = ""
         if score is not None:
             try:
                 score_text = f"{float(score):.4f}"
-            except Exception:
+            except (TypeError, ValueError):
                 score_text = str(score)
-
-        item = QTreeWidgetItem([display_label, score_text])
+        status_text = i18n.t(f"rag_{status}", status) if status else ""
+        item = QTreeWidgetItem([display_label, status_text, score_text])
         if parent is None:
             self.rag_tree.addTopLevelItem(item)
+            font = item.font(0)
+            font.setBold(True)
+            item.setFont(0, font)
+            for column in range(3):
+                item.setBackground(column, self.palette().brush(QPalette.ColorRole.AlternateBase))
         else:
             parent.addChild(item)
 
         full_value = str(full_text if full_text is not None else label)
-        item.setData(0, Qt.ItemDataRole.UserRole, {
+        payload = {
             "detail_title": display_label,
             "full_text": full_value,
-        })
-        item.setToolTip(0, self._summarize_tree_label(full_value, max_length=180))
+            "status": status_text,
+        }
+        if detail_text is not None:
+            payload["detail_text"] = str(detail_text)
+        item.setData(0, Qt.ItemDataRole.UserRole, payload)
+        item.setToolTip(0, self._summarize_tree_label(full_value, max_length=300))
+        item.setToolTip(1, status_text)
+        if status in {"selected", "accepted", "rejected"}:
+            dark = self.palette().color(QPalette.ColorRole.Window).lightness() < 128
+            colors = {
+                "selected": "#70d6a2" if dark else "#167348",
+                "accepted": "#8cc9e8" if dark else "#24647e",
+                "rejected": self.palette().color(QPalette.ColorRole.PlaceholderText).name(),
+            }
+            item.setForeground(1, QColor(colors[status]))
         if score is not None:
-            item.setData(1, Qt.ItemDataRole.UserRole, score)
-            item.setToolTip(1, score_text)
-            item.setTextAlignment(1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            item.setData(2, Qt.ItemDataRole.UserRole, score)
+            item.setToolTip(2, i18n.t("rag_score_tooltip"))
+            item.setTextAlignment(2, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         return item
 
     @staticmethod
     def _keyword_stage_title(stage: str) -> str:
-        mapping = {
-            "primary": "Primary Search Model",
-            "fallback": "Fallback Search Model",
-            "llm": "LLM Post-processing",
-            "regex": "Regex Fallback",
-            "cache": "Cache",
-        }
-        return mapping.get(str(stage or ""), str(stage or "Unknown Stage"))
+        if stage in {"primary", "fallback", "llm", "regex", "cache"}:
+            return i18n.t(f"rag_stage_{stage}")
+        return str(stage or i18n.t("rag_unknown"))
 
     @staticmethod
     def _keyword_step_title(name: str) -> str:
-        mapping = {
-            "cache_hit": "Cache Hit",
-            "raw_extraction": "Regex Candidate Extraction",
-            "deduplicate_raw": "Deduplicate Raw Keywords",
-            "filter_present_in_text": "Filter Terms Not In Source",
-            "filter_low_signal": "Filter Low-signal Terms",
-            "expand_keywords_into_tasks": "Expand Into Query Tasks",
-            "deduplicate_tasks": "Deduplicate Query Tasks",
-            "apply_keyword_safety_limit": "Apply Configured Query Limit",
-        }
-        return mapping.get(str(name or ""), str(name or "Step"))
+        if name in {
+            "cache_hit", "raw_extraction", "deduplicate_raw", "filter_present_in_text",
+            "filter_low_signal", "expand_keywords_into_tasks", "deduplicate_tasks",
+            "apply_keyword_safety_limit",
+        }:
+            return i18n.t(f"rag_step_{name}")
+        return str(name or i18n.t("rag_step"))
 
     @staticmethod
     def _keyword_items_to_lines(values, prefix="- ") -> list[str]:
@@ -1748,35 +2004,45 @@ class RAGVisualizationDialog(QDialog):
             return ["(none)"]
         return [f"{prefix}{value}" for value in values]
 
+    def _result_source_title(self, source: str) -> str:
+        key = {
+            "primary_llm": "rag_result_source_primary_llm",
+            "fallback_llm": "rag_result_source_fallback_llm",
+            "local_regex_fallback": "rag_result_source_local_regex_fallback",
+            "cache": "rag_result_source_cache",
+        }.get(str(source or ""))
+        return i18n.t(key, source or i18n.t("rag_unknown")) if key else str(source or i18n.t("rag_unknown"))
+
     def _build_keyword_attempt_detail(self, attempt: dict) -> str:
         lines = [
-            f"Stage: {self._keyword_stage_title(str(attempt.get('stage', '') or ''))}",
-            f"Status: {str(attempt.get('status', '') or 'unknown')}",
+            f"{i18n.t('rag_phase')}: {self._keyword_stage_title(str(attempt.get('stage', '') or ''))}",
+            f"{i18n.t('rag_status')}: {i18n.t('rag_' + str(attempt.get('status', '') or 'unknown'), str(attempt.get('status', '') or i18n.t('rag_unknown')))}",
         ]
         failure_reason = str(attempt.get("failure_reason", "") or "")
         if failure_reason:
-            lines.append(f"Failure Reason: {failure_reason}")
+            lines.append(f"{i18n.t('rag_failure_reason')}: {failure_reason}")
         if "sensitive_block" in attempt:
-            lines.append(f"Sensitive Block: {bool(attempt.get('sensitive_block'))}")
+            value = i18n.t("rag_yes") if attempt.get("sensitive_block") else i18n.t("rag_no")
+            lines.append(f"{i18n.t('rag_sensitive_block')}: {value}")
         parse_method = str(attempt.get("parse_method", "") or "")
         if parse_method:
-            lines.append(f"Parse Method: {parse_method}")
+            lines.append(f"{i18n.t('rag_parse_method')}: {parse_method}")
         parse_note = str(attempt.get("parse_note", "") or "")
         if parse_note:
-            lines.append(f"Parse Note: {parse_note}")
+            lines.append(f"{i18n.t('rag_parse_note')}: {parse_note}")
 
         response_text = str(attempt.get("response_text", "") or "")
         if response_text:
-            lines.extend(["", "Response:", response_text])
+            lines.extend(["", f"{i18n.t('rag_response')}:", response_text])
 
-        lines.extend(["", "Parsed Keywords:"])
+        lines.extend(["", f"{i18n.t('rag_parsed_keywords', count=len(attempt.get('parsed_keywords') or []))}:"])
         lines.extend(self._keyword_items_to_lines(attempt.get("parsed_keywords") or []))
-        lines.extend(["", "Processed Keywords:"])
+        lines.extend(["", f"{i18n.t('rag_processed_keywords', count=len(attempt.get('processed_keywords') or []))}:"])
         lines.extend(self._keyword_items_to_lines(attempt.get("processed_keywords") or []))
 
         error_text = str(attempt.get("error", "") or "")
         if error_text:
-            lines.extend(["", "Error:", error_text])
+            lines.extend(["", f"{i18n.t('rag_error')}:", error_text])
         return "\n".join(lines)
 
     def _build_keyword_step_detail(self, step: dict) -> str:
@@ -1788,22 +2054,22 @@ class RAGVisualizationDialog(QDialog):
         added = step.get("added") or []
 
         lines = [
-            f"Phase: {phase_title}",
-            f"Step: {step_title}",
-            f"Count: {len(before)} -> {len(after)}",
+            f"{i18n.t('rag_phase')}: {phase_title}",
+            f"{i18n.t('rag_step')}: {step_title}",
+            f"{i18n.t('rag_count')}: {len(before)} -> {len(after)}",
         ]
         note = str(step.get("note", "") or "")
         if note:
-            lines.append(f"Note: {note}")
+            lines.append(f"{i18n.t('rag_note')}: {note}")
 
-        lines.extend(["", "Before:"])
-        lines.extend(self._keyword_items_to_lines(before))
-        lines.extend(["", "Dropped:"])
-        lines.extend(self._keyword_items_to_lines(dropped))
-        lines.extend(["", "Added:"])
-        lines.extend(self._keyword_items_to_lines(added))
-        lines.extend(["", "After:"])
-        lines.extend(self._keyword_items_to_lines(after))
+        for title, values in (
+            ("rag_before", before),
+            ("rag_dropped", dropped),
+            ("rag_added", added),
+            ("rag_after", after),
+        ):
+            lines.extend(["", i18n.t(title, count=len(values)) + ":"])
+            lines.extend(self._keyword_items_to_lines(values))
         return "\n".join(lines)
 
     def _populate_keyword_extraction_tree(self, parent, keyword_debug: dict,
@@ -1814,65 +2080,69 @@ class RAGVisualizationDialog(QDialog):
         summary_parts = []
         result_source = str(keyword_debug.get("result_source", "") or "")
         if result_source:
-            summary_parts.append(f"result_source={result_source}")
-        summary_parts.append(f"cache_hit={bool(keyword_debug.get('cache_hit'))}")
-        summary_parts.append(f"final_keywords={len(rag_tasks)}")
+            summary_parts.append(f"{i18n.t('rag_source')}={self._result_source_title(result_source)}")
+        summary_parts.append(
+            f"{i18n.t('rag_cache_hit')}={i18n.t('rag_yes') if keyword_debug.get('cache_hit') else i18n.t('rag_no')}"
+        )
+        summary_parts.append(f"{i18n.t('rag_count')}={len(rag_tasks)}")
         summary_detail = "\n".join([
-            f"Result Source: {result_source or 'unknown'}",
-            f"Cache Hit: {bool(keyword_debug.get('cache_hit'))}",
-            f"Final Keywords: {len(rag_tasks)}",
+            f"{i18n.t('rag_source')}: {self._result_source_title(result_source)}",
+            f"{i18n.t('rag_cache_hit')}: {i18n.t('rag_yes') if keyword_debug.get('cache_hit') else i18n.t('rag_no')}",
+            f"{i18n.t('rag_final_keywords_tasks')}: {len(rag_tasks)}",
         ])
         self._create_tree_item(
             parent,
-            f"Summary ({'; '.join(summary_parts)})",
+            f"{i18n.t('rag_summary')} ({'; '.join(summary_parts)})",
             full_text=summary_detail,
         )
 
         prompt_text = str(keyword_debug.get("prompt", "") or "")
         if prompt_text:
-            self._create_tree_item(parent, "Keyword Prompt", full_text=prompt_text)
+            self._create_tree_item(parent, i18n.t("rag_keyword_prompt"), full_text=prompt_text)
 
         attempts = keyword_debug.get("attempts") or []
         if attempts:
-            attempts_node = self._create_tree_item(parent, "Extraction Attempts")
+            attempts_node = self._create_tree_item(parent, i18n.t("rag_extraction_attempts"))
             for attempt in attempts:
                 if not isinstance(attempt, dict):
                     continue
                 status = str(attempt.get("status", "") or "unknown")
+                status_key = status if status in {"success", "failed", "rejected", "selected", "accepted", "error"} else "unknown"
                 stage_title = self._keyword_stage_title(str(attempt.get("stage", "") or ""))
                 attempt_node = self._create_tree_item(
                     attempts_node,
-                    f"{stage_title} [{status}]",
+                    stage_title,
+                    status=status_key,
                     full_text=self._build_keyword_attempt_detail(attempt),
                 )
 
                 response_text = str(attempt.get("response_text", "") or "")
                 if response_text:
-                    self._create_tree_item(attempt_node, "Response", full_text=response_text)
+                    self._create_tree_item(attempt_node, i18n.t("rag_response"), full_text=response_text)
 
                 parsed_keywords = attempt.get("parsed_keywords") or []
                 self._create_tree_item(
                     attempt_node,
-                    f"Parsed Keywords ({len(parsed_keywords)})",
+                    i18n.t("rag_parsed_keywords", count=len(parsed_keywords)),
                     full_text="\n".join(self._keyword_items_to_lines(parsed_keywords)),
                 )
 
                 processed_keywords = attempt.get("processed_keywords") or []
                 self._create_tree_item(
                     attempt_node,
-                    f"Processed Keywords ({len(processed_keywords)})",
+                    i18n.t("rag_processed_keywords", count=len(processed_keywords)),
                     full_text="\n".join(self._keyword_items_to_lines(processed_keywords)),
                 )
 
                 error_text = str(attempt.get("error", "") or "")
                 if error_text:
-                    self._create_tree_item(attempt_node, "Error", full_text=error_text)
-                attempt_node.setExpanded(True)
-            attempts_node.setExpanded(True)
+                    self._create_tree_item(attempt_node, i18n.t("rag_error"), status="error", full_text=error_text)
+                attempt_node.setExpanded(False)
+            attempts_node.setExpanded(False)
 
         finalization_steps = keyword_debug.get("finalization_steps") or []
         if finalization_steps:
-            steps_node = self._create_tree_item(parent, "Filtering / Task Building")
+            steps_node = self._create_tree_item(parent, i18n.t("rag_filtering_task_building"))
             for step in finalization_steps:
                 if not isinstance(step, dict):
                     continue
@@ -1886,17 +2156,17 @@ class RAGVisualizationDialog(QDialog):
                     full_text=self._build_keyword_step_detail(step),
                 )
 
-                for child_label, key in (("Before", "before"), ("Dropped", "dropped"), ("Added", "added"), ("After", "after")):
+                for title_key, key in (("rag_before", "before"), ("rag_dropped", "dropped"), ("rag_added", "added"), ("rag_after", "after")):
                     values = step.get(key) or []
                     self._create_tree_item(
                         step_node,
-                        f"{child_label} ({len(values)})",
+                        i18n.t(title_key, count=len(values)),
                         full_text="\n".join(self._keyword_items_to_lines(values)),
                     )
                 step_node.setExpanded(False)
-            steps_node.setExpanded(True)
+            steps_node.setExpanded(False)
 
-        tasks_node = self._create_tree_item(parent, "Final Keywords / RAG Tasks")
+        tasks_node = self._create_tree_item(parent, i18n.t("rag_final_keywords_tasks"))
         if rag_tasks:
             for keyword in rag_tasks:
                 label = str(keyword)
@@ -1984,34 +2254,47 @@ class RAGVisualizationDialog(QDialog):
         if isinstance(payload, dict):
             detail_title = str(payload.get("detail_title") or detail_title)
             full_text = str(payload.get("full_text") or full_text)
+            detail_text = str(payload.get("detail_text") or full_text)
         elif payload is not None:
             full_text = str(payload)
-        score_value = current.data(1, Qt.ItemDataRole.UserRole)
+            detail_text = full_text
+        else:
+            detail_text = full_text
+        score_value = current.data(2, Qt.ItemDataRole.UserRole)
         score_text = ""
         if score_value is not None and score_value != "":
             try:
                 score_text = f"{float(score_value):.4f}"
-            except Exception:
+            except (TypeError, ValueError):
                 score_text = str(score_value)
+        payload_status = payload.get("status", "") if isinstance(payload, dict) else ""
+        status_text = current.text(1) or str(payload_status or "")
 
         self.detail_title.setText(detail_title)
-        self.detail_score.setText(f"{i18n.t('label_similarity_score')}: {score_text}" if score_text else i18n.t('label_similarity_score'))
-        self.detail_text.setPlainText(full_text)
+        detail_meta = []
+        if status_text:
+            detail_meta.append(f"{i18n.t('rag_status_column')}: {status_text}")
+        if score_text:
+            detail_meta.append(f"{i18n.t('label_similarity_score')}: {score_text}")
+        self.detail_score.setText("  ·  ".join(detail_meta))
+        self.detail_text.setPlainText(detail_text)
     
     def _load_rag_info(self):
         """加载并显示RAG处理信息"""
         try:
             # 优先使用缓存的RAG调试信息，避免重复翻译
-            if self.debug_info:
+            if isinstance(self.debug_info, dict):
                 debug_info = self.debug_info
-            elif self.cached_debug_info:
+            elif isinstance(self.cached_debug_info, dict):
                 debug_info = self.cached_debug_info
             else:
                 # 如果没有缓存，才重新获取RAG调试信息
                 debug_info = self.translator.get_rag_debug_info(
                     self.original_text, use_rag=True, context_hint=self.context_hint)
 
-            self.debug_info = debug_info
+            self.debug_info = debug_info if isinstance(debug_info, dict) else {}
+            debug_info = self.debug_info
+            self._refresh_rag_overview(debug_info)
             
             # 1. 关键词提取
             keywords_item = self._create_tree_item(
@@ -2044,11 +2327,13 @@ class RAGVisualizationDialog(QDialog):
             search_item = self._create_tree_item(None, i18n.t("step_vector_search"))
             if isinstance(debug_info.get("search_results"), list):
                 for query_result in debug_info["search_results"]:
-                    query = query_result.get("query", "")
+                    if not isinstance(query_result, dict):
+                        continue
+                    query = str(query_result.get("query", "") or "")
                     query_meta_parts = []
                     task_limit = query_result.get("task_limit")
                     if isinstance(task_limit, int):
-                        query_meta_parts.append(f"task_limit={task_limit}")
+                        query_meta_parts.append(f"task={task_limit}")
                     short_limit = query_result.get("short_limit")
                     long_limit = query_result.get("long_limit")
                     if isinstance(short_limit, int) and isinstance(long_limit, int):
@@ -2057,86 +2342,124 @@ class RAGVisualizationDialog(QDialog):
                     selected_long_count = query_result.get("selected_long_count")
                     if isinstance(selected_short_count, int) and isinstance(selected_long_count, int):
                         query_meta_parts.append(f"selected={selected_short_count}+{selected_long_count}")
-                    query_label = f"Query: {query}"
+                    query_label = i18n.t("rag_query", query=query)
                     if query_meta_parts:
                         query_label += f" ({'; '.join(query_meta_parts)})"
                     query_node = self._create_tree_item(search_item, query_label)
-                    
-                    # 直接匹配
+
+                    candidate_decisions = query_result.get("candidate_decisions", {})
+                    if not isinstance(candidate_decisions, dict):
+                        candidate_decisions = {}
+
+                    def candidate_info(term, default_status="unreviewed"):
+                        term_text = str(term)
+                        decision = candidate_decisions.get(term) or candidate_decisions.get(term_text) or {}
+                        if not isinstance(decision, dict):
+                            decision = {}
+                        raw_status = str(decision.get("status", "") or default_status)
+                        status_key = raw_status if raw_status in {"selected", "accepted", "rejected", "unreviewed"} else "unknown"
+                        reason = str(decision.get("reason", "") or "")
+                        detail_lines = [
+                            f"{i18n.t('rag_query')}: {query}",
+                            f"{i18n.t('rag_status')}: {i18n.t('rag_' + status_key, status_key)}",
+                        ]
+                        if reason:
+                            detail_lines.append(f"{i18n.t('rag_failure_reason')}: {reason}")
+                        return status_key, "\n".join(detail_lines)
+
                     direct_match = query_result.get("direct_match")
                     if direct_match:
-                        self._create_tree_item(query_node, f"Direct Match: {direct_match}", score=1.0, full_text=direct_match)
-                    
-                    # 向量匹配
-                    vector_matches = query_result.get("vector_matches", [])
+                        status_key, detail = candidate_info(direct_match, "selected")
+                        self._create_tree_item(
+                            query_node,
+                            str(direct_match),
+                            score=1.0,
+                            status=status_key,
+                            full_text=str(direct_match),
+                            detail_text=detail,
+                        )
+
+                    vector_matches = query_result.get("vector_matches") or []
                     if vector_matches:
-                        vector_node = self._create_tree_item(query_node, "Vector Matches")
-                        candidate_decisions = query_result.get("candidate_decisions", {})
-                        if not isinstance(candidate_decisions, dict):
-                            candidate_decisions = {}
+                        vector_node = self._create_tree_item(query_node, i18n.t("rag_vector_matches"))
                         for term, score in vector_matches:
-                            label = str(term)
-                            decision = candidate_decisions.get(label) or {}
-                            if isinstance(decision, dict):
-                                status = str(decision.get("status", "") or "")
-                                reason = str(decision.get("reason", "") or "")
-                                if status == "selected":
-                                    label += " [selected]"
-                                elif status == "accepted":
-                                    label += " [accepted]"
-                                elif status == "rejected" and reason:
-                                    label += f" [rejected: {reason}]"
-                            self._create_tree_item(vector_node, label, score=score, full_text=term)
-                        vector_node.setExpanded(True)
-                    
-                    # 包含匹配
-                    containment_matches = query_result.get("containment_matches", [])
+                            status_key, detail = candidate_info(term)
+                            self._create_tree_item(
+                                vector_node,
+                                str(term),
+                                score=score,
+                                status=status_key,
+                                full_text=str(term),
+                                detail_text=detail,
+                            )
+                        vector_node.setExpanded(False)
+
+                    containment_matches = query_result.get("containment_matches") or []
                     if containment_matches:
-                        contain_node = self._create_tree_item(query_node, "Containment Matches")
+                        contain_node = self._create_tree_item(query_node, i18n.t("rag_containment_matches"))
                         for term, score in containment_matches:
-                            self._create_tree_item(contain_node, str(term), score=score, full_text=term)
-                        contain_node.setExpanded(True)
-                    query_node.setExpanded(True)
+                            status_key, detail = candidate_info(term)
+                            self._create_tree_item(
+                                contain_node,
+                                str(term),
+                                score=score,
+                                status=status_key,
+                                full_text=str(term),
+                                detail_text=detail,
+                            )
+                        contain_node.setExpanded(False)
+                    query_node.setExpanded(False)
             search_item.setExpanded(True)
             
             # 3. 术语表匹配 - 最终选择的术语
-            matched_item = self._create_tree_item(None, i18n.t("step_glossary_matching"))
-            if debug_info.get("matched_terms"):
-                for term, translation in debug_info["matched_terms"].items():
-                    self._create_tree_item(matched_item, f"{term} → {translation}", full_text=f"{term} → {translation}")
+            matched_terms = debug_info.get("matched_terms") or {}
+            matched_lines = []
+            if isinstance(matched_terms, dict):
+                matched_lines = [f"{term} -> {translation}" for term, translation in matched_terms.items()]
+            matched_item = self._create_tree_item(
+                None,
+                i18n.t("step_glossary_matching"),
+                full_text="\n".join(matched_lines) if matched_lines else i18n.t("rag_no_search_results"),
+            )
+            if isinstance(matched_terms, dict) and matched_terms:
+                for term, translation in matched_terms.items():
+                    self._create_tree_item(matched_item, f"{term} -> {translation}", full_text=f"{term} -> {translation}")
             else:
                 self._create_tree_item(matched_item, i18n.t("msg_no_valid_terms"))
             matched_item.setExpanded(True)
-            
+
             # 4. 提示词构建
             prompt_item = self._create_tree_item(None, i18n.t("step_prompt_construction"))
-            
-            # 系统提示词
+
             system_prompt = debug_info.get("system_prompt", "")
             if system_prompt:
-                system_node = self._create_tree_item(prompt_item, "System Prompt")
+                system_node = self._create_tree_item(prompt_item, i18n.t("rag_system_prompt"))
                 self._create_tree_item(system_node, system_prompt, full_text=system_prompt)
-            
-            # 用户提示词
+
             user_prompt = debug_info.get("user_prompt", "")
             if user_prompt:
-                user_node = self._create_tree_item(prompt_item, "User Prompt")
+                user_node = self._create_tree_item(prompt_item, i18n.t("rag_user_prompt"))
                 self._create_tree_item(user_node, user_prompt, full_text=user_prompt)
-            
-            # 术语表上下文
+
             glossary_context = debug_info.get("glossary_context", "")
             if glossary_context:
-                glossary_node = self._create_tree_item(prompt_item, "Glossary Context")
+                glossary_node = self._create_tree_item(prompt_item, i18n.t("rag_glossary_context"))
                 self._create_tree_item(glossary_node, glossary_context, full_text=glossary_context)
-                
+            if not any((system_prompt, user_prompt, glossary_context)):
+                self._create_tree_item(prompt_item, i18n.t("rag_no_prompt"))
             prompt_item.setExpanded(True)
 
-            if self.rag_tree.topLevelItemCount() > 0:
-                self.rag_tree.setCurrentItem(self.rag_tree.topLevelItem(0))
+            self.rag_tree.setCurrentItem(matched_item)
             
         except Exception as e:
-            error_item = QTreeWidgetItem([f"Error loading RAG info: {str(e)}", ""])
+            error_text = str(e)
+            self.rag_tree.clear()
+            error_item = QTreeWidgetItem([f"{i18n.t('msg_rag_analysis_failed')}: {error_text}", "", ""])
             self.rag_tree.addTopLevelItem(error_item)
+            self.detail_title.setText(i18n.t("msg_rag_analysis_failed"))
+            self.detail_score.setText("")
+            self.detail_text.setPlainText(error_text)
+            self._set_rag_status(i18n.t("rag_status_failed"), "failed")
 
     def _format_rag_log_text(self) -> str:
         di = self.debug_info or {}
@@ -2353,6 +2676,16 @@ class RAGVisualizationDialog(QDialog):
             lines.append("")
 
         return "\n".join(lines).strip() + "\n"
+
+    def _copy_detail(self):
+        try:
+            text = self.detail_text.toPlainText()
+            cb = QGuiApplication.clipboard()
+            if cb is not None:
+                cb.setText(text)
+            self._set_rag_status(i18n.t("rag_copied"), "ready")
+        except Exception as e:
+            QMessageBox.warning(self, i18n.t("title_error"), str(e))
 
     def _copy_rag_log(self):
         try:
