@@ -121,6 +121,17 @@ class DeterministicSearchIntegrationTests(unittest.TestCase):
         result = searcher.search([], source_text=None)
         self.assertEqual(result, {})
 
+    def test_deterministic_fallback_capacity_scales_per_keyword(self):
+        searcher = self._searcher({
+            ("rag", "short_term_max_results"): 1,
+            ("rag", "long_term_max_results"): 0,
+        })
+        result = searcher.search(
+            ["Whiterun", "Erik"],
+            source_text="Whiterun and Erik the Slayer arrived.",
+        )
+        self.assertEqual({"Whiterun", "Erik the Slayer"}, set(result))
+
     def test_scanner_rebuilds_when_glossary_changes(self):
         searcher = self._searcher()
         first = searcher.search([], source_text="The Whiterun Guard patrols.")

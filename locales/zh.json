@@ -233,10 +233,10 @@
     "tooltip_short_text_batch_size": "单次 LLM 请求中发送的短文本最大数量。",
     "label_rag_threshold": "相似度阈值 (0-1):",
     "tooltip_rag_threshold": "术语匹配需要达到的最低相似度。数值越高越严格，越低召回更多但可能引入噪声。",
-    "label_rag_short_max_results": "短词典单次召回上限:",
-    "tooltip_rag_short_max_results": "每次 RAG 召回最多返回多少条短词典。",
-    "label_rag_long_max_results": "长词典单次召回上限:",
-    "tooltip_rag_long_max_results": "每次 RAG 召回最多返回多少条长词典。",
+    "label_rag_short_max_results": "短词典单关键词召回上限:",
+    "tooltip_rag_short_max_results": "每个提取出的关键词最多返回多少条短词典；多个关键词分别计算。",
+    "label_rag_long_max_results": "长词典单关键词召回上限:",
+    "tooltip_rag_long_max_results": "每个提取出的关键词最多返回多少条长词典；多个关键词分别计算。",
     "group_system_settings": "系统设置",
     "label_log_level": "日志等级:",
     "tooltip_log_level": "显示和写入的最低日志等级。DEBUG 最详细，ERROR 只记录错误。",
@@ -338,7 +338,7 @@
     "msg_embedding_config_changed_rebuild_required": "Embedding 配置已更改，现有向量索引已失效。请点击“重建/更新向量索引”。",    "title_vector_index_mismatch": "向量索引模型不匹配",
     "msg_vector_index_mismatch_prompt": "当前向量索引使用的 Embedding 模型与配置不一致，向量检索将被跳过。\n\n索引模型：{stored_model}（{stored_url}）\n当前模型：{current_model}（{current_url}）\n\n是否立即重建索引？\n选择“否”将继续翻译但仅使用术语表匹配。",
     "msg_vector_index_mismatch_continue": "向量索引模型不匹配，翻译将以降级模式继续（仅术语表匹配）。请稍后手动重建索引。",    "msg_restart_for_language": "请重启应用以应用新的语言设置。"
-    ,"label_rag_recall_limit_note": "召回数量仅由短/长词典上限控制。"
+    ,"label_rag_recall_limit_note": "短/长词典上限按每个关键词分别计算；关键词越多，整条文本可召回的术语越多。"
     ,"group_rag_advanced_settings": "RAG 高级设置"
     ,"label_rag_keyword_max_queries": "关键词搜索任务上限:"
     ,"tooltip_rag_keyword_max_queries": "单条文本最多生成多少个关键词检索任务，用于避免异常大的召回工作量。"

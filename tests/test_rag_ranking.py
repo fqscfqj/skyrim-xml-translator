@@ -258,7 +258,7 @@ class FusionScoreTests(unittest.TestCase):
 
 
 class GlobalRankingTests(unittest.TestCase):
-    def test_global_quota_selects_across_queries_instead_of_first_come_first_served(self):
+    def test_bucket_quota_applies_independently_to_each_query(self):
         glossary = _DummyGlossaryManager({"Thane": "武卫", "Housecarl": "侍卫"})
         store = _DummyVectorStore(["Thane", "Housecarl"], [0.99, 0.98])
         searcher = RAGSearcher(
@@ -282,21 +282,56 @@ class GlobalRankingTests(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(["Thane"], list(results.keys()))
+        self.assertEqual(["Thane", "Housecarl"], list(results.keys()))
         self.assertEqual(["Thane"], debug[0]["selected_terms"])
-        self.assertEqual([], debug[1]["selected_terms"])
+        self.assertEqual(["Housecarl"], debug[1]["selected_terms"])
         # Per-query decision bookkeeping must stay attached to its own query.
         self.assertEqual("selected", debug[0]["candidate_decisions"]["Thane"]["status"])
         self.assertEqual(
-            "rejected", debug[1]["candidate_decisions"]["Housecarl"]["status"]
+            "selected", debug[1]["candidate_decisions"]["Housecarl"]["status"]
         )
-        self.assertEqual("bucket_limit", debug[1]["candidate_decisions"]["Housecarl"]["reason"])
-        self.assertEqual(
-            {"bucket_limit": 1, "no_signal_overlap": 1},
-            debug[1]["candidate_rejection_counts"],
+        self.assertEqual({"no_signal_overlap": 1}, debug[1]["candidate_rejection_counts"])
+
+    def test_short_and_long_quotas_scale_with_keyword_count(self):
+        glossary = _DummyGlossaryManager({
+            "Alpha": "甲",
+            "Alpha Long Phrase": "甲长句",
+            "Beta": "乙",
+            "Beta Long Phrase": "乙长句",
+        })
+        store = _DummyVectorStore(
+            list(glossary.glossary), [0.99, 0.98, 0.97, 0.96]
+        )
+        searcher = RAGSearcher(
+            cast(Any, store), cast(Any, glossary),
+            _config(
+                min_vector_score=0.0,
+                short_term_max_results=1,
+                long_term_max_results=1,
+                short_term_max_chars=8,
+            ),
+            _DummyLLMClient(),
         )
 
-    def test_bucket_limits_use_global_prefix_and_stay_monotonic(self):
+        results, debug = cast(
+            tuple[dict[str, str], list[dict[str, Any]]],
+            searcher.search(
+                ["Alpha", "Beta"],
+                source_text="Alpha Alpha Long Phrase Beta Beta Long Phrase.",
+                threshold=0.1,
+                top_k=10,
+                return_debug=True,
+            ),
+        )
+
+        self.assertEqual(
+            {"Alpha", "Alpha Long Phrase", "Beta", "Beta Long Phrase"},
+            set(results),
+        )
+        self.assertEqual((1, 1), (debug[0]["selected_short_count"], debug[0]["selected_long_count"]))
+        self.assertEqual((1, 1), (debug[1]["selected_short_count"], debug[1]["selected_long_count"]))
+
+    def test_bucket_limits_preserve_ranked_prefix_within_one_query(self):
         glossary = _DummyGlossaryManager({
             "Short A": "甲",
             "Short B": "乙",
@@ -307,7 +342,7 @@ class GlobalRankingTests(unittest.TestCase):
             _config(), _DummyLLMClient(),
         )
 
-        # Global order: Short A, Short B, Long.  short quota 1 / long quota 1.
+        # Query order: Short A, Short B, Long.  short quota 1 / long quota 1.
         selected, short_count, long_count = searcher._apply_bucket_limits(
             ["Short A", "Short B", "Long Term Candidate A"],
             short_limit=1,

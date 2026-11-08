@@ -11,6 +11,11 @@
 - `rag.short_term_max_chars`
 - `rag.min_vector_score`
 
+`short_term_max_results` and `long_term_max_results` are applied independently
+to each extracted keyword. For example, with limits of 3 short and 2 long terms,
+6 keywords can recall up to 18 short and 12 long glossary entries before
+deduplication.
+
 近期新增的配置项：
 
 | 配置键 | 类型 | 默认值 | 说明 |

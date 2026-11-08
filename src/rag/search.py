@@ -136,12 +136,14 @@ class RAGSearcher:
             source_text: Optional[str],
             short_limit: int,
             long_limit: int,
-            short_term_max_chars: int) -> Dict[str, str]:
+            short_term_max_chars: int,
+            keyword_count: int = 1) -> Dict[str, str]:
         """Put verbatim glossary occurrences ahead of semantic candidates.
 
         The scan sees the whole source string, so a term the keyword extractor
-        missed is still recalled.  The short/long quotas are honored so a dense
-        source cannot evict everything else.
+        missed is still recalled.  The configured short/long quotas apply once
+        per extracted keyword, so the deterministic fallback uses the matching
+        aggregate capacity.
         """
         if not source_text or not self._deterministic_scan_enabled():
             return results
@@ -156,6 +158,9 @@ class RAGSearcher:
         if not hits:
             return results
 
+        multiplier = max(1, int(keyword_count or 0))
+        aggregate_short_limit = max(0, int(short_limit)) * multiplier
+        aggregate_long_limit = max(0, int(long_limit)) * multiplier
         merged: Dict[str, str] = {}
         short_used = 0
         long_used = 0
@@ -180,22 +185,25 @@ class RAGSearcher:
             if translation is None:
                 continue
             if self._is_short_term_candidate(term, short_term_max_chars):
-                if short_used >= short_limit:
+                if short_used >= aggregate_short_limit:
                     continue
                 short_used += 1
             else:
-                if long_used >= long_limit:
+                if long_used >= aggregate_long_limit:
                     continue
                 long_used += 1
             merged[term] = translation
 
-        if not merged:
-            return results
-        total_limit = max(0, short_limit) + max(0, long_limit)
         for term, translation in results.items():
-            if len(merged) >= total_limit:
-                break
             if term not in merged:
+                if self._is_short_term_candidate(term, short_term_max_chars):
+                    if short_used >= aggregate_short_limit:
+                        continue
+                    short_used += 1
+                else:
+                    if long_used >= aggregate_long_limit:
+                        continue
+                    long_used += 1
                 merged[term] = translation
         return merged
 
@@ -260,14 +268,11 @@ class RAGSearcher:
             short_limit: int,
             long_limit: int,
             short_term_max_chars: int) -> tuple[list[str], int, int]:
-        """Apply short/long quotas to a globally fused-and-ranked term list.
+        """Apply short/long quotas to one query's ranked term list.
 
-        The caller passes every query's candidates already merged and sorted by
-        fused score (descending).  Quotas only truncate: the first
-        ``short_limit + long_limit`` globally ranked terms are split into the
-        short/long buckets (R-16).  Because the input is globally ordered and the
-        output is a subsequence of it, the returned term set is monotonic with
-        respect to the fused score.
+        Quotas are applied independently for each extracted keyword.  Because
+        the input is already ordered by fused score, the returned term set is a
+        monotonic subsequence of that query's candidates (R-16).
         """
         total_budget = max(0, int(short_limit)) + max(0, int(long_limit))
         if total_budget <= 0 or not ranked_terms:
@@ -1026,12 +1031,12 @@ class RAGSearcher:
                threshold: float = 0.8, top_k: int = 3,
                return_debug: bool = False,
                log_callback: Optional[Callable] = None) -> dict[str, str] | tuple[dict[str, str], list[Dict[str, Any]]]:
-        """Orchestrate recall across all queries, then rank globally.
+        """Orchestrate recall across all queries, then rank and merge globally.
 
-        Recall for every keyword is collected first; fusion and the short/long
-        bucket quotas are applied once, globally, so the returned dict is ordered
-        by fused score (descending).  ``threshold`` only applies to the normalized
-        final score.
+        Recall for every keyword is collected first.  Short/long bucket quotas
+        are applied independently to each keyword before selected terms are
+        deduplicated and ordered by fused score.  ``threshold`` only applies to
+        the normalized final score.
         """
         deduped_keywords: list[str] = []
         seen_keyword_keys: set[str] = set()
@@ -1129,8 +1134,7 @@ class RAGSearcher:
             skip_semantic_recall = skip_semantic_by_query.get(query, True)
             query_norm = self.glossary_manager.normalize_term_key(query)
             query_terms: list[str] = []
-            if debug_info is not None:
-                query_candidate_terms[query] = query_terms
+            query_candidate_terms[query] = query_terms
 
             query_details: Optional[Dict[str, Any]] = None
             if debug_info is not None:
@@ -1309,9 +1313,9 @@ class RAGSearcher:
                 if overlap_bonus > state["overlap_bonus"]:
                     state["overlap_bonus"] = float(overlap_bonus)
 
+                if canonical_term not in query_terms:
+                    query_terms.append(canonical_term)
                 if return_debug:
-                    if canonical_term not in query_terms:
-                        query_terms.append(canonical_term)
                     record_candidate_decision(
                         term, raw_score, "accepted",
                         canonical_term=canonical_term, source=candidate_source,
@@ -1417,7 +1421,7 @@ class RAGSearcher:
             if stopped:
                 break
 
-        # --- Global fusion and ranking (R-13/R-14/R-15/R-16) ---
+        # --- Global fusion and per-query bucket limits (R-13/R-14/R-15/R-16) ---
         for state in candidates.values():
             state["fused"] = (
                 float(state["raw"])
@@ -1436,11 +1440,31 @@ class RAGSearcher:
             term for term in ordered_terms
             if normalized_scores.get(term, 0.0) >= threshold
         ]
-        limited_terms, selected_short_count, selected_long_count = self._apply_bucket_limits(
-            eligible_terms,
-            short_limit=short_limit,
-            long_limit=long_limit,
-            short_term_max_chars=short_term_max_chars,
+        eligible_set = set(eligible_terms)
+        selected_by_query: Dict[str, list[str]] = {}
+        for query in keywords:
+            query_terms = [
+                term for term in query_candidate_terms.get(query, [])
+                if term in eligible_set and term in candidates
+            ]
+            query_terms.sort(
+                key=lambda term: (-candidates[term]["fused"], len(term), term)
+            )
+            selected_for_query, _short_count, _long_count = self._apply_bucket_limits(
+                query_terms,
+                short_limit=short_limit,
+                long_limit=long_limit,
+                short_term_max_chars=short_term_max_chars,
+            )
+            selected_by_query[query] = selected_for_query
+
+        selected_union = {
+            term for selected_terms in selected_by_query.values()
+            for term in selected_terms
+        }
+        limited_terms = sorted(
+            selected_union,
+            key=lambda term: (-candidates[term]["fused"], len(term), term),
         )
 
         results: dict[str, str] = {}
@@ -1459,18 +1483,17 @@ class RAGSearcher:
             short_limit,
             long_limit,
             short_term_max_chars,
+            keyword_count=len(keywords),
         )
 
         if return_debug and debug_info is not None:
-            selected_set = set(limited_terms)
-            eligible_set = set(eligible_terms)
             for query in keywords:
                 query_details = query_debug_by_text.get(query)
                 if query_details is None:
                     continue
                 terms = query_candidate_terms.get(query, [])
-                terms_set = set(terms)
-                selected_for_query = [term for term in limited_terms if term in terms_set]
+                selected_for_query = selected_by_query.get(query, [])
+                selected_set_for_query = set(selected_for_query)
                 short_count = sum(
                     1 for term in selected_for_query
                     if self._is_short_term_candidate(term, short_term_max_chars)
@@ -1482,7 +1505,8 @@ class RAGSearcher:
                 query_details["long_terms_selected_count"] = long_count
                 query_details["selected_total_count"] = len(selected_for_query)
                 query_details["bucket_filtered_terms"] = [
-                    term for term in terms if term in eligible_set and term not in selected_set
+                    term for term in terms
+                    if term in eligible_set and term not in selected_set_for_query
                 ]
                 query_details["threshold_filtered_terms"] = [
                     {
@@ -1508,7 +1532,7 @@ class RAGSearcher:
                 for term in terms:
                     if record is None:
                         break
-                    if term in selected_set:
+                    if term in selected_set_for_query:
                         record(term, normalized_scores.get(term, 0.0), "selected",
                                canonical_term=term, source="final")
                     elif term in eligible_set:

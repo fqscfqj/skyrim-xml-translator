@@ -5159,11 +5159,11 @@ class MainWindow(QMainWindow):
         self.rag_long_max_results.setToolTip(i18n.t("tooltip_rag_long_max_results"))
 
         rag_layout.addRow(i18n.t("label_rag_threshold"), self.rag_threshold)
-        rag_layout.addRow(i18n.t("label_rag_short_max_results"), self.rag_short_max_results)
-        rag_layout.addRow(i18n.t("label_rag_long_max_results"), self.rag_long_max_results)
+        rag_layout.addRow(i18n.t("label_rag_short_max_results", "Max short-term results per keyword:"), self.rag_short_max_results)
+        rag_layout.addRow(i18n.t("label_rag_long_max_results", "Max long-term results per keyword:"), self.rag_long_max_results)
         recall_limit_note = QLabel(i18n.t(
             "label_rag_recall_limit_note",
-            "Recall count is controlled only by short/long glossary max results."
+            "Short/long glossary limits apply independently to each keyword; more keywords allow more terms per entry."
         ))
         recall_limit_note.setWordWrap(True)
         rag_layout.addRow(recall_limit_note)
