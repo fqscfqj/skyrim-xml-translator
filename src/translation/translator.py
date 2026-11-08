@@ -31,7 +31,7 @@ class _ChunkQualityFailure(RuntimeError):
 class Translator:
     _CACHE_POLICY_VERSION = "translation_policy_v3"
     _FORMAT_SHELL_VERSION = "format_shell_v1"
-    _QUALITY_RULES_VERSION = "quality_rules_v5"
+    _QUALITY_RULES_VERSION = "quality_rules_v6"
     _GLOSSARY_IMPORT_FORMAT_VERSION = "glossary_import_v1"
     _DEFAULT_FORMAT_EXTRA_RETRIES = 2
     # Q-02: at most two split layers (original -> halves -> quarters).

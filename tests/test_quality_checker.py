@@ -108,6 +108,40 @@ class QualityCheckerPlaceholderResidueTests(unittest.TestCase):
             issues,
         )
 
+    def test_rejects_unrelated_cjk_output_when_all_glossary_anchors_are_missing(self):
+        issues = self.checker.check(
+            "Nord mead, Cyrodiilic brandy, I don't care.",
+            "地震炸弹。使用：松开紧握的双手。",
+            matched_terms={
+                "Nord Mead": "诺德蜜酒",
+                "Cyrodilic Brandy": "希罗帝尔白兰地",
+                "Don't care.": "我不在乎。",
+            },
+            target_lang="zh",
+        )
+
+        self.assertTrue(
+            any(issue.rule_id == "glossary_anchor_coverage" for issue in issues),
+            issues,
+        )
+
+    def test_accepts_natural_output_with_one_grounded_glossary_anchor(self):
+        issues = self.checker.check(
+            "Nord mead, Cyrodiilic brandy, I don't care.",
+            "诺德蜜酒也好，赛瑞迪尔白兰地也好，我都不在乎。",
+            matched_terms={
+                "Nord Mead": "诺德蜜酒",
+                "Cyrodilic Brandy": "希罗帝尔白兰地",
+                "Don't care.": "我不在乎。",
+            },
+            target_lang="zh",
+        )
+
+        self.assertFalse(
+            any(issue.rule_id == "glossary_anchor_coverage" for issue in issues),
+            issues,
+        )
+
     def test_accepts_cjk_translation_without_spaces_around_runtime_tags(self):
         source = (
             "Tell <Alias.ShortName=Questgiver> what "

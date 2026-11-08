@@ -197,6 +197,12 @@ class QualityChecker:
         if frag_issue:
             issues.append(frag_issue)
 
+        anchor_issue = self._check_glossary_anchor_coverage(
+            source_text, translation_text, matched_terms, target_lang=target_lang,
+        )
+        if anchor_issue:
+            issues.append(anchor_issue)
+
         # R-30: glossary rich metadata is consumed by quality as well as prompt.
         forbidden_issue = self._check_forbidden_terms(translation_text, rich_meta)
         if forbidden_issue:
@@ -811,6 +817,45 @@ class QualityChecker:
                 fragments=untranslated,
             )
         return None
+
+    def _check_glossary_anchor_coverage(
+            self,
+            source: str,
+            translation: str,
+            matched_terms: Optional[dict] = None,
+            target_lang: str = "zh") -> Optional[QualityIssue]:
+        """Reject fluent-looking output that drops every grounded glossary anchor.
+
+        This catches a provider returning an unrelated cached/generated sentence
+        while still satisfying script and format checks.  The gate only applies
+        when multiple source terms were grounded and requires one complete
+        multi-character CJK glossary translation to survive in the output.
+        """
+        if self._target_script(target_lang) != "cjk":
+            return None
+        if not isinstance(matched_terms, dict) or len(matched_terms) < 2:
+            return None
+
+        source_text = str(source or "")
+        translation_text = str(translation or "")
+        anchors: list[str] = []
+        for term, expected in matched_terms.items():
+            if not term or not expected or not self._term_present_in_source(str(term), source_text):
+                continue
+            expected_cjk = "".join(self._CJK_CHAR_RE.findall(str(expected)))
+            if len(expected_cjk) >= 2:
+                anchors.append(expected_cjk)
+        if not anchors:
+            return None
+        if any(anchor in translation_text for anchor in anchors):
+            return None
+        return QualityIssue(
+            issue_type=QualityIssueType.UNTRANSLATED,
+            severity="error",
+            details="Translation contains none of the grounded glossary anchors",
+            rule_id="glossary_anchor_coverage",
+            fragments=anchors[:6],
+        )
 
     # --- R-30: rich glossary metadata consumption ---
 
