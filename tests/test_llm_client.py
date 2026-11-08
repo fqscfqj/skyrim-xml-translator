@@ -306,6 +306,24 @@ class LLMClientParameterOverrideTests(unittest.TestCase):
         self.assertEqual(stats["cached_tokens"], 960)
         self.assertEqual(stats["cache_miss_tokens"], 240)
 
+    def test_extract_usage_stats_prefers_nonzero_flat_cache_counter(self):
+        class _MixedUsage:
+            def model_dump(self):
+                return {
+                    "prompt_tokens": 1200,
+                    "prompt_tokens_details": {"cached_tokens": 0},
+                    "prompt_cache_hit_tokens": 960,
+                    "prompt_cache_miss_tokens": 240,
+                }
+
+        class _MixedResponse:
+            usage = _MixedUsage()
+
+        stats = LLMClient._extract_usage_stats(_MixedResponse())
+
+        self.assertEqual(stats["cached_tokens"], 960)
+        self.assertEqual(stats["cache_miss_tokens"], 240)
+
     def test_extract_usage_stats_derives_cache_misses_for_nested_compatible_shape(self):
         class _CompatibleUsage:
             def model_dump(self):

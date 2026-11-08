@@ -446,10 +446,22 @@ class LLMClient:
                     return parsed
             return None
 
+        def _best_nonnegative_int(*values: Any) -> Optional[int]:
+            """Choose the strongest reported counter across provider shapes.
+
+            Some OpenAI-compatible gateways include a nested ``cached_tokens``
+            field with value 0 while also returning the real DeepSeek flat
+            ``prompt_cache_hit_tokens`` counter.  Taking the first present
+            field silently turns a real cache hit into a reported miss.
+            """
+            parsed = [value for value in (_safe_int(item) for item in values)
+                      if value is not None and value >= 0]
+            return max(parsed) if parsed else None
+
         prompt_tokens = _first_int(
             usage.get("prompt_tokens"), usage.get("input_tokens")
         )
-        cached_tokens = _first_int(
+        cached_tokens = _best_nonnegative_int(
             # OpenAI and OpenAI-compatible Model Studio / SiliconFlow shape.
             prompt_details.get("cached_tokens"),
             # Native DeepSeek OpenAI-compatible response shape.

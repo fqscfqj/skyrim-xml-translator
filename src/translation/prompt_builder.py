@@ -115,7 +115,9 @@ class PromptBuilder:
                 "且忽略后仍须保持同一选择。",
             )
             glossary_append = self.apply_prompt_vars(glossary_append, prompt_vars)
-            sections.append(f"{glossary_context}{glossary_append}")
+            # Keep the stable glossary policy before per-request entries so
+            # provider prefix caches can reuse it across different sources.
+            sections.append(f"{glossary_append.strip()}\n{glossary_context}")
 
         # Source text section
         user_template = self.prompt_manager.get(
@@ -256,7 +258,7 @@ class PromptBuilder:
                     "且忽略后仍须保持同一选择。",
                 )
                 glossary_append = self.apply_prompt_vars(glossary_append, prompt_vars)
-                item_parts.append(f"{glossary_context}{glossary_append}")
+                item_parts.append(f"{glossary_append.strip()}\n{glossary_context}")
 
             if mcm_ui_mode:
                 item_parts.append(self._build_mcm_ui_rules(
