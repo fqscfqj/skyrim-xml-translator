@@ -43,8 +43,10 @@ from src.llm.cost_tracker import CostTracker
 from src.llm.reasoning import apply_reasoning_controls, strip_reasoning_controls
 
 
-# Embedding request limits / defaults.
-_EMBEDDING_MAX_BATCH_INPUTS = 2048
+# Embedding request limits / defaults. Keep the request size within the
+# smallest common OpenAI-compatible provider limit (for example, DashScope
+# rejects embedding requests containing more than 20 inputs).
+_EMBEDDING_MAX_BATCH_INPUTS = 20
 _EMBEDDING_DEFAULT_RETRY_TOTAL_SECONDS = 60.0
 # Only retry a failed *batch* item-by-item up to this size; bigger batches rely
 # on the caller's fallback so a broken endpoint cannot cause O(n) request storms.

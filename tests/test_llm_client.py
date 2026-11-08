@@ -654,7 +654,7 @@ class LLMClientEmbeddingTests(unittest.TestCase):
 
         self.assertIn("count mismatch", str(ctx.exception).lower())
 
-    def test_batch_larger_than_2048_is_chunked(self):
+    def test_embedding_requests_respect_provider_batch_limit(self):
         dimensions = 4
         client = LLMClient(
             _embed_config(
@@ -670,13 +670,13 @@ class LLMClientEmbeddingTests(unittest.TestCase):
         )
         _install_embed_client(client, fake_client)
 
-        vectors = client.get_embedding([f"t{i}" for i in range(2050)])
+        vectors = client.get_embedding([f"t{i}" for i in range(42)])
 
         self.assertEqual(
             [len(call["input"]) for call in fake_client.embeddings.calls],
-            [2048, 2],
+            [20, 20, 2],
         )
-        self.assertEqual(len(vectors), 2050)
+        self.assertEqual(len(vectors), 42)
 
     def test_auth_failure_on_batch_skips_per_item_fallback_and_suspends(self):
         dimensions = 4
