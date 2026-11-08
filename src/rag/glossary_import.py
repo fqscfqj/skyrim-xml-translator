@@ -58,6 +58,10 @@ class ParsedGlossaryImport:
     # Envelope-level provenance (JSONv2 only: source/created_at/format_version).
     # Never stored per-term; callers merge it into vector meta import_source.
     envelope: dict[str, Any] = field(default_factory=dict)
+    # Internal indexes keep duplicate/delete matching O(1) while preserving
+    # the public terms/rich_meta dictionaries and their original spelling.
+    _normalized_terms: dict[str, str] = field(default_factory=dict, repr=False)
+    _normalized_deletes: set[str] = field(default_factory=set, repr=False)
 
     @property
     def imported_terms(self) -> int:
@@ -374,12 +378,20 @@ def _normalize_import_key(text: str) -> str:
     return normalized.strip().lower()
 
 
-def _find_term_key(mapping: dict[str, Any], term: str) -> Optional[str]:
+def _find_term_key(
+    mapping: dict[str, Any],
+    term: str,
+    normalized_index: Optional[dict[str, str]] = None,
+) -> Optional[str]:
     if term in mapping:
         return term
     target = _normalize_import_key(term)
     if not target:
         return None
+    if normalized_index is not None:
+        indexed = normalized_index.get(target)
+        if indexed is not None and indexed in mapping:
+            return indexed
     for key in mapping.keys():
         if _normalize_import_key(key) == target:
             return key
@@ -422,16 +434,19 @@ def _apply_entry(
         if not term:
             _record_invalid(result, f"{line_hint}删除行缺少词面，已跳过")
             return
-        existing = _find_term_key(result.terms, term)
+        norm = _normalize_import_key(term)
+        existing = _find_term_key(result.terms, term, result._normalized_terms)
         if existing is not None:
             del result.terms[existing]
+            result._normalized_terms.pop(norm, None)
             result.rich_meta.pop(existing, None)
-            for alias in [k for k in list(result.rich_meta.keys()) if _normalize_import_key(k) == _normalize_import_key(term)]:
+            # Keep compatibility with manually supplied rich_meta aliases.
+            for alias in [k for k in list(result.rich_meta.keys()) if _normalize_import_key(k) == norm]:
                 result.rich_meta.pop(alias, None)
             result.duplicate_overwrites += 1
-        norm = _normalize_import_key(term)
-        if not any(_normalize_import_key(d) == norm for d in result.deletes):
+        if norm not in result._normalized_deletes:
             result.deletes.append(term)
+            result._normalized_deletes.add(norm)
         else:
             result.duplicate_overwrites += 1
         return
@@ -441,15 +456,19 @@ def _apply_entry(
     if max_field_chars and (len(term) > max_field_chars or len(translation) > max_field_chars):
         _record_limited(result, f"{line_hint}字段超限（>{max_field_chars}字符）已截断：{term[:30]}")
         return
-    existing = _find_term_key(result.terms, term)
+    norm = _normalize_import_key(term)
+    existing = _find_term_key(result.terms, term, result._normalized_terms)
     if existing is not None:
         result.duplicate_overwrites += 1
-        for pending in [d for d in list(result.deletes) if _normalize_import_key(d) == _normalize_import_key(term)]:
-            result.deletes.remove(pending)
+        if norm in result._normalized_deletes:
+            result.deletes[:] = [d for d in result.deletes if _normalize_import_key(d) != norm]
+            result._normalized_deletes.discard(norm)
         if existing != term:
             result.terms.pop(existing, None)
+            result._normalized_terms.pop(norm, None)
             result.rich_meta.pop(existing, None)
     result.terms[term] = translation
+    result._normalized_terms[norm] = term
     cleaned = {key: value for key, value in rich.items() if value not in (None, "", [], {})}
     if max_field_chars:
         # G-08: rich fields must obey the same size cap as term/translation,

@@ -56,6 +56,18 @@ class DelimitedImportTests(unittest.TestCase):
         self.assertEqual(result.terms, {"Sword": "剑"})
         self.assertEqual(result.rich_meta["Sword"]["pos"], "noun")
 
+    def test_case_insensitive_duplicate_uses_latest_spelling(self):
+        result = parse_delimited_text("Sword,剑\nsWoRd,刀\n", delimiter=",")
+        self.assertEqual(result.terms, {"sWoRd": "刀"})
+        self.assertEqual(result.duplicate_overwrites, 1)
+
+    def test_case_insensitive_delete_uses_normalized_index(self):
+        result = parse_delimited_text(
+            "term,translation,op\nSword,剑,upsert\nsWoRd,,delete\n", delimiter=","
+        )
+        self.assertEqual(result.terms, {})
+        self.assertEqual(result.deletes, ["sWoRd"])
+
     def test_max_field_chars_limits_row(self):
         result = parse_delimited_text("VeryLongTerm,译文\n", delimiter=",", max_field_chars=4)
         self.assertEqual(result.terms, {})
