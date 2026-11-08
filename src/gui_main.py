@@ -1739,7 +1739,8 @@ class RAGVisualizationDialog(QDialog):
         metrics_layout.setSpacing(28)
         self._summary_value_labels = {}
         for key in ("queries", "candidates", "matched"):
-            metric_label = QLabel(i18n.t(f"rag_metric_{key}"))
+            metric_key_prefix = "rag_metric_"
+            metric_label = QLabel(i18n.t(metric_key_prefix + str(key)))
             metric_label.setObjectName("ragMetricLabel")
             metric_value = QLabel("-")
             metric_value.setObjectName("ragMetricValue")
@@ -1945,7 +1946,8 @@ class RAGVisualizationDialog(QDialog):
                 score_text = f"{float(score):.4f}"
             except (TypeError, ValueError):
                 score_text = str(score)
-        status_text = i18n.t(f"rag_{status}", status) if status else ""
+        status_key_prefix = "rag_"
+        status_text = i18n.t(status_key_prefix + str(status), status) if status else ""
         item = QTreeWidgetItem([display_label, status_text, score_text])
         if parent is None:
             self.rag_tree.addTopLevelItem(item)
@@ -1985,7 +1987,8 @@ class RAGVisualizationDialog(QDialog):
     @staticmethod
     def _keyword_stage_title(stage: str) -> str:
         if stage in {"primary", "fallback", "llm", "regex", "cache"}:
-            return i18n.t(f"rag_stage_{stage}")
+            stage_key_prefix = "rag_stage_"
+            return i18n.t(stage_key_prefix + str(stage))
         return str(stage or i18n.t("rag_unknown"))
 
     @staticmethod
@@ -1995,7 +1998,8 @@ class RAGVisualizationDialog(QDialog):
             "filter_low_signal", "expand_keywords_into_tasks", "deduplicate_tasks",
             "apply_keyword_safety_limit",
         }:
-            return i18n.t(f"rag_step_{name}")
+            step_key_prefix = "rag_step_"
+            return i18n.t(step_key_prefix + str(name))
         return str(name or i18n.t("rag_step"))
 
     @staticmethod
@@ -2014,9 +2018,10 @@ class RAGVisualizationDialog(QDialog):
         return i18n.t(key, source or i18n.t("rag_unknown")) if key else str(source or i18n.t("rag_unknown"))
 
     def _build_keyword_attempt_detail(self, attempt: dict) -> str:
+        status_key_prefix = "rag_"
         lines = [
             f"{i18n.t('rag_phase')}: {self._keyword_stage_title(str(attempt.get('stage', '') or ''))}",
-            f"{i18n.t('rag_status')}: {i18n.t('rag_' + str(attempt.get('status', '') or 'unknown'), str(attempt.get('status', '') or i18n.t('rag_unknown')))}",
+            f"{i18n.t('rag_status')}: {i18n.t(status_key_prefix + str(attempt.get('status', '') or 'unknown'), str(attempt.get('status', '') or i18n.t('rag_unknown')))}",
         ]
         failure_reason = str(attempt.get("failure_reason", "") or "")
         if failure_reason:
@@ -2359,9 +2364,10 @@ class RAGVisualizationDialog(QDialog):
                         raw_status = str(decision.get("status", "") or default_status)
                         status_key = raw_status if raw_status in {"selected", "accepted", "rejected", "unreviewed"} else "unknown"
                         reason = str(decision.get("reason", "") or "")
+                        status_key_prefix = "rag_"
                         detail_lines = [
                             f"{i18n.t('rag_query')}: {query}",
-                            f"{i18n.t('rag_status')}: {i18n.t('rag_' + status_key, status_key)}",
+                            f"{i18n.t('rag_status')}: {i18n.t(status_key_prefix + status_key, status_key)}",
                         ]
                         if reason:
                             detail_lines.append(f"{i18n.t('rag_failure_reason')}: {reason}")

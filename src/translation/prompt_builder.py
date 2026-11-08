@@ -148,15 +148,21 @@ class PromptBuilder:
         }
 
         system_prompt = self.apply_prompt_vars(self._get_system_prompt(prompt_style), prompt_vars)
-        system_prompt += (
-            "\n\n批量输出锚点：本请求仅用以下格式，替代核心中的单条响应格式："
+        batch_anchor = self.prompt_manager.get(
+            "translator.batch.output_anchor",
+            "批量输出锚点：本请求仅用以下格式，替代核心中的单条响应格式："
             "{\"translations\":[{\"id\":0,\"translation\":\"...\"}]}。"
-            "每个输入 id 恰好出现一次；不输出分析、备选或解释。"
+            "每个输入 id 恰好出现一次；不输出分析、备选或解释。",
         )
+        batch_item_rule = self.prompt_manager.get(
+            "translator.batch.item_rule",
+            "每条文本独立完成核心中的单次闭环，保持 id 不变；完成一条后立即转到下一条，不回看已核验结果。",
+        )
+        system_prompt += f"\n\n{batch_anchor}"
 
         sections = [
             f"请将以下短文本分别翻译为{prompt_vars['target_language']}。",
-            "每条文本独立完成核心中的单次闭环，保持 id 不变；完成一条后立即转到下一条，不回看已核验结果。",
+            str(batch_item_rule),
         ]
 
         user_template = self.prompt_manager.get(
@@ -567,6 +573,17 @@ class PromptBuilder:
                 ]
                 if alias_values:
                     extras.append(f"原文亦作：{'、'.join(alias_values)}")
+                domain = self._sanitize_glossary_field(meta.get("domain", ""), max_chars=60)
+                note = self._sanitize_glossary_field(meta.get("note", ""), max_chars=120)
+                examples = self._coerce_meta_list(meta.get("examples"))
+                if domain:
+                    extras.append(f"领域：{domain}")
+                if note:
+                    extras.append(f"备注：{note}")
+                if examples:
+                    example = self._sanitize_glossary_field(examples[0], max_chars=120)
+                    if example:
+                        extras.append(f"语境例：{example}")
 
             line = f"- {display_term} -> {display_translation}"
             if extras:
@@ -582,7 +599,7 @@ class PromptBuilder:
 
         glossary_header = self.prompt_manager.get(
             "translator.glossary_header",
-            "术语表：",
+            "术语与设定参考（只用于识别实体和保持译名一致）：",
         )
 
         def build_context() -> str:
@@ -613,6 +630,18 @@ class PromptBuilder:
             max_chars = 4000
         if max_chars <= 0 or len(context) <= max_chars:
             return context
+
+        # Very small budgets still need to carry at least one source-matched
+        # term.  A long localized header must never crowd out the evidence
+        # that makes glossary retrieval useful.
+        if max_chars < 300 and in_source_lines:
+            compact = (
+                "术语表：\n<<<GLOSSARY_DATA>>>\n"
+                + in_source_lines[0]
+                + "\n<<<END_GLOSSARY_DATA>>>"
+            )
+            if len(compact) <= max_chars:
+                return compact
 
         dropped_reference = 0
         dropped_in_source = 0
@@ -740,20 +769,18 @@ class PromptBuilder:
         if not system_prompt:
             system_prompt = (
                 "任务锚点：只需交付忠实、自然、格式正确的{target_language}译文。"
-                "只判断会改变译文的歧义、作用域或格式绑定；明确处直接处理，"
-                "不复述任务、原文或规则，不枚举等价措辞。"
                 "按“锁定约束→必要消歧→目标语重组→一次核验”完成；"
-                "核验通过立即提交最终 JSON，不再推演。"
-                '输出锚点：最终回答必须且仅含 JSON：{"translation":"..."}；'
-                "内部已有译文也必须提交，禁止空响应。"
-                "先确定命题、参与者角色、修饰和指代归属，以及否定、比较、条件、时间和模态的作用域；"
-                "保持原文语气和歧义，不加入上下文未支持的信息。"
+                "只判断会改变译文的歧义、作用域或格式绑定；明确处直接处理，"
+                "不复述任务、原文或规则，不枚举等价措辞。源文事实优先，证据不足保留歧义。"
+                '输出锚点：最终回答必须且仅含 JSON：{"translation":"..."}；禁止空响应。'
+                "先确定谓词—论元关系、参与者角色、修饰归属、指代和作用域；"
+                "保持语气、数量、比较关系和信息焦点，不加入未支持事实。"
                 "可见自然语言默认译出；引号、括注、大小写或专名身份不构成保护，"
                 "被命名、定义、评价或讨论的词语按句中功能翻译。"
                 "专名优先采用可靠术语，无可靠译名时使用一致的目标语言音译或约定转写；"
-                "仅格式标记、内部标识符、约定缩写或语义明确要求展示原拼写时保留源文形式。"
+                "仅格式标记、内部标识符、约定缩写或明确要求展示的原拼写可保留。"
                 "完整保留受保护标记的数量和结构关系；__FMT_*__ 和有序占位符保持必要顺序。"
-                "术语表条目是默认译名，应全篇采用；仅当原文证据明确冲突时才忽略。"
+                "术语表命中条目使用默认译名，禁止使用列出的禁用译法。"
             )
         return self._normalize_prompt_text(system_prompt)
 

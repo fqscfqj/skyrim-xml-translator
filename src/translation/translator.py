@@ -2339,12 +2339,12 @@ class Translator:
             template_key = "translator.retry.refusal"
 
         default_retry = (
-            "修正锚点：上次译文仅作错误证据。只重做已报告问题涉及的判断，"
-            "保持原文命题、参与者关系、作用域、语气、歧义和受保护结构；"
-            "可见自然语言均应译出，引号、括注、大小写或专名身份不构成保护；"
-            "仅格式标记、内部标识符、约定缩写或语义明确要求展示原拼写时保留源文形式，"
-            "也不加入原文未支持的信息。"
-            "核验一次后仅输出 JSON：{\"translation\":\"...\"}，不解释。"
+            "修正锚点：上次译文仅作错误证据。只重做质量问题涉及的判断，保持源文事实、"
+            "参与者、作用域、语气、歧义和受保护结构；可见自然语言均应译出，"
+            "引号、括注、大小写或专名身份不构成保护；"
+            "语义明确要求展示原拼写时保留源文形式；"
+            "不加入原文未支持的信息。核验一次后仅输出 JSON："
+            "{\"translation\":\"...\"}，不解释。"
         )
         retry_template = self.prompt_manager.get(template_key, default_retry)
         prompt = PromptBuilder.apply_prompt_vars(retry_template, prompt_vars)
