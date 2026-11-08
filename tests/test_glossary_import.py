@@ -97,6 +97,22 @@ class DelimitedImportTests(unittest.TestCase):
         self.assertEqual(result.terms, {})
         self.assertEqual(result.invalid_rows, 2)
 
+    def test_numeric_identity_entries_are_filtered(self):
+        text = (
+            "term,translation\n"
+            "0,0\n"
+            "4,4\n"
+            "200,200\n"
+            "4E 200,4E 200\n"
+            "Dragonborn,Dragonborn\n"
+        )
+        result = parse_delimited_text(text, delimiter=",")
+        self.assertEqual(
+            result.terms,
+            {"4E 200": "4E 200", "Dragonborn": "Dragonborn"},
+        )
+        self.assertEqual(result.invalid_rows, 3)
+
 
 class JsonImportTests(unittest.TestCase):
     def test_json_v2_envelope_with_rich_fields(self):

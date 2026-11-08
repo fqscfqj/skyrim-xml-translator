@@ -24,6 +24,7 @@ import io
 import json
 import os
 import re
+import unicodedata
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
@@ -147,6 +148,29 @@ _MIN_CSV_FIELD_SIZE_LIMIT = 1 << 20  # 1 MiB
 
 _LIST_SPLIT_RE = re.compile(r"[;|｜；\n]+")
 _TRANSLATION_SPLIT_RE = re.compile(r"[;|｜；\n]+")
+_NUMERIC_LITERAL_RE = re.compile(r"[+-]?(?:\d+(?:[.,]\d*)?|[.,]\d+)")
+
+
+def is_numeric_identity_mapping(term: Any, translation: Any) -> bool:
+    """Return whether a mapping is a useless numeric identity entry.
+
+    Numeric tokens are copied verbatim by the translator and add no glossary
+    signal.  Keep this deliberately narrower than a generic ``term == value``
+    check: same-spelled names and editor identifiers can be intentional.
+    """
+    try:
+        normalized_term = unicodedata.normalize("NFKC", str(term or "")).strip()
+        normalized_translation = unicodedata.normalize(
+            "NFKC", str(translation or "")
+        ).strip()
+    except Exception:
+        normalized_term = str(term or "").strip()
+        normalized_translation = str(translation or "").strip()
+    return bool(
+        normalized_term
+        and normalized_term == normalized_translation
+        and _NUMERIC_LITERAL_RE.fullmatch(normalized_term)
+    )
 
 
 def _split_list_field(value: Any) -> list[str]:
@@ -486,6 +510,9 @@ def _apply_entry(
         return
     if max_field_chars and (len(term) > max_field_chars or len(translation) > max_field_chars):
         _record_limited(result, f"{line_hint}字段超限（>{max_field_chars}字符）已截断：{term[:30]}")
+        return
+    if is_numeric_identity_mapping(term, translation):
+        _record_invalid(result, f"{line_hint}纯数字自映射已跳过：{term[:30]}")
         return
     if _is_low_signal_singleton(term, translation, rich):
         _record_invalid(result, f"{line_hint}低信号通用词条已跳过：{term[:30]}")

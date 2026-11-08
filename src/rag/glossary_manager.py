@@ -15,6 +15,7 @@ import uuid
 from typing import Any, Dict, Optional
 
 from src.logging_helper import emit as log_emit
+from src.rag.glossary_import import is_numeric_identity_mapping
 
 # Process-wide lock serializing glossary mutations and disk writes.  All
 # GlossaryManager instances in this process share it: two managers pointed at
@@ -577,6 +578,23 @@ class GlossaryManager:
                     self.glossary = {}
             # G-06: envelope rich_meta is the base layer; the sidecar overlays it.
             self._load_sidecar(envelope_meta)
+            removed_numeric = self._remove_numeric_identity_entries()
+            if removed_numeric:
+                try:
+                    self.save()
+                    self._save_sidecar()
+                except Exception as exc:
+                    # Keep the in-memory cleanup even if a read-only path
+                    # prevents persisting it; the next writable run retries.
+                    log_emit(
+                        None,
+                        self.config,
+                        "WARNING",
+                        f"Glossary numeric cleanup could not be persisted: {exc}",
+                        exc=exc,
+                        module="glossary_manager",
+                        func="load",
+                    )
             self.rebuild_lookup()
 
     def save(self) -> None:
@@ -585,6 +603,28 @@ class GlossaryManager:
             self._atomic_write_json(self.glossary_path, self.glossary)
 
     # --- CRUD ---
+
+    def _remove_numeric_identity_entries(self) -> int:
+        """Remove numeric identity mappings from the loaded glossary."""
+        removed_terms = [
+            term for term, translation in self.glossary.items()
+            if is_numeric_identity_mapping(term, translation)
+        ]
+        if not removed_terms:
+            return 0
+        for term in removed_terms:
+            del self.glossary[term]
+            self.rich_meta.pop(self.normalize_term_key(term), None)
+        log_emit(
+            None,
+            self.config,
+            "WARNING",
+            f"Glossary removed {len(removed_terms)} numeric identity mapping(s): "
+            f"{', '.join(str(term) for term in removed_terms[:5])}",
+            module="glossary_manager",
+            func="_remove_numeric_identity_entries",
+        )
+        return len(removed_terms)
 
     def _warn_normalized_collision(self, term: str) -> None:
         norm = self.normalize_term_key(term)
@@ -606,6 +646,16 @@ class GlossaryManager:
 
     def add_term(self, term: str, translation: str, rich_meta: Optional[Dict[str, Any]] = None) -> None:
         """Add a term to the glossary (glossary-only, no vector)."""
+        if is_numeric_identity_mapping(term, translation):
+            log_emit(
+                None,
+                self.config,
+                "WARNING",
+                f"Glossary ignored numeric identity mapping: {term}",
+                module="glossary_manager",
+                func="add_term",
+            )
+            return
         with _GLOSSARY_WRITE_LOCK:
             glossary_snapshot = dict(self.glossary)
             rich_snapshot = {key: dict(value) for key, value in self.rich_meta.items()}
@@ -658,8 +708,27 @@ class GlossaryManager:
             glossary_snapshot = dict(self.glossary)
             rich_snapshot = {key: dict(value) for key, value in self.rich_meta.items()}
             try:
+                filtered_terms = dict(terms_dict or {})
+                ignored_terms = [
+                    term for term, translation in filtered_terms.items()
+                    if is_numeric_identity_mapping(term, translation)
+                ]
+                for term in ignored_terms:
+                    filtered_terms.pop(term, None)
+                    log_emit(
+                        None,
+                        self.config,
+                        "WARNING",
+                        f"Glossary ignored numeric identity mapping: {term}",
+                        module="glossary_manager",
+                        func="add_terms_batch",
+                    )
+                filtered_rich_meta = {
+                    term: meta for term, meta in (rich_meta or {}).items()
+                    if term in filtered_terms
+                }
                 seen_norms: Dict[str, str] = {}
-                for term in (terms_dict or {}).keys():
+                for term in filtered_terms.keys():
                     norm = self.normalize_term_key(str(term or ""))
                     if not norm:
                         continue
@@ -669,14 +738,14 @@ class GlossaryManager:
                                  module="glossary_manager", func="add_terms_batch")
                     else:
                         canonical = self._glossary_lookup.get(norm)
-                        if canonical is not None and canonical != term and canonical not in (terms_dict or {}):
+                        if canonical is not None and canonical != term and canonical not in filtered_terms:
                             log_emit(None, self.config, "WARNING",
                                      f"Glossary normalized dedup '{norm}': '{term}' overwrites alias of '{canonical}'",
                                      module="glossary_manager", func="add_terms_batch")
                     seen_norms[norm] = term
-                self.glossary.update(terms_dict or {})
-                if isinstance(rich_meta, dict) and rich_meta:
-                    for term, meta in rich_meta.items():
+                self.glossary.update(filtered_terms)
+                if filtered_rich_meta:
+                    for term, meta in filtered_rich_meta.items():
                         if not isinstance(meta, dict) or not meta:
                             continue
                         normalized = self.normalize_term_key(str(term or ""))

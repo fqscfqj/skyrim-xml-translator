@@ -71,6 +71,40 @@ class GlossarySidecarTests(unittest.TestCase):
         manager.delete_term("A")
         self.assertEqual(manager.get_rich_meta("A"), {})
 
+    def test_numeric_identity_entries_are_removed_on_load_and_write(self):
+        manager, _temp = self.make_manager()
+        with open(manager.glossary_path, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "0": "0",
+                    "200": "200",
+                    "Dragonborn": "Dragonborn",
+                    "4E 200": "4E 200",
+                },
+                handle,
+                ensure_ascii=False,
+            )
+        with open(manager.sidecar_path, "w", encoding="utf-8") as handle:
+            json.dump({"200": {"domain": "noise"}}, handle)
+
+        reloaded = GlossaryManager(manager.glossary_path, _DummyConfig())
+
+        self.assertNotIn("0", reloaded.glossary)
+        self.assertNotIn("200", reloaded.glossary)
+        self.assertNotIn("200", reloaded.rich_meta)
+        self.assertEqual(reloaded.glossary["Dragonborn"], "Dragonborn")
+        self.assertEqual(reloaded.glossary["4E 200"], "4E 200")
+
+        reloaded.add_terms_batch({"42": "42", "Button": "按钮"})
+        reloaded.add_term("8", "8")
+        self.assertNotIn("42", reloaded.glossary)
+        self.assertNotIn("8", reloaded.glossary)
+        self.assertEqual(reloaded.glossary["Button"], "按钮")
+        with open(reloaded.glossary_path, "r", encoding="utf-8") as handle:
+            persisted = json.load(handle)
+        self.assertNotIn("42", persisted)
+        self.assertNotIn("8", persisted)
+
 
 class VectorImportMetadataTests(unittest.TestCase):
     def test_build_index_writes_additive_import_metadata(self):
