@@ -166,6 +166,35 @@ class RAGSearchSentenceLikeFilterTests(unittest.TestCase):
             1,
         )
 
+    def test_source_spelling_variant_grounds_canonical_term(self):
+        glossary = _DummyGlossaryManager({"Cyrodilic Brandy": "希罗帝尔白兰地"})
+        glossary.get_rich_meta = lambda term: {
+            "variants": ["Cyrodiilic Brandy"]
+        } if term == "Cyrodilic Brandy" else {}
+        searcher = RAGSearcher(
+            cast(Any, _DummyVectorStore(["Cyrodilic Brandy"], [0.87])),
+            cast(Any, glossary),
+            _DummyConfig({
+                ("rag", "keyword_weight_enabled"): False,
+                ("rag", "min_vector_score"): 0.0,
+                ("rag", "short_term_max_results"): 5,
+                ("rag", "long_term_max_results"): 5,
+            }),
+            _DummyLLMClient(),
+        )
+
+        results = cast(
+            dict[str, str],
+            searcher.search(
+                ["Cyrodiilic brandy"],
+                source_text="Cyrodiilic brandy",
+                threshold=0.1,
+                top_k=5,
+            ),
+        )
+
+        self.assertEqual({"Cyrodilic Brandy": "希罗帝尔白兰地"}, results)
+
     def test_keeps_exact_sentence_candidate_that_appears_in_source(self):
         sentence_term = "So, it is real after all."
         glossary = _DummyGlossaryManager({sentence_term: "原来这一切是真的。"})

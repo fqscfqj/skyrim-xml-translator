@@ -431,6 +431,25 @@ class RAGSearcher:
     def _term_is_grounded_in_source(self, term: str, source_text: str) -> bool:
         if self._raw_term_appears_in_source(term, source_text):
             return True
+
+        # Rich metadata may record source spelling variants that map to the
+        # same canonical glossary entry (for example, a historical typo in a
+        # game string).  Treat those aliases as grounded without weakening
+        # the normal whole-token grounding rule for unrelated candidates.
+        get_rich_meta = getattr(self.glossary_manager, "get_rich_meta", None)
+        if callable(get_rich_meta):
+            try:
+                meta = get_rich_meta(term)
+            except Exception:
+                meta = None
+            variants = meta.get("variants") if isinstance(meta, dict) else None
+            if isinstance(variants, str):
+                variants = [variants]
+            if isinstance(variants, (list, tuple, set)):
+                for variant in variants:
+                    if self._raw_term_appears_in_source(str(variant or ""), source_text):
+                        return True
+
         normalized_term = self.glossary_manager.normalize_term_key(term)
         normalized_source = self.glossary_manager.normalize_term_key(source_text)
         term_tokens = [token for token in normalized_term.split() if token]
