@@ -97,6 +97,59 @@ class QualityCheckerPlaceholderResidueTests(unittest.TestCase):
             issues,
         )
 
+    def test_rejects_untranslated_english_inside_chinese_dialogue(self):
+        source = "You're already wet for me, aren't you? Don't lie. I can smell it."
+        translation = "你早就为Beste湿了老cunt了，对吧？别装了。老faggot都闻得到那股味儿。"
+
+        issues = self.checker.check(source, translation, target_lang="zh")
+
+        latin_errors = [
+            issue for issue in issues
+            if issue.rule_id == "latin_ratio" and issue.severity == "error"
+        ]
+        self.assertTrue(latin_errors, issues)
+        self.assertTrue(
+            {"Beste", "cunt", "faggot"}.issubset(
+                set(latin_errors[0].fragments)),
+            latin_errors,
+        )
+
+    def test_accepts_romanized_proper_noun_in_chinese_dialogue(self):
+        issues = self.checker.check(
+            "Serana is waiting outside.",
+            "瑟拉娜正在外面等着。",
+            target_lang="zh",
+        )
+
+        self.assertFalse(
+            any(issue.rule_id == "latin_ratio" and issue.severity == "error"
+                for issue in issues), issues)
+
+    def test_rejects_untranslated_setting_term_mer_in_chinese_dialogue(self):
+        issues = self.checker.check(
+            "He's just a toy for Mer women. Shall we play together?",
+            "他只是Mer女人的玩物。我们一起玩玩怎么样？",
+            target_lang="zh",
+        )
+
+        latin_errors = [
+            issue for issue in issues
+            if issue.rule_id == "latin_ratio" and issue.severity == "error"
+        ]
+        self.assertTrue(latin_errors, issues)
+        self.assertIn("Mer", latin_errors[0].fragments)
+
+    def test_accepts_localized_mer_concept(self):
+        issues = self.checker.check(
+            "He's just a toy for Mer women. Shall we play together?",
+            "他只是精灵女性的玩物。我们一起玩玩怎么样？",
+            target_lang="zh",
+        )
+
+        self.assertFalse(
+            any(issue.rule_id == "latin_ratio" and issue.severity == "error"
+                for issue in issues), issues)
+
     def test_accepts_translated_sentence_with_preserved_internal_identifier(self):
         source = "< FreeformValdDebt is completed. >"
         translation = "< FreeformValdDebt 已完成。 >"

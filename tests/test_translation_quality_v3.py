@@ -32,12 +32,13 @@ class _FakeConfig:
 
 class _FakeRAG:
     def __init__(self, config, glossary=None, keywords=None, terms=None,
-                 rich_meta=None):
+                 rich_meta=None, search_debug=None):
         self.config = config
         self.glossary = dict(glossary or {})
         self.keywords = list(keywords or [])
         self.terms = dict(terms or {})
         self.rich_meta = dict(rich_meta or {})
+        self.search_debug = list(search_debug or [])
         self.extract_calls = 0
         self.search_calls = []
 
@@ -51,7 +52,7 @@ class _FakeRAG:
     def search_terms(self, keywords, threshold=None, log_callback=None,
                      source_text="", return_debug=True):
         self.search_calls.append(list(keywords))
-        return dict(self.terms), []
+        return dict(self.terms), list(self.search_debug)
 
     def get_rich_meta(self, term):
         return dict(self.rich_meta.get(term, {}))
@@ -438,6 +439,33 @@ class RichMetaTests(unittest.TestCase):
 
         self.assertEqual({"Dragon Born": "龙裔"}, result["matched_terms"])
         self.assertIn("Dragon Born", result["glossary_context"])
+
+    def test_direct_match_survives_full_term_source_filter(self):
+        config = _FakeConfig()
+        rag = _FakeRAG(
+            config,
+            glossary={"Thane of the Pale": "苍原武卫"},
+            keywords=["Thane"],
+            terms={"Thane of the Pale": "苍原武卫"},
+            search_debug=[{
+                "query": "Thane",
+                "direct_match": "Thane of the Pale",
+                "selected_terms": ["Thane of the Pale"],
+            }],
+        )
+        translator = _make_translator(
+            _ScriptedLLM(['{"translation":"我的护甲已经卸下了，我的武卫大人。"}']),
+            rag=rag,
+            config=config,
+        )
+
+        result = translator._run_rag_phase(
+            "My armor is off, my Thane.", use_rag=True)
+
+        self.assertEqual(
+            {"Thane of the Pale": "苍原武卫"},
+            result["matched_terms"],
+        )
 
 
 class LocalKeywordPathTests(unittest.TestCase):

@@ -107,6 +107,9 @@ class QualityChecker:
     )
     _WHITESPACE_RE = re.compile(r"\s+")
     _ALLOW_CONNECTORS = {"of", "the", "and", "de", "la", "du", "da"}
+    # Skyrim lore vocabulary, not proper names: these concepts must be localized
+    # even though capitalization can make them look like names in dialogue.
+    _LOCALIZE_SOURCE_TERMS = frozenset({"mer"})
     _ANY_CJK_RE = re.compile(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]")
     _PARAGRAPH_BREAK_RE = re.compile(r"(?:\r\n|\n|\r)[ \t]*(?:\r\n|\n|\r)")
     _VERSION_TOKEN_RE = re.compile(r"^[vV]?\d+(?:\.\d+)+[A-Za-z0-9]*$")
@@ -336,7 +339,8 @@ class QualityChecker:
         latin_issue = None
         if self._should_check_latin_ratio(target_lang):
             latin_issue = self._check_script_ratio(
-                source_visible, translation_visible, target_lang=target_lang)
+                source_visible, translation_visible, target_lang=target_lang,
+                matched_terms=matched_terms)
 
         # Never let containment short-circuit the latin-ratio check (Q-03).
         for issue in (coverage_issue, zero_cjk_issue, script_issue,
@@ -366,7 +370,8 @@ class QualityChecker:
 
     def _check_script_ratio(self, source_visible: str,
                             translation_visible: str,
-                            target_lang: str = "zh") -> Optional[QualityIssue]:
+                            target_lang: str = "zh",
+                            matched_terms: Optional[dict] = None) -> Optional[QualityIssue]:
         # Q-31: a capitalized common UI/stat word left inside otherwise
         # translated text is a missed translation, not a proper noun.
         residual_ui = self._residual_ui_tokens(source_visible, translation_visible)
@@ -376,6 +381,19 @@ class QualityChecker:
                 f"Common UI/stat tokens left untranslated: {residual_ui}",
                 "latin_ratio",
                 fragments=residual_ui,
+            )
+
+        # A few invented or untranslated English words can be diluted by a
+        # longer CJK sentence, so check individual Latin spans as well as the
+        # aggregate script ratio below.
+        residual_latin = self._residual_latin_spans(
+            source_visible, translation_visible)
+        if residual_latin:
+            return self._make_issue(
+                "error",
+                f"Unaccounted Latin text in CJK translation: {residual_latin}",
+                "latin_ratio",
+                fragments=residual_latin,
             )
 
         expected_re = self._script_char_re(self._target_script(target_lang))
@@ -642,6 +660,31 @@ class QualityChecker:
         targets are protected by ``_check_script_presence`` instead.
         """
         return QualityChecker._target_script(target_lang) in {"cjk", "cyrillic"}
+
+    def _residual_latin_spans(
+            self, source_visible: str,
+            translation_visible: str) -> list[str]:
+        """Find English prose left inside a translation to a non-Latin script."""
+        source_lower = str(source_visible or "").casefold()
+        fragments: list[str] = []
+        for match in self._LATIN_SPAN_RE.finditer(str(translation_visible or "")):
+            span = self._WHITESPACE_RE.sub(" ", match.group(0)).strip()
+            if len(span) < 2:
+                continue
+            if span.casefold() not in source_lower:
+                fragments.append(span)
+                continue
+            if span.casefold() in self._LOCALIZE_SOURCE_TERMS:
+                fragments.append(span)
+                continue
+            if (
+                    self._looks_like_proper_noun_label(span)
+                    or self._text_analyzer.looks_like_internal_identifier(span)
+                    or self._is_acceptable_unchanged_label(span)
+                    or self._looks_brand_like_source_token(span)):
+                continue
+            fragments.append(span)
+        return list(dict.fromkeys(fragments))
 
     def _strip_safe_latin_spans(self, source_visible: str, translation_visible: str) -> str:
         if not translation_visible:

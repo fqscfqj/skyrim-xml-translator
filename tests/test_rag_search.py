@@ -304,6 +304,36 @@ class RAGSearchTokenContainmentDirectMatchTests(unittest.TestCase):
         self.assertEqual(results["Ingun Black-Briar"], "因甘·黑棘")
         self.assertEqual(debug[0]["direct_match"], "Ingun Black-Briar")
 
+    def test_single_token_query_keeps_unique_phrase_without_standalone_term(self):
+        glossary = _DummyGlossaryManager({
+            "Thane of the Pale": "苍原武卫",
+        })
+        searcher = RAGSearcher(
+            cast(Any, _DummyVectorStore(["Thane of the Pale"], [0.99])),
+            cast(Any, glossary),
+            _DummyConfig({
+                ("rag", "keyword_weight_enabled"): False,
+                ("rag", "min_vector_score"): 0.0,
+                ("rag", "short_term_max_results"): 5,
+                ("rag", "long_term_max_results"): 5,
+            }),
+            _DummyLLMClient(),
+        )
+
+        results, debug = cast(
+            tuple[dict[str, str], list[dict[str, Any]]],
+            searcher.search(
+                ["Thane"],
+                source_text="My armor is off, my Thane.",
+                threshold=0.1,
+                top_k=5,
+                return_debug=True,
+            ),
+        )
+
+        self.assertEqual({"Thane of the Pale": "苍原武卫"}, results)
+        self.assertEqual("Thane of the Pale", debug[0]["direct_match"])
+
     def test_single_token_query_does_not_choose_ambiguous_multi_token_glossary_term(self):
         glossary = _DummyGlossaryManager({
             "Ingun Black-Briar": "因甘·黑棘",

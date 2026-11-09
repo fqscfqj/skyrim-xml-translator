@@ -31,7 +31,7 @@ class _ChunkQualityFailure(RuntimeError):
 class Translator:
     _CACHE_POLICY_VERSION = "translation_policy_v3"
     _FORMAT_SHELL_VERSION = "format_shell_v1"
-    _QUALITY_RULES_VERSION = "quality_rules_v6"
+    _QUALITY_RULES_VERSION = "quality_rules_v8"
     _GLOSSARY_IMPORT_FORMAT_VERSION = "glossary_import_v1"
     _DEFAULT_FORMAT_EXTRA_RETRIES = 2
     # Q-02: at most two split layers (original -> halves -> quarters).
@@ -401,12 +401,18 @@ class Translator:
         # Q-55: one canonical matched_terms set for prompt, cache and quality.
         if not isinstance(result["matched_terms"], dict):
             result["matched_terms"] = {}
+        direct_match_terms = self._direct_match_terms_from_search_debug(
+            result["search_debug"]
+        )
         # R-30: expand variants first so an alias that occurs in the source can
         # keep its parent entry (the parent spelling itself may not appear).
         result["matched_terms"] = self._expand_matched_term_aliases(
             text, result["matched_terms"])
         result["matched_terms"] = self._filter_matched_terms_present_in_source(
-            text, result["matched_terms"])
+            text,
+            result["matched_terms"],
+            direct_terms=direct_match_terms,
+        )
 
         # Best-effort cache for visualization (shared across threads)
         self._set_last_rag_debug_info({
@@ -1241,6 +1247,9 @@ class Translator:
 
         rag_result = self._run_rag_phase(source_text, use_rag=use_rag, log_callback=log_callback)
         matched_terms = rag_result["matched_terms"]
+        direct_match_terms = self._direct_match_terms_from_search_debug(
+            rag_result.get("search_debug", [])
+        )
         mcm_ui_mode = bool(self._get_runtime_flag("mcm_ui_mode", False))
 
         debug_info = None
@@ -1270,6 +1279,7 @@ class Translator:
             chunk_terms = self._filter_matched_terms_present_in_source(
                 chunk,
                 matched_terms,
+                direct_terms=direct_match_terms,
             )
             chunk_rich_meta = self._collect_rich_meta(chunk_terms)
             format_shell = self._text_analyzer.build_protected_format_shell(
@@ -1527,6 +1537,7 @@ class Translator:
         quality_matched_terms = self._filter_matched_terms_present_in_source(
             source_text,
             matched_terms,
+            direct_terms=direct_match_terms,
         )
         issues = self._quality_checker.check(
             source_text,
@@ -1935,15 +1946,49 @@ class Translator:
                 part, part_translation, target_lang))
         return "".join(results)
 
-    def _filter_matched_terms_present_in_source(self, source_text: str,
-                                                matched_terms: Optional[dict]) -> dict:
+    @staticmethod
+    def _direct_match_terms_from_search_debug(search_debug) -> dict[str, set[str]]:
+        direct_terms: dict[str, set[str]] = {}
+        if not isinstance(search_debug, list):
+            return direct_terms
+        for query_debug in search_debug:
+            if not isinstance(query_debug, dict):
+                continue
+            direct_match = query_debug.get("direct_match")
+            selected_terms = query_debug.get("selected_terms")
+            if (
+                not isinstance(direct_match, str)
+                or not direct_match.strip()
+                or not isinstance(selected_terms, list)
+                or direct_match not in selected_terms
+            ):
+                continue
+            query = query_debug.get("query")
+            if not isinstance(query, str) or not query.strip():
+                query = direct_match
+            direct_terms.setdefault(direct_match, set()).add(query)
+        return direct_terms
+
+    def _filter_matched_terms_present_in_source(
+            self,
+            source_text: str,
+            matched_terms: Optional[dict],
+            direct_terms: Optional[dict[str, set[str]]] = None,
+    ) -> dict:
         if not matched_terms:
             return {}
+        direct_terms = direct_terms or {}
         return {
             term: translation
             for term, translation in matched_terms.items()
             if isinstance(term, str)
-            and self._prompt_builder._term_appears_in_source(term, source_text)
+            and (
+                any(
+                    self._prompt_builder._term_appears_in_source(query, source_text)
+                    for query in direct_terms.get(term, set())
+                )
+                or self._prompt_builder._term_appears_in_source(term, source_text)
+            )
         }
 
     def _config_bool(self, section: str, key: str, default: bool) -> bool:
