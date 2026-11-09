@@ -60,6 +60,10 @@ from PyQt6.QtGui import (
 from src.config.manager import ConfigManager
 from src.config.schema import RAGConfig
 from src.llm.client import LLMClient
+from src.llm.reasoning import (
+    parameters_for_reasoning_mode,
+    reasoning_mode_from_parameters,
+)
 from src.rag.engine import RAGEngine
 from src.safe_xml import parse_xml_file
 from src.esp_xml_processor import ESPXMLProcessor
@@ -4727,23 +4731,27 @@ class MainWindow(QMainWindow):
         """
 
     @staticmethod
-    def _build_reasoning_protocol_combo():
+    def _build_reasoning_mode_combo(parameters):
         combo = NoWheelComboBox()
         options = (
-            ("option_reasoning_protocol_auto", "Auto detect (recommended)", "auto"),
-            ("option_reasoning_protocol_standard", "OpenAI / Meta / standard", "standard"),
-            ("option_reasoning_protocol_deepseek", "DeepSeek", "deepseek"),
-            ("option_reasoning_protocol_qwen", "DashScope / Qwen", "qwen"),
-            ("option_reasoning_protocol_openrouter", "OpenRouter", "openrouter"),
-            (
-                "option_reasoning_protocol_anthropic_adaptive",
-                "Claude effort / adaptive",
-                "anthropic_adaptive",
-            ),
-            ("option_reasoning_protocol_gemini", "Gemini OpenAI compatibility", "gemini"),
+            ("option_reasoning_mode_auto", "Follow model default", "auto"),
+            ("option_reasoning_mode_off", "Off", "off"),
+            ("option_reasoning_mode_minimal", "Minimal", "minimal"),
+            ("option_reasoning_mode_low", "Low", "low"),
+            ("option_reasoning_mode_medium", "Medium", "medium"),
+            ("option_reasoning_mode_high", "High", "high"),
+            ("option_reasoning_mode_xhigh", "Very high", "xhigh"),
+            ("option_reasoning_mode_max", "Maximum", "max"),
         )
         for key, fallback, value in options:
             combo.addItem(i18n.t(key, fallback), value)
+        mode = reasoning_mode_from_parameters(parameters)
+        index = combo.findData(mode)
+        combo.setCurrentIndex(index if index >= 0 else 0)
+        combo.setToolTip(i18n.t(
+            "tooltip_param_reasoning_mode",
+            "Choose one thinking level. The client maps it to the provider automatically.",
+        ))
         return combo
 
     @staticmethod
@@ -4782,18 +4790,6 @@ class MainWindow(QMainWindow):
             "top_p": i18n.t(
                 "tooltip_param_top_p",
                 "When enabled, send top_p nucleus sampling to the model. Usually leave disabled unless your provider requires it."
-            ),
-            "reasoning_protocol": i18n.t(
-                "tooltip_param_reasoning_protocol",
-                "Select how neutral thinking controls are translated to the provider API. Auto detects from Base URL and model name."
-            ),
-            "enable_thinking": i18n.t(
-                "tooltip_param_enable_thinking",
-                "Override the provider default and explicitly turn model thinking on or off. Models with mandatory reasoning use their lowest supported effort."
-            ),
-            "reasoning_effort": i18n.t(
-                "tooltip_param_reasoning_effort",
-                "Choose a neutral reasoning depth. The client maps it to the selected provider protocol."
             ),
         }
 
@@ -4856,23 +4852,8 @@ class MainWindow(QMainWindow):
         top_p_spin.setValue(1.0)
         add_param_control("top_p", i18n.t("param_top_p"), top_p_spin)
 
-        protocol_combo = self._build_reasoning_protocol_combo()
-        add_param_control(
-            "reasoning_protocol", i18n.t("param_reasoning_protocol"), protocol_combo)
-
-        thinking_combo = NoWheelComboBox()
-        thinking_combo.addItem(i18n.t("option_thinking_on"), True)
-        thinking_combo.addItem(i18n.t("option_thinking_off"), False)
-        add_param_control("enable_thinking", i18n.t("param_enable_thinking"), thinking_combo)
-
-        effort_combo = NoWheelComboBox()
-        effort_combo.addItem(i18n.t("option_effort_minimal"), "minimal")
-        effort_combo.addItem(i18n.t("option_effort_low"), "low")
-        effort_combo.addItem(i18n.t("option_effort_medium"), "medium")
-        effort_combo.addItem(i18n.t("option_effort_high"), "high")
-        effort_combo.addItem(i18n.t("option_effort_xhigh"), "xhigh")
-        effort_combo.addItem(i18n.t("option_effort_max"), "max")
-        add_param_control("reasoning_effort", i18n.t("param_reasoning_effort"), effort_combo)
+        self.llm_reasoning_mode = self._build_reasoning_mode_combo(params)
+        llm_layout.addRow(i18n.t("param_reasoning_mode"), self.llm_reasoning_mode)
 
         form_layout.addWidget(llm_group)
 
@@ -4935,23 +4916,8 @@ class MainWindow(QMainWindow):
         s_top_p_spin.setValue(1.0)
         add_search_param_control("top_p", i18n.t("param_top_p"), s_top_p_spin)
 
-        s_protocol_combo = self._build_reasoning_protocol_combo()
-        add_search_param_control(
-            "reasoning_protocol", i18n.t("param_reasoning_protocol"), s_protocol_combo)
-
-        s_thinking_combo = NoWheelComboBox()
-        s_thinking_combo.addItem(i18n.t("option_thinking_on"), True)
-        s_thinking_combo.addItem(i18n.t("option_thinking_off"), False)
-        add_search_param_control("enable_thinking", i18n.t("param_enable_thinking"), s_thinking_combo)
-
-        s_effort_combo = NoWheelComboBox()
-        s_effort_combo.addItem(i18n.t("option_effort_minimal"), "minimal")
-        s_effort_combo.addItem(i18n.t("option_effort_low"), "low")
-        s_effort_combo.addItem(i18n.t("option_effort_medium"), "medium")
-        s_effort_combo.addItem(i18n.t("option_effort_high"), "high")
-        s_effort_combo.addItem(i18n.t("option_effort_xhigh"), "xhigh")
-        s_effort_combo.addItem(i18n.t("option_effort_max"), "max")
-        add_search_param_control("reasoning_effort", i18n.t("param_reasoning_effort"), s_effort_combo)
+        self.search_reasoning_mode = self._build_reasoning_mode_combo(search_params)
+        search_layout.addRow(i18n.t("param_reasoning_mode"), self.search_reasoning_mode)
 
         form_layout.addWidget(search_group)
 
@@ -5015,23 +4981,12 @@ class MainWindow(QMainWindow):
         sf_top_p_spin.setValue(1.0)
         add_search_fallback_param_control("top_p", i18n.t("param_top_p"), sf_top_p_spin)
 
-        sf_protocol_combo = self._build_reasoning_protocol_combo()
-        add_search_fallback_param_control(
-            "reasoning_protocol", i18n.t("param_reasoning_protocol"), sf_protocol_combo)
-
-        sf_thinking_combo = NoWheelComboBox()
-        sf_thinking_combo.addItem(i18n.t("option_thinking_on"), True)
-        sf_thinking_combo.addItem(i18n.t("option_thinking_off"), False)
-        add_search_fallback_param_control("enable_thinking", i18n.t("param_enable_thinking"), sf_thinking_combo)
-
-        sf_effort_combo = NoWheelComboBox()
-        sf_effort_combo.addItem(i18n.t("option_effort_minimal"), "minimal")
-        sf_effort_combo.addItem(i18n.t("option_effort_low"), "low")
-        sf_effort_combo.addItem(i18n.t("option_effort_medium"), "medium")
-        sf_effort_combo.addItem(i18n.t("option_effort_high"), "high")
-        sf_effort_combo.addItem(i18n.t("option_effort_xhigh"), "xhigh")
-        sf_effort_combo.addItem(i18n.t("option_effort_max"), "max")
-        add_search_fallback_param_control("reasoning_effort", i18n.t("param_reasoning_effort"), sf_effort_combo)
+        self.search_fallback_reasoning_mode = self._build_reasoning_mode_combo(
+            search_fallback_params
+        )
+        search_fallback_layout.addRow(
+            i18n.t("param_reasoning_mode"), self.search_fallback_reasoning_mode
+        )
 
         form_layout.addWidget(search_fallback_group)
         # ---------------------------
@@ -7072,12 +7027,20 @@ class MainWindow(QMainWindow):
         params = self.config_manager.config.setdefault("llm", {}).setdefault("parameters", {})
         for name, (checkbox, widget) in self.model_param_controls.items():
             params[name] = _param_widget_value(widget) if checkbox.isChecked() else None
+        params["reasoning_protocol"] = params.get("reasoning_protocol") or "auto"
+        params.update(parameters_for_reasoning_mode(
+            params, self.llm_reasoning_mode.currentData()
+        ))
         for name in removed_param_keys:
             params.pop(name, None)
             
         search_params = self.config_manager.config.setdefault("llm_search", {}).setdefault("parameters", {})
         for name, (checkbox, widget) in self.search_param_controls.items():
             search_params[name] = _param_widget_value(widget) if checkbox.isChecked() else None
+        search_params["reasoning_protocol"] = search_params.get("reasoning_protocol") or "auto"
+        search_params.update(parameters_for_reasoning_mode(
+            search_params, self.search_reasoning_mode.currentData()
+        ))
         for name in removed_param_keys:
             search_params.pop(name, None)
 
@@ -7086,6 +7049,12 @@ class MainWindow(QMainWindow):
         ).setdefault("parameters", {})
         for name, (checkbox, widget) in self.search_fallback_param_controls.items():
             search_fallback_params[name] = _param_widget_value(widget) if checkbox.isChecked() else None
+        search_fallback_params["reasoning_protocol"] = (
+            search_fallback_params.get("reasoning_protocol") or "auto"
+        )
+        search_fallback_params.update(parameters_for_reasoning_mode(
+            search_fallback_params, self.search_fallback_reasoning_mode.currentData()
+        ))
         for name in removed_param_keys:
             search_fallback_params.pop(name, None)
         

@@ -1,6 +1,56 @@
 import unittest
 
-from src.llm.reasoning import apply_reasoning_controls, detect_reasoning_protocol
+from src.llm.reasoning import (
+    apply_reasoning_controls,
+    detect_reasoning_protocol,
+    parameters_for_reasoning_mode,
+    reasoning_mode_from_parameters,
+)
+
+
+class ReasoningModeCompatibilityTests(unittest.TestCase):
+    def test_modes_round_trip_to_legacy_fields(self):
+        expected = {
+            "auto": (None, None),
+            "off": (False, None),
+            "minimal": (True, "minimal"),
+            "low": (True, "low"),
+            "medium": (True, "medium"),
+            "high": (True, "high"),
+            "xhigh": (True, "xhigh"),
+            "max": (True, "max"),
+        }
+        for mode, (thinking, effort) in expected.items():
+            with self.subTest(mode=mode):
+                params = parameters_for_reasoning_mode(
+                    {"reasoning_protocol": "auto", "temperature": 0.4}, mode
+                )
+                self.assertEqual(params["enable_thinking"], thinking)
+                self.assertEqual(params["reasoning_effort"], effort)
+                self.assertEqual(params["reasoning_protocol"], "auto")
+                self.assertEqual(params["temperature"], 0.4)
+                self.assertEqual(reasoning_mode_from_parameters(params), mode)
+
+    def test_legacy_parameters_collapse_to_one_mode(self):
+        cases = (
+            ({}, "auto"),
+            ({"enable_thinking": False}, "off"),
+            ({"reasoning_effort": "none"}, "off"),
+            ({"reasoning_effort": "high"}, "high"),
+            ({"enable_thinking": True}, "medium"),
+            ({"enable_thinking": None, "reasoning_effort": None}, "auto"),
+        )
+        for params, expected in cases:
+            with self.subTest(params=params):
+                self.assertEqual(reasoning_mode_from_parameters(params), expected)
+
+    def test_unknown_mode_falls_back_to_follow_model(self):
+        params = parameters_for_reasoning_mode(
+            {"reasoning_protocol": "deepseek"}, "unsupported"
+        )
+        self.assertEqual(params["reasoning_protocol"], "deepseek")
+        self.assertIsNone(params["enable_thinking"])
+        self.assertIsNone(params["reasoning_effort"])
 
 
 class ReasoningProtocolDetectionTests(unittest.TestCase):

@@ -96,6 +96,43 @@ def _normalize_effort(value: Any) -> str | None:
     return normalized if normalized in EFFORTS else None
 
 
+REASONING_MODES = ("auto", "off", "minimal", "low", "medium", "high", "xhigh", "max")
+
+
+def reasoning_mode_from_parameters(parameters: dict[str, Any] | None) -> str:
+    """Collapse legacy thinking fields into one user-facing mode."""
+    params = parameters if isinstance(parameters, dict) else {}
+    thinking = _coerce_optional_bool(params.get("enable_thinking"))
+    effort = _normalize_effort(params.get("reasoning_effort"))
+    if thinking is False or effort == "none":
+        return "off"
+    if effort in REASONING_MODES:
+        return effort
+    if thinking is True:
+        return "medium"
+    return "auto"
+
+
+def parameters_for_reasoning_mode(
+    parameters: dict[str, Any] | None, mode: Any
+) -> dict[str, Any]:
+    """Return legacy-compatible fields for a single reasoning mode."""
+    result = dict(parameters) if isinstance(parameters, dict) else {}
+    normalized = str(mode or "auto").strip().lower()
+    if normalized not in REASONING_MODES:
+        normalized = "auto"
+    if normalized == "auto":
+        result["enable_thinking"] = None
+        result["reasoning_effort"] = None
+    elif normalized == "off":
+        result["enable_thinking"] = False
+        result["reasoning_effort"] = None
+    else:
+        result["enable_thinking"] = True
+        result["reasoning_effort"] = normalized
+    return result
+
+
 def _merge_object(target: dict[str, Any], key: str, values: dict[str, Any]) -> None:
     current = target.get(key)
     merged = dict(current) if isinstance(current, dict) else {}
