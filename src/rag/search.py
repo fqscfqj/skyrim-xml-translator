@@ -179,6 +179,29 @@ class RAGSearcher:
                 term = canonical
             if term in merged:
                 continue
+            # A whole-sentence scan is only a recall fallback.  A lowercase
+            # one-word hit inside prose is usually an ordinary word (for
+            # example ``tired`` or ``crying``), even when an imported SST
+            # glossary happens to contain the same spelling.  Keep standalone
+            # labels and title-cased names eligible, while leaving explicit
+            # keyword/direct matches untouched.
+            if self._is_inline_lowercase_singleton_hit(
+                term,
+                hit.get("surface"),
+                source_text,
+            ):
+                continue
+            # Imported dialogue often contains complete lines.  A sentence
+            # row is safe as a glossary reference only when the whole source
+            # is that same line; matching it inside a different sentence can
+            # distort otherwise natural translation.
+            if self._is_sentence_like_term(term):
+                normalized_source = self.glossary_manager.normalize_term_key(
+                    str(source_text or "")
+                )
+                normalized_term = self.glossary_manager.normalize_term_key(term)
+                if not normalized_source or normalized_source != normalized_term:
+                    continue
             if self._is_low_signal_term(term):
                 continue
             translation = self.glossary_manager.glossary.get(term)
@@ -206,6 +229,38 @@ class RAGSearcher:
                     long_used += 1
                 merged[term] = translation
         return merged
+
+    def _is_inline_lowercase_singleton_hit(
+            self,
+            term: str,
+            surface: Optional[str],
+            source_text: Optional[str],
+    ) -> bool:
+        """Return whether a deterministic hit is likely ordinary inline prose.
+
+        The deterministic scanner intentionally ignores semantics, so it can
+        find glossary rows such as ``Tired`` and ``Crying`` in a sentence.  A
+        single lowercase ASCII token embedded in multi-token source is weak
+        evidence for a glossary entity; requiring title case (or an explicit
+        standalone source) prevents those rows from polluting the prompt.
+        """
+        normalized = self.glossary_manager.normalize_term_key(term)
+        if not normalized or " " in normalized:
+            return False
+        if not re.fullmatch(r"[a-z][a-z'\-]*", normalized):
+            return False
+
+        source = str(source_text or "").strip()
+        if not source or self.glossary_manager.normalize_term_key(source) == normalized:
+            return False
+
+        surface_text = str(surface or term).strip()
+        if not surface_text:
+            return False
+        # Title case, all-caps, or an initialism is useful evidence for a
+        # named game entity.  Lowercase inline text is treated as prose.
+        first_alpha = next((char for char in surface_text if char.isalpha()), "")
+        return bool(first_alpha and first_alpha.islower())
 
     # --- Config helpers ---
 

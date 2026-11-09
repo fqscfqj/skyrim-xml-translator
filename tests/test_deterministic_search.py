@@ -111,6 +111,67 @@ class DeterministicSearchIntegrationTests(unittest.TestCase):
         result = searcher.search([], source_text="这件护甲很重。")
         self.assertIn("护甲", result)
 
+    def test_lowercase_singleton_in_prose_is_not_forced_as_glossary_term(self):
+        searcher = RAGSearcher(
+            _DummyVectorStore(),
+            _DummyGlossary({
+                "Tired": "中度疲劳",
+                "Crying": "（哭泣）",
+            }),
+            _DummyConfig({
+                ("rag", "deterministic_scan_enabled"): True,
+                ("rag", "short_term_max_results"): 5,
+                ("rag", "long_term_max_results"): 5,
+            }),
+            _DummyLLM(),
+        )
+
+        result = searcher.search(
+            [],
+            source_text="I'm tired of crying. Make me moan instead.",
+        )
+
+        self.assertEqual({}, result)
+
+    def test_standalone_lowercase_label_remains_recallable(self):
+        searcher = RAGSearcher(
+            _DummyVectorStore(),
+            _DummyGlossary({"Health": "生命值"}),
+            _DummyConfig({
+                ("rag", "deterministic_scan_enabled"): True,
+                ("rag", "short_term_max_results"): 5,
+                ("rag", "long_term_max_results"): 5,
+            }),
+            _DummyLLM(),
+        )
+
+        result = searcher.search([], source_text="health")
+
+        self.assertEqual({"Health": "生命值"}, result)
+
+    def test_sentence_glossary_hit_is_only_kept_for_exact_source(self):
+        searcher = RAGSearcher(
+            _DummyVectorStore(),
+            _DummyGlossary({
+                "So, it is real after all.": "原来这一切是真的。",
+            }),
+            _DummyConfig({
+                ("rag", "deterministic_scan_enabled"): True,
+                ("rag", "short_term_max_results"): 5,
+                ("rag", "long_term_max_results"): 5,
+            }),
+            _DummyLLM(),
+        )
+
+        embedded = searcher.search(
+            [],
+            source_text="She said, so, it is real after all. Then she left.",
+        )
+        exact = searcher.search([], source_text="So, it is real after all.")
+
+        self.assertEqual({}, embedded)
+        self.assertEqual({"So, it is real after all.": "原来这一切是真的。"}, exact)
+
     def test_disabled_by_config(self):
         searcher = self._searcher({("rag", "deterministic_scan_enabled"): False})
         result = searcher.search([], source_text="The Whiterun Guard patrols.")
