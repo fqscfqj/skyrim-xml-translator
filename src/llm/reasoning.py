@@ -179,7 +179,13 @@ def _deepseek_effort(effort: str | None) -> str | None:
 
 
 def _standard_effort(effort: str | None, base_url: str, model: str) -> str | None:
-    """Normalize the only neutral level missing from standard/Meta ladders."""
+    """Map the neutral scale to levels supported by standard providers."""
+    if effort == "none":
+        return "off"
+    if effort == "minimal":
+        # OpenAI-compatible providers commonly expose low as their minimum
+        # level even when the UI offers a distinct neutral "minimal" choice.
+        return "low"
     if effort != "max":
         return effort
     provider_hint = f"{base_url} {model}".lower()

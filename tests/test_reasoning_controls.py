@@ -93,7 +93,7 @@ class ReasoningControlMappingTests(unittest.TestCase):
         )
 
         self.assertTrue(applied.applied)
-        self.assertEqual(params["reasoning_effort"], "none")
+        self.assertEqual(params["reasoning_effort"], "off")
         self.assertEqual(extra, {})
 
         enabled_params = {
@@ -104,6 +104,30 @@ class ReasoningControlMappingTests(unittest.TestCase):
             enabled_params, {}, base_url="https://api.meta.ai/v1", model="muse-spark-1.2"
         )
         self.assertEqual(enabled_params["reasoning_effort"], "medium")
+
+    def test_standard_protocol_maps_minimal_to_low(self):
+        params = {
+            "reasoning_protocol": "standard",
+            "reasoning_effort": "minimal",
+        }
+
+        apply_reasoning_controls(
+            params, {}, base_url="https://proxy.example/v1", model="generic-model"
+        )
+
+        self.assertEqual(params["reasoning_effort"], "low")
+
+    def test_standard_protocol_maps_off_to_provider_value(self):
+        params = {
+            "reasoning_protocol": "standard",
+            "enable_thinking": False,
+        }
+
+        apply_reasoning_controls(
+            params, {}, base_url="https://proxy.example/v1", model="generic-model"
+        )
+
+        self.assertEqual(params["reasoning_effort"], "off")
 
     def test_standard_max_maps_to_each_provider_effective_maximum(self):
         cases = (

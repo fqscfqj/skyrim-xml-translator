@@ -385,6 +385,27 @@ class LLMClientParameterOverrideTests(unittest.TestCase):
         self.assertEqual(call["extra_body"], {"thinking": {"type": "enabled"}})
         self.assertEqual(call["reasoning_effort"], "high")
 
+    def test_standard_minimal_effort_is_normalized_before_request(self):
+        config = _DummyConfig({
+            ("llm", "base_url"): "https://newapi.example/v1",
+            ("llm", "model"): "z-ai/glm-5.3-flash",
+            ("llm", "max_retries"): 0,
+            ("llm", "parameters"): {
+                "reasoning_protocol": "standard",
+                "enable_thinking": True,
+                "reasoning_effort": "minimal",
+            },
+        })
+        client = LLMClient(config)
+        fake_client = _FakeClient()
+        _install_fake_client(client, fake_client)
+
+        client.chat_completion([{"role": "user", "content": "Translate."}])
+
+        call = fake_client.chat.completions.calls[0]
+        self.assertEqual(call["reasoning_effort"], "low")
+        self.assertNotEqual(call["reasoning_effort"], "minimal")
+
     def test_unset_meta_reasoning_controls_send_no_reasoning_parameters(self):
         config = _DummyConfig({
             ("llm", "base_url"): "https://api.meta.ai/v1",
