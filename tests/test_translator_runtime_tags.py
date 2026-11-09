@@ -1,5 +1,6 @@
 import unittest
 import tempfile
+import os
 from typing import Any, cast
 
 from src.llm.client import LLMClient
@@ -241,7 +242,7 @@ class TranslatorRuntimeTagTests(unittest.TestCase):
 
         self.assertEqual(captured_terms[-1], {"Alduin": "奥杜因"})
 
-    def test_save_translation_cache_persists_cached_results(self):
+    def test_translation_cache_is_memory_only(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             config = _DummyConfig({
                 ("cache", "cache_persist_dir"): temp_dir,
@@ -254,15 +255,16 @@ class TranslatorRuntimeTagTests(unittest.TestCase):
             translator.save_translation_cache()
 
             self.assertEqual("你好，朋友", result)
+            self.assertFalse(os.path.exists(os.path.join(temp_dir, "translations.json")))
 
-            cached_llm = _DummyLLMClient('{"translation":"不应调用"}')
-            reloaded = _make_translator(cached_llm, _DummyRAGEngine(config))
+            reloaded_llm = _DummyLLMClient('{"translation":"再次翻译"}')
+            reloaded = _make_translator(reloaded_llm, _DummyRAGEngine(config))
 
             self.assertEqual(
-                "你好，朋友",
+                "再次翻译",
                 reloaded.translate_text("Hello friend", use_rag=False, max_retries=0),
             )
-            self.assertEqual(0, cached_llm.calls)
+            self.assertEqual(1, reloaded_llm.calls)
 
     def test_model_refusal_uses_specialized_retry_then_succeeds(self):
         llm = _SequenceLLMClient([

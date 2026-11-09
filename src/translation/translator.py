@@ -88,26 +88,9 @@ class Translator:
             latin_ratio_threshold=float(rag_engine.config.get(
                 "rag", "latin_ratio_threshold", 2.0)))
 
-        # Translation cache; persist path resolved against config dir.
-        # Keys carry readable "tc_v2:<style>:" prefix so style/version
-        # rotation can evict by prefix (see TranslationCache).
+        # Translation cache is intentionally process-local. It is reset when the
+        # application exits; cache_persist_dir is reserved for other caches.
         cache_size = rag_engine.config.get("cache", "translation_cache_size", 50000)
-        cache_dir = rag_engine.config.get("cache", "cache_persist_dir", "cache")
-        try:
-            resolver = getattr(rag_engine.config, "resolve_path", None)
-            if callable(resolver):
-                base_dir = resolver(cache_dir, "cache") if cache_dir else ""
-            else:
-                import os as _os
-                raw = _os.path.expandvars(_os.path.expanduser(str(cache_dir))) if cache_dir else ""
-                if raw and not _os.path.isabs(raw):
-                    cfg_path = getattr(rag_engine.config, "config_path", "") or ""
-                    base = _os.path.dirname(_os.path.abspath(cfg_path)) or "."
-                    raw = _os.path.join(base, raw)
-                base_dir = _os.path.abspath(raw) if raw else ""
-            persist_path = f"{base_dir}/translations.json" if base_dir else None
-        except Exception:
-            persist_path = f"{cache_dir}/translations.json" if cache_dir else None
         try:
             cache_ttl_hours = float(rag_engine.config.get("cache", "cache_ttl_hours", 0) or 0)
         except Exception:
@@ -116,7 +99,7 @@ class Translator:
             raise ValueError(f"cache_ttl_hours must be >= 0, got {cache_ttl_hours!r}")
         ttl_seconds = cache_ttl_hours * 3600.0 if cache_ttl_hours > 0 else 0.0
         self._translation_cache = TranslationCache(
-            max_size=cache_size, persist_path=persist_path, ttl_seconds=ttl_seconds)
+            max_size=cache_size, persist_path=None, ttl_seconds=ttl_seconds)
         try:
             self._translation_cache.invalidate_version()
         except Exception:
