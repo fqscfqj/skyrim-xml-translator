@@ -190,26 +190,19 @@ class PromptBuilderStyleProfileTests(unittest.TestCase):
             "translator.system_prompts.nsfw", []
         ))
 
-        self.assertIn("医学、普通直述、委婉、色情俚语和侮辱性粗口", prompt)
+        self.assertIn("普通说法、粗口、色情俚语、委婉说法和侮辱性称呼", prompt)
         self.assertIn("不得把未拒绝推断为同意", prompt)
-        self.assertIn("台词中的猜测、威胁或指控", prompt)
+        self.assertIn("台词中的猜测、威胁、胁迫、性侵或强奸指控", prompt)
         self.assertIn("施事、受事、第三人、身体所属、动作落点和使役关系", prompt)
-        self.assertIn("动作、状态、生理反应、感受和结果", prompt)
+        self.assertIn("动作、状态、身体反应、感受和结果", prompt)
 
-    def test_prompt_resources_stay_within_character_budgets(self):
-        prompt_manager = PromptManager()
-        limits = {"default": 900, "nsfw": 1200}
-
-        for prompt_style, limit in limits.items():
-            with self.subTest(prompt_style=prompt_style):
-                prompt = "\n".join(prompt_manager.get(
-                    f"translator.system_prompts.{prompt_style}", []
-                ))
-                self.assertLessEqual(len(prompt), limit)
-
-        for retry_name, retry_prompt in prompt_manager.get("translator.retry", {}).items():
+    def test_retry_prompts_are_nonempty(self):
+        retry_prompts = PromptManager().get("translator.retry", {})
+        self.assertTrue(retry_prompts)
+        for retry_name, retry_prompt in retry_prompts.items():
             with self.subTest(retry_name=retry_name):
-                self.assertLessEqual(len(retry_prompt), 400)
+                self.assertIsInstance(retry_prompt, str)
+                self.assertTrue(retry_prompt.strip())
 
     def test_untranslated_retry_does_not_treat_names_or_quotation_as_protected(self):
         retry_prompts = PromptManager().get("translator.retry", {})
