@@ -246,7 +246,7 @@ class PromptContextTests(unittest.TestCase):
         ):
             with self.subTest(token=token):
                 self.assertIn(token, prompt)
-        self.assertNotIn("中文表达", prompt)
+        self.assertIn("中文表达", prompt)
 
 
 class PreviousSourceWiringTests(unittest.TestCase):

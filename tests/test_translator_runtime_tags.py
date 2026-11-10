@@ -97,6 +97,29 @@ class TranslatorRuntimeTagTests(unittest.TestCase):
             llm.messages_seen[0][0]["content"],
         )
 
+    def test_mixed_content_modes_use_separate_system_prompts(self):
+        llm = _SequenceLLMClient([
+            '{"translations":[{"id":0,"translation":"甲"},{"id":1,"translation":"丙"}]}',
+            '{"translation":"乙"}',
+        ])
+        translator = _make_translator(llm)
+
+        results = translator.translate_batch_texts(
+            ["Alpha line", "Adult line", "Gamma line"],
+            use_rag=False,
+            max_retries=0,
+            context_hints=[
+                {"content_mode": "default"},
+                {"content_mode": "nsfw"},
+                {"content_mode": "default"},
+            ],
+        )
+
+        self.assertEqual(["甲", "乙", "丙"], results)
+        self.assertEqual(2, llm.calls)
+        self.assertNotIn("成人题材", llm.messages_seen[0][0]["content"])
+        self.assertIn("成人题材", llm.messages_seen[1][0]["content"])
+
     def test_batch_circuit_bypasses_later_batch_after_high_fallback_rate(self):
         config = _DummyConfig({
             ("general", "short_text_batch_circuit_min_items"): 2,

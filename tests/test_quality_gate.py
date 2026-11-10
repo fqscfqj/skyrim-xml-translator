@@ -360,14 +360,14 @@ class CjkChunkBoundaryTests(unittest.TestCase):
 
 
 class PromptTextTests(unittest.TestCase):
-    def test_system_prompts_use_target_language_placeholder(self):
+    def test_system_prompts_are_chinese_specific(self):
         prompts = PromptManager()
         for style in ("default", "nsfw"):
             with self.subTest(style=style):
                 text = "\n".join(prompts.get(
                     f"translator.system_prompts.{style}", []))
-                self.assertIn("{target_language}表达", text)
-                self.assertNotIn("中文表达", text)
+                self.assertIn("中文", text)
+                self.assertNotIn("{target_language}", text)
 
     def test_glossary_instruction_is_single_strict_rule(self):
         prompts = PromptManager()
@@ -393,7 +393,7 @@ class PromptTextTests(unittest.TestCase):
         rules = PromptManager().get("translator.style_profiles", {})
         joined = str(rules)
         self.assertNotIn("奇幻中文", joined)
-        self.assertIn("{target_language}", joined)
+        self.assertIn("中文", joined)
 
 
 class _FakeConfig:
