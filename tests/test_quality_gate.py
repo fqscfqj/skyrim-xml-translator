@@ -369,6 +369,25 @@ class PromptTextTests(unittest.TestCase):
                 self.assertIn("中文", text)
                 self.assertNotIn("{target_language}", text)
 
+    def test_system_prompts_forbid_unfounded_dialogue_wrappers(self):
+        builder = PromptBuilder(PromptManager(), _DummyConfig())
+        for style in ("default", "nsfw"):
+            with self.subTest(style=style):
+                system, _user = builder.build("Wait here.", {}, prompt_style=style)
+                self.assertIn("不因文本是对白就新增引号", system)
+                self.assertIn("外层引号、括号", system)
+                self.assertIn("原有引号", system)
+
+    def test_fallback_prompt_forbids_added_wrappers(self):
+        prompts = PromptManager()
+        prompts.prompts = {}
+        builder = PromptBuilder(prompts, _DummyConfig())
+
+        system, _user = builder.build("Wait here.", {})
+
+        self.assertIn("不因文本是对白就新增引号", system)
+        self.assertIn("外层引号、括号", system)
+
     def test_glossary_instruction_is_single_strict_rule(self):
         prompts = PromptManager()
         instruction = prompts.get("translator.glossary_instruction_append", "")

@@ -382,6 +382,94 @@ class QualityCheckerPairedWrapperTests(unittest.TestCase):
 
         self.assert_has_wrapper_error(source, translation, "paired_wrapper_missing")
 
+    def test_rejects_added_outer_wrappers(self):
+        source = "You think this is funny? Well, I don't. Now call me by my real name, Gisli!"
+        text = "你觉得这很好笑？我可不觉得。现在叫我的真名，吉斯莉！"
+        for opening, closing in (
+            ('"', '"'), ("'", "'"), ("“", "”"), ("‘", "’"),
+            ("「", "」"), ("『", "』"), ("(", ")"), ("（", "）"),
+            ("【", "】"),
+        ):
+            with self.subTest(wrapper=opening + closing):
+                self.assert_has_wrapper_error(
+                    source, opening + text + closing, "paired_wrapper_added")
+
+    def test_rejects_added_wrapper_inside_preserved_wrapper(self):
+        self.assert_has_wrapper_error(
+            '"Wait here."', '“（在这里等着。）”', "paired_wrapper_added")
+
+    def test_rejects_added_wrapper_outside_preserved_wrapper(self):
+        self.assert_has_wrapper_error(
+            "(Wait here.)", "“（在这里等着。）”", "paired_wrapper_mismatch")
+
+    def test_added_wrapper_issues_are_retryable_format_errors(self):
+        issues = self.checker.check("Wait here.", "“在这里等着。”")
+        wrapper_issues = [i for i in issues if i.rule_id == "paired_wrapper_added"]
+        self.assertEqual(1, len(wrapper_issues), issues)
+        self.assertEqual("format", wrapper_issues[0].issue_type.value)
+        self.assertTrue(self.checker.should_retry(issues))
+        self.assertIn(
+            "[paired_wrapper_added]",
+            self.checker.get_retry_context(issues)["details"][0],
+        )
+
+    def test_accepts_source_quotes_containing_apostrophes(self):
+        for source in ("'I'm ready.'", "‘I’m ready.’", '"I\'m ready."'):
+            with self.subTest(source=source):
+                self.assert_no_wrapper_error(source, "“我准备好了。”")
+
+    def test_contractions_are_not_quote_wrappers(self):
+        self.assert_no_wrapper_error("I'm ready, don't worry.", "我准备好了，别担心。")
+        self.assert_has_wrapper_error(
+            "I'm ready, don't worry.", "“我准备好了，别担心。”", "paired_wrapper_added")
+
+    def test_internal_quotes_are_not_outer_wrappers(self):
+        self.assert_no_wrapper_error(
+            'Call me "Gisli", please.', '请叫我“吉斯莉”。')
+        self.assert_no_wrapper_error(
+            '"Gisli" is my name.', '“吉斯莉”是我的名字。')
+        self.assert_has_wrapper_error(
+            'Call me "Gisli", please.', '“请叫我‘吉斯莉’。”', "paired_wrapper_added")
+
+    def test_markup_attribute_quotes_are_not_source_wrappers(self):
+        self.assert_has_wrapper_error(
+            '<font face="$HandwrittenFont">Wait here.</font>',
+            '<font face="$HandwrittenFont">“在这里等着。”</font>',
+            "paired_wrapper_added",
+        )
+        self.assert_no_wrapper_error(
+            '<font face="$HandwrittenFont">"Wait here."</font>',
+            '<font face="$HandwrittenFont">“在这里等着。”</font>',
+        )
+
+    def test_separate_quote_segments_are_not_added_outer_wrappers(self):
+        for source, translation in (
+            ('"A", "B"', '"甲"和"乙"'),
+            ("'A', 'B'", "'甲'和'乙'"),
+            ("A and B", '"甲"和"乙"'),
+            ("A and B", "'甲'和'乙'"),
+            ("A and B", "“甲”和“乙”"),
+        ):
+            with self.subTest(source=source, translation=translation):
+                self.assert_no_wrapper_error(source, translation)
+
+    def test_ambiguous_source_possessives_do_not_cause_added_wrapper_errors(self):
+        for source in (
+            "'The guards' weapons are sharp.'",
+            "‘The guards’ weapons are sharp.’",
+        ):
+            with self.subTest(source=source):
+                self.assert_no_wrapper_error(source, "‘卫兵们的武器很锋利。’")
+
+    def test_nested_ascii_quotes_are_not_mistaken_for_an_unquoted_source(self):
+        self.assert_no_wrapper_error(
+            '\'She said "go" and "wait".\'', '“她说了‘走’和‘等着’。”')
+
+    def test_accepts_normal_punctuation_localization(self):
+        self.assert_no_wrapper_error(
+            "Really? Well... wait!", "真的？嗯……等等！")
+        self.assert_no_wrapper_error("Wait, please.", "请等等。")
+
     def test_unwrapped_source_does_not_trigger_false_positive(self):
         source = "Take her virginity"
         translation = "夺走她的初夜"

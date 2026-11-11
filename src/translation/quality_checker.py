@@ -124,10 +124,13 @@ class QualityChecker:
         "papyrus", "pex", "racemenu", "skse", "skse64", "skyui", "sseedit",
         "ui", "url", "vk", "xedit", "xp",
     }
+    _QUOTE_WRAPPER_PAIRS = (
+        ('"', '"'), ("'", "'"), ("“", "”"), ("‘", "’"), ("「", "」"), ("『", "』"),
+    )
     _OUTER_WRAPPER_GROUPS = (
         ("paren", (("(", ")"), ("（", "）"))),
         ("square", (("[", "]"), ("【", "】"))),
-        ("quote", (("\"", "\""), ("'", "'"), ("“", "”"), ("‘", "’"), ("「", "」"), ("『", "』"))),
+        ("quote", _QUOTE_WRAPPER_PAIRS),
     )
     _WRAPPER_GROUP_LABELS = {
         "paren": "parentheses",
@@ -1125,23 +1128,37 @@ class QualityChecker:
             self,
             source: str,
             translation: str) -> Optional[QualityIssue]:
-        """Ensure outer paired wrappers like () and quotes are not dropped.
+        """Preserve outer wrapper structure without requiring identical glyphs.
 
-        The goal is structural preservation, not exact punctuation identity:
-        ASCII parentheses may become full-width Chinese parentheses, and English
-        quotes may become Chinese quote marks, but the outer wrapper sequence
-        must still exist when the source text is wrapped.
+        ASCII parentheses and quotes may be localized, but whole-text wrappers
+        must not be added, dropped, or changed in scope.
         """
         source_wrappers = self._extract_outer_wrapper_groups(source)
-        if not source_wrappers:
-            return None
-
         translation_wrappers = self._extract_outer_wrapper_groups(translation)
         if source_wrappers == translation_wrappers:
+            return None
+        if not source_wrappers and (
+                self._has_ambiguous_quote_boundary(source)
+                or self._has_ambiguous_quote_boundary(translation)):
+            # Multiple quoted spans and possessive apostrophes can look like
+            # a whole-text quote. Do not reject additions on ambiguous evidence.
             return None
 
         expected = self._describe_wrapper_groups(source_wrappers)
         actual = self._describe_wrapper_groups(translation_wrappers)
+        if (
+                len(translation_wrappers) > len(source_wrappers)
+                and translation_wrappers[:len(source_wrappers)] == source_wrappers):
+            return QualityIssue(
+                issue_type=QualityIssueType.FORMAT_VIOLATION,
+                severity="error",
+                details=(
+                    f"Added outer paired wrapper(s) not present in source: "
+                    f"expected {expected}, got {actual}"
+                ),
+                rule_id="paired_wrapper_added",
+            )
+
         is_missing = (
             not translation_wrappers
             or (
@@ -1188,6 +1205,22 @@ class QualityChecker:
             return ""
         return self._text_analyzer.strip_markup_and_placeholders(text).strip()
 
+    def _has_ambiguous_quote_boundary(self, text: str) -> bool:
+        visible = self._wrapper_visible_text(text)
+        if len(visible) < 2:
+            return False
+        for opening, closing in self._QUOTE_WRAPPER_PAIRS:
+            if not visible.startswith(opening) or not visible.endswith(closing):
+                continue
+            if opening == closing:
+                delimiter_count = sum(
+                    ch == opening and not self._is_word_apostrophe(visible, idx)
+                    for idx, ch in enumerate(visible)
+                )
+                return delimiter_count != 2
+            return not self._has_outer_wrapper(visible, opening, closing)
+        return False
+
     def _detect_outer_wrapper(self, text: str) -> Optional[tuple[str, str, str]]:
         if not text or len(text) < 2:
             return None
@@ -1213,6 +1246,8 @@ class QualityChecker:
         depth = 0
         last_index = len(text) - len(close_ch)
         for idx, ch in enumerate(text):
+            if cls._is_word_apostrophe(text, idx):
+                continue
             if ch == open_ch:
                 depth += 1
             elif ch == close_ch:
@@ -1229,7 +1264,10 @@ class QualityChecker:
         if not text or not wrapper_ch or len(wrapper_ch) != 1:
             return False
 
-        quote_positions = [idx for idx, ch in enumerate(text) if ch == wrapper_ch]
+        quote_positions = [
+            idx for idx, ch in enumerate(text)
+            if ch == wrapper_ch and not cls._is_word_apostrophe(text, idx)
+        ]
         if len(quote_positions) == 2:
             return False
         if len(quote_positions) < 4 or len(quote_positions) % 2 == 1:
@@ -1243,6 +1281,16 @@ class QualityChecker:
                 return True
 
         return False
+
+    @classmethod
+    def _is_word_apostrophe(cls, text: str, index: int) -> bool:
+        # Word-internal Latin apostrophes are not quotation delimiters.
+        return bool(
+            text[index] in {"'", "’"}
+            and 0 < index < len(text) - 1
+            and cls._LATIN_SCRIPT_RE.fullmatch(text[index - 1])
+            and cls._LATIN_SCRIPT_RE.fullmatch(text[index + 1])
+        )
 
     def _describe_wrapper_groups(self, groups: list[str]) -> str:
         if not groups:

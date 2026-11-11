@@ -304,6 +304,78 @@ class TranslatorRuntimeTagTests(unittest.TestCase):
         self.assertEqual(llm.calls, 2)
         self.assertIn("没有执行翻译任务", llm.messages_seen[1][-1]["content"])
 
+    def test_added_dialogue_quotes_trigger_format_retry_with_debug_evidence(self):
+        source = "You think this is funny? Well, I don't. Now call me by my real name, Gisli!"
+        translation = "你觉得这很好笑？我可不觉得。现在叫我的真名，吉斯莉！"
+        llm = _SequenceLLMClient([
+            '{"translation":"“' + translation + '”"}',
+            '{"translation":"' + translation + '"}',
+        ])
+        translator = _make_translator(llm)
+
+        result, debug = translator.translate_text(
+            source, use_rag=False, max_retries=1, return_debug_info=True)
+
+        self.assertEqual(translation, result)
+        self.assertEqual(2, llm.calls)
+        attempts = debug["translation_attempts"]
+        self.assertFalse(attempts[0]["accepted"])
+        self.assertEqual("failed", attempts[0]["result_status"])
+        self.assertIn("Added outer paired wrapper", attempts[0]["result_details"])
+        self.assertTrue(attempts[1]["accepted"])
+        retry_prompt = llm.messages_seen[1][-1]["content"]
+        self.assertIn("paired_wrapper_added", retry_prompt)
+        self.assertIn("不得新增", retry_prompt)
+        self.assertIn("外层引号", retry_prompt)
+
+    def test_persistent_added_quotes_fail_instead_of_being_accepted_or_cached(self):
+        source = "Wait here."
+        llm = _DummyLLMClient('{"translation":"“在这里等着。”"}')
+        translator = _make_translator(llm)
+        translator._format_extra_retries = 0
+
+        with self.assertRaisesRegex(RuntimeError, "quality check.*format"):
+            translator.translate_text(source, use_rag=False, max_retries=1)
+
+        self.assertEqual(2, llm.calls)
+        self.assertEqual(0, translator._translation_cache.size())
+
+    def test_added_quotes_in_batch_fall_back_only_for_affected_item(self):
+        llm = _SequenceLLMClient([
+            '{"translations":[{"id":0,"translation":"“在这里等着。”"},'
+            '{"id":1,"translation":"跟我来。"}]}',
+            '{"translation":"在这里等着。"}',
+        ])
+        translator = _make_translator(llm)
+
+        result = translator.translate_batch_texts(
+            ["Wait here.", "Follow me."], use_rag=False, max_retries=0)
+
+        self.assertEqual(["在这里等着。", "跟我来。"], result)
+        self.assertEqual(2, llm.calls)
+        self.assertIn("Wait here.", llm.messages_seen[1][1]["content"])
+        self.assertNotIn("Follow me.", llm.messages_seen[1][1]["content"])
+
+    def test_cache_hit_with_added_quotes_is_retranslated(self):
+        source = "Wait here."
+        llm = _DummyLLMClient('{"translation":"在这里等着。"}')
+        translator = _make_translator(llm)
+        resolved_context = translator._with_resolved_whitespace_policy(source)
+        context_key = translator._translation_context_key(
+            source, context_hint=resolved_context, use_rag=False)
+        translator._translation_cache.put(
+            source, "default", "zh", "“在这里等着。”", context_key=context_key)
+        self.assertEqual(
+            "“在这里等着。”",
+            translator._translation_cache.get(
+                source, "default", "zh", context_key=context_key),
+        )
+
+        result = translator.translate_text(source, use_rag=False, max_retries=0)
+
+        self.assertEqual("在这里等着。", result)
+        self.assertEqual(1, llm.calls)
+
     def test_cache_policy_changes_for_model_but_not_api_key(self):
         config = _DummyConfig({
             ("llm", "base_url"): "http://llm.local/v1",
