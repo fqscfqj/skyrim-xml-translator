@@ -9,6 +9,7 @@ import numpy as np
 from src.logging_helper import emit as log_emit
 from .deterministic_scan import DeterministicGlossaryScanner
 from .glossary_manager import GlossaryManager
+from .glossary_policy import glossary_translation_issue
 from .vector_store import VectorStore
 from src.cache.embedding_cache import EmbeddingCache
 
@@ -101,6 +102,12 @@ class RAGSearcher:
 
     # --- Deterministic glossary scan (audit 3.6 item 1) ---
 
+    def _translation_issue(self, term: str) -> str:
+        return glossary_translation_issue(
+            term, self.glossary_manager.glossary.get(term),
+            self.config.get("general", "target_language", "zh"),
+        )
+
     def _deterministic_scan_enabled(self) -> bool:
         try:
             value = self.config.get("rag", "deterministic_scan_enabled", True)
@@ -125,9 +132,15 @@ class RAGSearcher:
                 fingerprint = ""
         if not fingerprint:
             fingerprint = f"{len(glossary)}:{id(glossary)}"
+        target_language = str(self.config.get("general", "target_language", "zh"))
+        fingerprint = f"{fingerprint}:{target_language}"
         if fingerprint == self._scanner_fingerprint:
             return
-        scanner.ensure_built(glossary.keys(), fingerprint)
+        # Filter before longest-match scanning so an untranslated outer phrase
+        # cannot hide a translated entity inside it.
+        scanner.ensure_built(
+            (term for term in glossary if not self._translation_issue(term)), fingerprint,
+        )
         self._scanner_fingerprint = fingerprint
 
     def _merge_deterministic_hits(
@@ -952,6 +965,8 @@ class RAGSearcher:
                 for text in (term, translation)
             ):
                 continue
+            if self._translation_issue(term):
+                continue
             if self._raw_term_appears_in_source(term, source_text):
                 continue
             term_norm = self.glossary_manager.normalize_term_key(term)
@@ -1399,6 +1414,14 @@ class RAGSearcher:
                             canonical_term=canonical_term, source=candidate_source,
                         )
                     return
+                translation_issue = self._translation_issue(canonical_term)
+                if translation_issue:
+                    if return_debug:
+                        record_candidate_decision(
+                            term, raw_score, "rejected", translation_issue,
+                            canonical_term=canonical_term, source=candidate_source,
+                        )
+                    return
                 if self._is_low_signal_term(canonical_term):
                     if return_debug:
                         record_candidate_decision(
@@ -1721,7 +1744,11 @@ class RAGSearcher:
                 direct_match = query_details.get("direct_match")
                 query_norm = self.glossary_manager.normalize_term_key(query)
                 direct_norm = self.glossary_manager.normalize_term_key(direct_match or "")
-                if not direct_match or direct_norm == query_norm:
+                if (
+                    not direct_match
+                    or direct_match not in selected_set_for_query
+                    or direct_norm == query_norm
+                ):
                     references = self._collect_partial_references(
                         query, source_text, min(2, total_limit),
                         candidate_scores=reference_raw_scores.get(query),

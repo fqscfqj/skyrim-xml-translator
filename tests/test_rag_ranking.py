@@ -196,7 +196,7 @@ class FusionScoreTests(unittest.TestCase):
 
     def test_flat_weak_band_cannot_be_lifted_over_threshold_by_minmax(self):
         terms = ["Red Eagle", "Red Water", "Red Claw"]
-        glossary = _DummyGlossaryManager({term: term for term in terms})
+        glossary = _DummyGlossaryManager({"Red Eagle": "红鹰", "Red Water": "红水", "Red Claw": "红爪"})
         store = _DummyVectorStore(terms, [0.50, 0.51, 0.52])
         searcher = RAGSearcher(
             cast(Any, store), cast(Any, glossary),
@@ -213,7 +213,7 @@ class FusionScoreTests(unittest.TestCase):
 
     def test_wide_band_minmax_still_filters_lower_ranked_candidates(self):
         terms = ["Red Eagle", "Red Water", "Red Claw"]
-        glossary = _DummyGlossaryManager({term: term for term in terms})
+        glossary = _DummyGlossaryManager({"Red Eagle": "红鹰", "Red Water": "红水", "Red Claw": "红爪"})
         store = _DummyVectorStore(terms, [0.95, 0.75, 0.55])
         searcher = RAGSearcher(
             cast(Any, store), cast(Any, glossary),

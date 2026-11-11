@@ -5,6 +5,7 @@ from typing import Any, Optional
 
 from src.logging_helper import emit as log_emit
 from src.rag.glossary_manager import GlossaryManager
+from src.rag.glossary_policy import glossary_translation_issue
 from src.translation.style_profiles import ResolvedStyleProfile, StyleProfileResolver
 from src.translation.text_analyzer import TextAnalyzer
 
@@ -565,7 +566,10 @@ class PromptBuilder:
             if isinstance(term, str) and term.strip() and len(term) <= 240
             and term not in matched_terms
         )
+        target_language = self.config.get("general", "target_language", "zh")
         for term, translation in items:
+            if glossary_translation_issue(term, translation, target_language):
+                continue
             v_str = "" if translation is None else str(translation)
             raw_display_term = self._strip_term_edge_punct(term) or term
             # Reference-index rows are already bounded complete bilingual

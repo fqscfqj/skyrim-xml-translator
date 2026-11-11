@@ -5,6 +5,7 @@ from typing import Any, cast
 import numpy as np
 
 from src.rag.glossary_manager import GlossaryManager
+from src.rag.glossary_policy import glossary_translation_issue
 from src.rag.search import RAGSearcher
 from src.translation.prompt_builder import PromptBuilder
 
@@ -191,6 +192,119 @@ class RAGSearchReferenceExamplesTests(unittest.TestCase):
             "I serve the Archivist.", matches, reference_terms={example: entries[example]})
         self.assertIn("destroy it", context)
         self.assertIn("典藏官立誓", context)
+
+
+    def test_untranslated_identity_is_rejected_but_bilingual_references_survive(self):
+        entries = {
+            "Olfina": "奥菲娜",
+            "Greybeards": "Greybeards",
+            "Whiterun Olfina Jon Scene 3": "Whiterun Olfina Jon Scene 3",
+            "Whiterun Olfina Jon Scene 2": "Whiterun Olfina Jon Scene 2",
+            "Speak to the Greybeards": "与灰胡子交谈",
+            "Get Greybeards' help in negotiating a truce": "在休战谈判中取得灰胡子的帮助",
+        }
+        source = ("Well Olfina, I heard the Greybeards were looking for someone "
+                  "with a loud mouth. You should apply!")
+        for vector_enabled in (False, True):
+            with self.subTest(vector_enabled=vector_enabled):
+                searcher = self._searcher(entries, [1.0] * len(entries) if vector_enabled else None)
+                matches, debug = searcher.search(
+                    ["Olfina", "Greybeards"], source_text=source, return_debug=True)
+                self.assertEqual({"Olfina": "奥菲娜"}, matches)
+                self.assertEqual([], debug[0]["reference_candidates"])
+                self.assertEqual(
+                    {"Speak to the Greybeards", "Get Greybeards' help in negotiating a truce"},
+                    set(debug[1]["reference_candidates"]),
+                )
+                self.assertEqual("untranslated_identity",
+                                 debug[1]["candidate_decisions"]["Greybeards"]["reason"])
+                self.assertNotIn("Greybeards", debug[1]["selected_terms"])
+                self.assertEqual("Greybeards", searcher.glossary_manager.glossary["Greybeards"])
+
+    def test_deterministic_scan_skips_identity_before_longest_match_and_quotas(self):
+        entries = {"The Greybeards": "The Greybeards", "Greybeards": "灰胡子",
+                   "Olfina": "Olfina", "Lydia": "莱迪亚"}
+        searcher = self._searcher(entries)
+        searcher.config = _DummyConfig({("rag", "short_term_max_results"): 1})
+        matches = searcher.search([], source_text="The Greybeards wait for Olfina and Lydia.")
+        self.assertEqual({"Greybeards": "灰胡子"}, matches)
+        self.assertEqual({}, searcher.search([], source_text="Olfina is waiting."))
+
+    def test_scanner_rebuilds_when_target_language_changes(self):
+        searcher = self._searcher({"Greybeards": "Greybeards"})
+        source = "The Greybeards wait."
+        self.assertEqual({}, searcher.search([], source_text=source))
+        searcher.config = _DummyConfig({("general", "target_language"): "fr"})
+        self.assertEqual({"Greybeards": "Greybeards"}, searcher.search([], source_text=source))
+        searcher.config = _DummyConfig()
+        self.assertEqual({}, searcher.search([], source_text=source))
+
+    def test_identity_references_do_not_consume_reference_slots(self):
+        entries = {"Greybeards Scene 1": "Greybeards Scene 1",
+                   "Greybeards Scene 2": "Greybeards Scene 2",
+                   "Speak to the Greybeards": "与灰胡子交谈",
+                   "The Greybeards are waiting.": "灰胡子正在等候。"}
+        searcher = self._searcher(entries)
+        _matches, debug = searcher.search(
+            ["Greybeards"], source_text="I heard the Greybeards calling.", return_debug=True)
+        self.assertEqual({"Speak to the Greybeards", "The Greybeards are waiting."},
+                         set(debug[0]["reference_candidates"]))
+
+    def test_rejected_longer_direct_match_does_not_suppress_references(self):
+        entries = {"The Greybeards": "The Greybeards",
+                   "Speak to the Greybeards": "与灰胡子交谈",
+                   "Get Greybeards' help": "取得灰胡子的帮助"}
+        searcher = self._searcher(entries)
+        matches, debug = searcher.search(
+            ["Greybeards"], source_text="The Greybeards wait.", return_debug=True)
+        self.assertEqual({}, matches)
+        self.assertEqual("The Greybeards", debug[0]["direct_match"])
+        self.assertEqual("untranslated_identity",
+                         debug[0]["candidate_decisions"]["The Greybeards"]["reason"])
+        self.assertEqual({"Speak to the Greybeards", "Get Greybeards' help"},
+                         set(debug[0]["reference_candidates"]))
+
+    def test_empty_translations_are_not_matches(self):
+        searcher = self._searcher({"Olfina": " ", "Greybeards": "灰胡子"})
+        matches, debug = searcher.search(
+            ["Olfina"], source_text="Olfina visits the Greybeards.", return_debug=True)
+        self.assertEqual({"Greybeards": "灰胡子"}, matches)
+        self.assertEqual("empty_translation",
+                         debug[0]["candidate_decisions"]["Olfina"]["reason"])
+
+    def test_glossary_policy_preserves_translations_acronyms_identifiers_and_latin_targets(self):
+        for term, translation, target in (
+            ("Greybeards", "灰胡子", "zh"), ("灰胡子", "灰胡子", "zh"),
+            ("SKSE", "SKSE", "zh"), ("MCM", "MCM", "zh"),
+            ("SkyUI", "SkyUI", "zh"), ("RaceMenu", "RaceMenu", "zh"),
+            ("NPC_001", "NPC_001", "zh"), ("Greybeards", "Greybeards", "fr"),
+        ):
+            with self.subTest(term=term, target=target):
+                self.assertEqual("", glossary_translation_issue(term, translation, target))
+        for term, translation in (("Greybeards", "Greybeards"),
+                                  ("Greybeards", " greybeards "),
+                                  ("Greybeards", "Ｇｒｅｙｂｅａｒｄｓ"),
+                                  ("Greybeards Hall", "Greybeards  Hall"),
+                                  ("Greybeards.", "Greybeards."),
+                                  ("Greybeards...", "Greybeards...")):
+            for target in ("zh", "zh-CN", "ja", "ko"):
+                with self.subTest(term=term, translation=translation, target=target):
+                    self.assertEqual("untranslated_identity",
+                                     glossary_translation_issue(term, translation, target))
+
+    def test_prompt_defensively_omits_untranslated_matches_and_references(self):
+        builder = PromptBuilder(_DummyPromptManager(), _DummyConfig())
+        entries = {"Greybeards": "Greybeards", "Olfina": "奥菲娜", "Lydia": " "}
+        context = builder.build_glossary_context(
+            "Olfina visits the Greybeards and Lydia.", entries,
+            reference_terms={"Olfina Scene 1": "Olfina Scene 1",
+                             "Speak to the Greybeards": "与灰胡子交谈"})
+        self.assertIn("Olfina -> 奥菲娜", context)
+        self.assertIn("Speak to the Greybeards -> 与灰胡子交谈", context)
+        self.assertNotIn("Greybeards -> Greybeards", context)
+        self.assertNotIn("Olfina Scene 1", context)
+        self.assertNotIn("Lydia ->", context)
+        self.assertEqual("", builder.build_glossary_context("Greybeards", {"Greybeards": "Greybeards"}))
 
 
 class RAGSearchSentenceLikeFilterTests(unittest.TestCase):

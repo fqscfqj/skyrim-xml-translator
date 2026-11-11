@@ -10,6 +10,7 @@ from typing import Optional
 
 from src.llm.client import LLMClient, ResponseTruncatedError
 from ..rag.engine import RAGEngine
+from src.rag.glossary_policy import glossary_translation_issue
 from src.prompt.prompt_manager import PromptManager
 from src.translation.text_analyzer import TextAnalyzer
 from src.translation.prompt_builder import PromptBuilder
@@ -29,7 +30,7 @@ class _ChunkQualityFailure(RuntimeError):
 
 
 class Translator:
-    _CACHE_POLICY_VERSION = "translation_policy_v6"
+    _CACHE_POLICY_VERSION = "translation_policy_v7"
     _FORMAT_SHELL_VERSION = "format_shell_v1"
     _QUALITY_RULES_VERSION = "quality_rules_v9"
     _GLOSSARY_IMPORT_FORMAT_VERSION = "glossary_import_v1"
@@ -1983,7 +1984,10 @@ class Translator:
         """Keep partial examples outside the mandatory glossary/QC set."""
         references = {
             term: translation for term, translation in recalled_terms.items()
-            if term not in matched_terms
+            if term not in matched_terms and not glossary_translation_issue(
+                term, translation,
+                self.rag_engine.config.get("general", "target_language", "zh"),
+            )
         }
         glossary = getattr(self.rag_engine, "glossary", {})
         if isinstance(glossary, dict):
@@ -1998,6 +2002,11 @@ class Translator:
                     continue
                 for term in candidates[:2]:
                     if not isinstance(term, str) or term not in glossary or term in matched_terms:
+                        continue
+                    if glossary_translation_issue(
+                        term, glossary[term],
+                        self.rag_engine.config.get("general", "target_language", "zh"),
+                    ):
                         continue
                     references[term] = glossary[term]
         return dict(list(references.items())[:8])
@@ -2038,6 +2047,10 @@ class Translator:
             term: translation
             for term, translation in matched_terms.items()
             if isinstance(term, str)
+            and not glossary_translation_issue(
+                term, translation,
+                self.rag_engine.config.get("general", "target_language", "zh"),
+            )
             and (
                 any(
                     self._prompt_builder._term_appears_in_source(query, source_text)

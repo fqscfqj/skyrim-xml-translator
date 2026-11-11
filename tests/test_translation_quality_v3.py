@@ -596,6 +596,47 @@ class RichMetaTests(unittest.TestCase):
 
 
 class SentenceReferenceFlowTests(unittest.TestCase):
+    def test_english_identity_cannot_override_chinese_references_in_translation_prompts(self):
+        config = _FakeConfig()
+        terms = {"Olfina": "奥菲娜", "Greybeards": "Greybeards"}
+        examples = {"Speak to the Greybeards": "与灰胡子交谈",
+                    "Get Greybeards' help in negotiating a truce": "在休战谈判中取得灰胡子的帮助"}
+        scene = {"Whiterun Olfina Jon Scene 3": "Whiterun Olfina Jon Scene 3"}
+        glossary = {**terms, **scene, **examples}
+        source = ("Well Olfina, I heard the Greybeards were looking for someone "
+                  "with a loud mouth. You should apply!")
+        expected = "嘿，奥菲娜，我听说灰胡子在找个大嗓门的人。你该去试试！"
+        for real_search in (False, True):
+            with self.subTest(real_search=real_search):
+                if real_search:
+                    rag = _LocalExtractionRAG(config, glossary)
+                    rag.keywords = list(terms)
+                else:
+                    rag = _FakeRAG(config, glossary=glossary, terms=terms, keywords=list(terms),
+                                   search_debug=[
+                                       {"query": "Olfina", "reference_candidates": list(scene)},
+                                       {"query": "Greybeards", "reference_candidates": list(examples)},
+                                   ])
+                llm = _ScriptedLLM([json.dumps({"translation": expected}, ensure_ascii=False)])
+                translator = _make_translator(llm, rag=rag, config=config)
+                result, debug = translator.translate_text(
+                    source, use_rag=True, return_debug_info=True, max_retries=0)
+                self.assertEqual(expected, result)
+                self.assertEqual({"Olfina": "奥菲娜"}, debug["matched_terms"])
+                self.assertEqual(examples, debug["reference_terms"])
+                self.assertEqual(1, llm.calls)
+                prompt = llm.messages_seen[0][-1]["content"]
+                self.assertIn("与灰胡子交谈", prompt)
+                self.assertNotIn("Greybeards -> Greybeards", prompt)
+                self.assertNotIn("Whiterun Olfina Jon Scene", prompt)
+                _system, batch_prompt = translator._prompt_builder.build_batch([
+                    {"id": 0, "text": source, "matched_terms": terms,
+                     "reference_terms": {**scene, **examples}},
+                ])
+                self.assertIn("与灰胡子交谈", batch_prompt)
+                self.assertNotIn("Greybeards -> Greybeards", batch_prompt)
+                self.assertNotIn("Whiterun Olfina Jon Scene", batch_prompt)
+
     def test_sentence_examples_reach_actual_translate_call_and_batch_prompt(self):
         config = _FakeConfig()
         examples = {
