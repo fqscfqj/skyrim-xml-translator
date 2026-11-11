@@ -30,6 +30,10 @@ class GlossaryManager:
     # stripped (R-02).  NFKC + casefold are applied before substitution.
     _NORMALIZE_TERM_RE = re.compile(r"[^\w\u4e00-\u9fff]+", re.UNICODE)
     _WHITESPACE_RE = re.compile(r"\s+")
+    _REFERENCE_UNSAFE_RE = re.compile(
+        r"[<>{}\[\]%$\r\n\v\f\x85\u2028\u2029]|\\[nr]|&(?:lt|gt);|__fmt_",
+        re.IGNORECASE,
+    )
 
     # Use frozenset for O(1) lookup
     _COMMON_WORDS = frozenset({
@@ -92,6 +96,7 @@ class GlossaryManager:
         self.glossary: dict[str, str] = {}
         self._glossary_lookup: dict[str, str] = {}
         self._term_token_index: Dict[str, list[str]] = {}
+        self._reference_token_index: Dict[str, list[str]] = {}
         self._token_df: Dict[str, int] = {}
         self._token_df_dirty = True
         self._content_fingerprint = ""
@@ -153,6 +158,17 @@ class GlossaryManager:
             return []
         return list(self._term_token_index.get(normalized, []))
 
+    def lookup_reference_candidates(self, token: str) -> list[str]:
+        """Return complete short glossary sources containing one normalized token.
+
+        Results retain glossary insertion order and are a defensive copy;
+        translations remain available through get_translation().
+        """
+        normalized = self.normalize_term_key(token)
+        if not normalized or " " in normalized:
+            return []
+        return list(self._reference_token_index.get(normalized, []))
+
     def get_translation(self, term: str) -> Optional[str]:
         """Return the translation for a term, or None."""
         return self.glossary.get(term)
@@ -163,6 +179,7 @@ class GlossaryManager:
         """Build a normalized lookup map for instant exact hits."""
         lookup = {}
         term_token_index: Dict[str, list[str]] = {}
+        reference_token_index: Dict[str, list[str]] = {}
         refcount: Dict[str, int] = {}
         for term in self.glossary.keys():
             normalized = self.normalize_term_key(term)
@@ -179,8 +196,11 @@ class GlossaryManager:
                              module="glossary_manager", func="rebuild_lookup")
             for token in set(self._term_index_tokens(term)):
                 term_token_index.setdefault(token, []).append(term)
+            for token in set(self._reference_index_tokens(term, self.glossary[term])):
+                reference_token_index.setdefault(token, []).append(term)
         self._glossary_lookup = lookup
         self._term_token_index = term_token_index
+        self._reference_token_index = reference_token_index
         self._rich_refcount = refcount
         self._token_df_dirty = True
         raw = json.dumps(
@@ -222,6 +242,24 @@ class GlossaryManager:
         if len(split_tokens) > 8 or len(norm) > 60:
             return []
         return [t for t in split_tokens if t and len(t) >= 2 and t not in self._COMMON_WORDS]
+
+    def _reference_index_tokens(self, term: str, translation: str) -> list[str]:
+        """Return source tokens from bounded, complete plain-text examples.
+
+        Each side is limited to 240 characters and 40 normalized tokens.
+        Formatting-bearing pairs are skipped intact rather than stripped or
+        truncated, so callers always retrieve the original bilingual example.
+        """
+        for text in (term, translation):
+            if not isinstance(text, str) or not text.strip() or len(text) > 240:
+                return []
+            if self._REFERENCE_UNSAFE_RE.search(text):
+                return []
+
+        tokens = self.normalize_term_key(term).split()
+        if len(tokens) > 40 or len(self.normalize_term_key(translation).split()) > 40:
+            return []
+        return [t for t in tokens if len(t) >= 3 and t not in self._COMMON_WORDS]
 
     def _rebuild_token_df(self) -> None:
         """Build a token document-frequency map from glossary terms."""

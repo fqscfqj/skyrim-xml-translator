@@ -475,11 +475,20 @@ class SingleTokenDisambiguationTests(unittest.TestCase):
         )
         return searcher, np.array(scores, dtype=np.float32)
 
-    def test_close_candidates_resolve_to_top1_with_penalty(self):
+    def test_close_candidates_do_not_disambiguate_source_without_evidence(self):
         searcher, similarities = self._make([0.80, 0.72])
 
         resolved = searcher._resolve_direct_match(
             "Whiterun", source_text="Whiterun", similarities=similarities,
+        )
+
+        self.assertIsNone(resolved)
+
+    def test_close_candidates_without_source_keep_penalized_search_fallback(self):
+        searcher, similarities = self._make([0.80, 0.72])
+
+        resolved = searcher._resolve_direct_match(
+            "Whiterun", source_text=None, similarities=similarities,
         )
 
         self.assertIsNotNone(resolved)

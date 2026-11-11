@@ -2438,6 +2438,15 @@ class RAGVisualizationDialog(QDialog):
                 self._create_tree_item(matched_item, i18n.t("msg_no_valid_terms"))
             matched_item.setExpanded(True)
 
+            reference_terms = debug_info.get("reference_terms") or {}
+            if isinstance(reference_terms, dict) and reference_terms:
+                reference_item = self._create_tree_item(
+                    None, i18n.t("rag_reference_terms", "部分匹配参考"))
+                for term, translation in reference_terms.items():
+                    line = f"{term} -> {translation}"
+                    self._create_tree_item(reference_item, line, full_text=line)
+                reference_item.setExpanded(True)
+
             # 4. 提示词构建
             prompt_item = self._create_tree_item(None, i18n.t("step_prompt_construction"))
 
@@ -2554,6 +2563,7 @@ class RAGVisualizationDialog(QDialog):
                                 "long_limit": qr.get("long_limit"),
                                 "selected_short_count": qr.get("selected_short_count"),
                                 "selected_long_count": qr.get("selected_long_count"),
+                                "reference_count": len(qr.get("reference_candidates") or []),
                             }
             for task in rag_tasks:
                 label = str(task)
@@ -2570,6 +2580,8 @@ class RAGVisualizationDialog(QDialog):
                 selected_long_count = limit_info.get("selected_long_count")
                 if isinstance(selected_short_count, int) and isinstance(selected_long_count, int):
                     suffix_parts.append(f"selected={selected_short_count}+{selected_long_count}")
+                if limit_info.get("reference_count"):
+                    suffix_parts.append(f"references={limit_info['reference_count']}")
                 if suffix_parts:
                     lines.append(f"- {label} ({'; '.join(suffix_parts)})")
                 else:
@@ -2595,6 +2607,9 @@ class RAGVisualizationDialog(QDialog):
                 selected_long_count = qr.get("selected_long_count") if isinstance(qr, dict) else None
                 if isinstance(selected_short_count, int) and isinstance(selected_long_count, int):
                     meta_parts.append(f"selected={selected_short_count}+{selected_long_count}")
+                references = (qr.get("reference_candidates") or []) if isinstance(qr, dict) else []
+                if references:
+                    meta_parts.append(f"references={len(references)}")
                 if meta_parts:
                     lines.append(f"Query: {query} ({'; '.join(meta_parts)})")
                 else:
@@ -2626,6 +2641,11 @@ class RAGVisualizationDialog(QDialog):
                         except Exception:
                             lines.append(f"    - {term} ({score}){suffix}")
 
+                if references:
+                    lines.append("  Reference-Only Candidates (not mandatory matches):")
+                    for term in references:
+                        lines.append(f"    - {term}")
+
                 rejection_counts = qr.get("candidate_rejection_counts", {}) if isinstance(qr, dict) else {}
                 if isinstance(rejection_counts, dict) and rejection_counts:
                     parts = [f"{reason}={count}" for reason, count in rejection_counts.items()]
@@ -2652,6 +2672,13 @@ class RAGVisualizationDialog(QDialog):
         else:
             lines.append("(none)")
         lines.append("")
+
+        reference_terms = di.get("reference_terms") or {}
+        if isinstance(reference_terms, dict) and reference_terms:
+            lines.append("[Reference Terms - Partial Matches, Not Full Entity Hits]")
+            for term, trans in reference_terms.items():
+                lines.append(f"- {term} -> {trans}")
+            lines.append("")
 
         system_prompt = di.get("system_prompt") or ""
         user_prompt = di.get("user_prompt") or ""

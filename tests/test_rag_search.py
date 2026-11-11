@@ -100,6 +100,99 @@ class _DummyLLMClient:
         return [1.0, 0.0]
 
 
+class RAGSearchReferenceExamplesTests(unittest.TestCase):
+    def _searcher(self, entries, scores=None):
+        # Use the production indexes: the old test double indexes sentences as
+        # entities, which previously hid the real sentence-recall gap.
+        manager = object.__new__(GlossaryManager)
+        manager.config = _DummyConfig()
+        manager.glossary = dict(entries)
+        manager.rebuild_lookup()
+        return RAGSearcher(
+            cast(Any, _DummyVectorStore(list(entries) if scores else [], scores or [])),
+            manager, _DummyConfig(), _DummyLLMClient(),
+        )
+
+    def test_sentence_examples_reach_prompt_without_becoming_matches(self):
+        entries = {
+            "Housecarl! No!": "侍卫！不！",
+            "No, Housecarl!": "不，侍卫！",
+            "What does a housecarl do?": "侍卫的职责是什么？",
+            "Guard House": "岗楼",
+        }
+        searcher = self._searcher(entries, [0.89, 0.83, 0.91, 0.99])
+        source = "As your Housecarl, I obey. But let's be discreet."
+        matches, debug = searcher.search(["Housecarl"], source_text=source, return_debug=True)
+        self.assertEqual({}, matches)
+        self.assertEqual(2, len(debug[0]["reference_candidates"]))
+        self.assertIn("What does a housecarl do?", debug[0]["reference_candidates"])
+        self.assertNotIn("Guard House", debug[0]["reference_candidates"])
+        self.assertNotIn("No, Housecarl!", debug[0]["reference_candidates"])
+        context = PromptBuilder(_DummyPromptManager(), _DummyConfig()).build_glossary_context(
+            source, matches,
+            reference_terms={key: entries[key] for key in debug[0]["reference_candidates"]},
+        )
+        self.assertIn("侍卫的职责是什么", context)
+        self.assertIn("原文片段：Housecarl", context)
+        self.assertIn("句子译例仅用于对齐", context)
+        self.assertNotIn("共同译词线索", context)
+
+    def test_generic_references_work_without_vector_index(self):
+        entries = {
+            "The Archivist records every oath.": "典藏官记录每份誓约。",
+            "An Archivist guards the archive.": "典藏官守护档案馆。",
+        }
+        searcher = self._searcher(entries)
+        matches, debug = searcher.search(
+            ["Archivist"], source_text="Speak with the Archivist.", return_debug=True)
+        self.assertEqual({}, matches)
+        self.assertEqual(set(entries), set(debug[0]["reference_candidates"]))
+
+    def test_phrase_references_require_the_complete_keyword(self):
+        entries = {
+            "The captain watches the guard.": "队长看着卫兵。",
+            "Speak with the Guard Captain.": "和卫兵队长谈谈。",
+            "The guard watches the captain.": "卫兵看着队长。",
+        }
+        searcher = self._searcher(entries)
+        matches, debug = searcher.search(
+            ["Guard Captain"], source_text="I serve the Guard Captain.", return_debug=True)
+        self.assertEqual({}, matches)
+        self.assertEqual(["Speak with the Guard Captain."], debug[0]["reference_candidates"])
+
+    def test_reference_gate_rejects_absent_low_signal_and_substring_queries(self):
+        entries = {
+            "The Housecarl waits.": "侍卫在等候。",
+            "The Housecarls wait.": "侍卫们在等候。",
+            "Honestly, I do not know.": "说实话，我不知道。",
+        }
+        searcher = self._searcher(entries)
+        for query, source in (("Housecarl", "The guard waits."),
+                              ("honestly", "Honestly, tell me."),
+                              ("carl", "Carl is waiting.")):
+            with self.subTest(query=query):
+                _matches, debug = searcher.search([query], source_text=source, return_debug=True)
+                self.assertEqual([], debug[0]["reference_candidates"])
+
+    def test_long_complete_example_is_rendered_but_unsafe_pairs_are_not_recalled(self):
+        example = ("The Archivist has sworn to preserve the records of every oath "
+                   "and to keep the archive safe from anyone who would destroy it.")
+        entries = {
+            example: "典藏官立誓保管所有誓约记录，并保护档案馆不遭破坏。",
+            "The Archivist waits.": "",
+            "The Archivist returns.": "<b>典藏官回来。</b>",
+            "The Archivist " + "waits " * 50: "典藏官等着。",
+        }
+        searcher = self._searcher(entries)
+        matches, debug = searcher.search(
+            ["Archivist"], source_text="I serve the Archivist.", return_debug=True)
+        self.assertEqual([example], debug[0]["reference_candidates"])
+        context = PromptBuilder(_DummyPromptManager(), _DummyConfig()).build_glossary_context(
+            "I serve the Archivist.", matches, reference_terms={example: entries[example]})
+        self.assertIn("destroy it", context)
+        self.assertIn("典藏官立誓", context)
+
+
 class RAGSearchSentenceLikeFilterTests(unittest.TestCase):
     def test_low_signal_keyword_does_not_request_embedding(self):
         glossary = _DummyGlossaryManager({"Dragonborn": "龙裔"})
@@ -272,7 +365,7 @@ class RAGSearchPluralDirectMatchTests(unittest.TestCase):
 
 
 class RAGSearchTokenContainmentDirectMatchTests(unittest.TestCase):
-    def test_single_token_query_resolves_unique_multi_token_glossary_term(self):
+    def test_single_token_query_keeps_multi_token_glossary_terms_as_references(self):
         glossary = _DummyGlossaryManager({
             "Ingun Black-Briar": "因甘·黑棘",
             "Ingun's Supply Chest Key": "因甘补给箱钥匙",
@@ -301,10 +394,11 @@ class RAGSearchTokenContainmentDirectMatchTests(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(results["Ingun Black-Briar"], "因甘·黑棘")
-        self.assertEqual(debug[0]["direct_match"], "Ingun Black-Briar")
+        self.assertEqual({}, results)
+        self.assertIsNone(debug[0]["direct_match"])
+        self.assertIn("Ingun Black-Briar", debug[0]["reference_candidates"])
 
-    def test_single_token_query_keeps_unique_phrase_without_standalone_term(self):
+    def test_single_token_partial_phrase_is_reference_without_standalone_term(self):
         glossary = _DummyGlossaryManager({
             "Thane of the Pale": "苍原武卫",
         })
@@ -331,8 +425,107 @@ class RAGSearchTokenContainmentDirectMatchTests(unittest.TestCase):
             ),
         )
 
-        self.assertEqual({"Thane of the Pale": "苍原武卫"}, results)
-        self.assertEqual("Thane of the Pale", debug[0]["direct_match"])
+        self.assertEqual({}, results)
+        self.assertIsNone(debug[0]["direct_match"])
+        self.assertEqual(["Thane of the Pale"], debug[0]["reference_candidates"])
+
+    def test_exact_title_wins_even_when_vector_index_only_has_composite_titles(self):
+        glossary = _DummyGlossaryManager({
+            "Thane": "武卫",
+            "Thane of the Pale": "苍原武卫",
+            "Thane of Falkreath": "佛克瑞斯武卫",
+        })
+        config = _DummyConfig({
+            ("rag", "short_term_max_results"): 2,
+            ("rag", "long_term_max_results"): 1,
+        })
+        searcher = RAGSearcher(
+            cast(Any, _DummyVectorStore(
+                ["Thane of the Pale", "Thane of Falkreath"], [0.99, 0.98],
+            )),
+            cast(Any, glossary), config, _DummyLLMClient(),
+        )
+        builder = PromptBuilder(_DummyPromptManager(), config)
+
+        for query in ("Thane", "thane", "THANE", "Thane."):
+            with self.subTest(query=query):
+                source = "At your service, Thane."
+                results, debug = searcher.search(
+                    [query], source_text=source, return_debug=True,
+                )
+
+                self.assertEqual({"Thane": "武卫"}, results)
+                self.assertEqual("Thane", debug[0]["direct_match"])
+                context = builder.build_glossary_context(source, results)
+                self.assertIn("- Thane -> 武卫", context)
+                self.assertNotIn("背景参考", context)
+
+    def test_exact_short_match_still_collects_composite_examples(self):
+        glossary = _DummyGlossaryManager({
+            "Thane": "武卫",
+            "Thane of the Pale": "苍原武卫",
+            "Thane of Falkreath": "佛克瑞斯武卫",
+        })
+        searcher = RAGSearcher(
+            cast(Any, _DummyVectorStore(list(glossary.glossary), [0.99, 0.8, 0.7])),
+            cast(Any, glossary),
+            _DummyConfig({
+                ("rag", "short_term_max_results"): 2,
+                ("rag", "long_term_max_results"): 1,
+            }),
+            _DummyLLMClient(),
+        )
+
+        results, debug = searcher.search(
+            ["Thane"], source_text="At your service, Thane.", return_debug=True,
+        )
+
+        self.assertEqual({"Thane": "武卫"}, results)
+        self.assertEqual("Thane", debug[0]["direct_match"])
+        self.assertEqual(
+            ["Thane of the Pale", "Thane of Falkreath"],
+            debug[0]["reference_candidates"],
+        )
+
+    def test_ambiguous_titles_are_not_guessed_from_vector_scores(self):
+        glossary = _DummyGlossaryManager({
+            "Thane of the Pale": "苍原武卫",
+            "Thane of Falkreath": "佛克瑞斯武卫",
+            "Thane of Whiterun": "白漫武卫",
+        })
+        searcher = RAGSearcher(
+            cast(Any, _DummyVectorStore(
+                list(glossary.glossary), [0.6660, 0.64, 0.63],
+            )),
+            cast(Any, glossary),
+            _DummyConfig({
+                ("rag", "short_term_max_results"): 2,
+                ("rag", "long_term_max_results"): 1,
+            }),
+            _DummyLLMClient(),
+        )
+
+        results, debug = searcher.search(
+            ["Thane"], source_text="At your service, Thane.", return_debug=True,
+        )
+
+        self.assertEqual({}, results)
+        self.assertIsNone(debug[0]["direct_match"])
+        self.assertEqual([], debug[0]["selected_terms"])
+        self.assertIn("Thane of the Pale", debug[0]["reference_candidates"])
+        self.assertEqual(
+            "not_grounded_in_source",
+            debug[0]["candidate_decisions"]["Thane of the Pale"]["reason"],
+        )
+
+        results, debug = searcher.search(
+            ["Thane"], source_text="At your service, Thane of Falkreath.",
+            return_debug=True,
+        )
+
+        self.assertEqual({"Thane of Falkreath": "佛克瑞斯武卫"}, results)
+        self.assertEqual("Thane of Falkreath", debug[0]["direct_match"])
+        self.assertEqual([], debug[0]["reference_candidates"])
 
     def test_single_token_query_does_not_choose_ambiguous_multi_token_glossary_term(self):
         glossary = _DummyGlossaryManager({

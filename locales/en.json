@@ -120,6 +120,7 @@
     "rag_system_prompt": "System Prompt",
     "rag_user_prompt": "User Prompt",
     "rag_glossary_context": "Glossary Context",
+    "rag_reference_terms": "Partial Glossary References",
     "rag_none": "(None)",
     "rag_stage_primary": "Primary Search Model",
     "rag_stage_fallback": "Fallback Search Model",

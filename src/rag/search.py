@@ -881,6 +881,8 @@ class RAGSearcher:
             ]
             if len(source_hits) == 1:
                 return source_hits[0], 1.0
+            # A substring-only hit is reference evidence, never a full-term hit.
+            return None
 
         non_possessive_candidates = [
             candidate for candidate in candidates
@@ -889,15 +891,106 @@ class RAGSearcher:
         if len(non_possessive_candidates) == 1:
             return non_possessive_candidates[0], 1.0
 
-        # R-08: several plausible candidates.  Short tokens (<= 3 chars) stay
-        # rejected outright; otherwise disambiguate by raw cosine and apply a
-        # downweight so the guess never outranks a deterministic hit.
+        # Multiple ungrounded composites may supply examples, not entity identity.
+        if source_text:
+            return None
+
+        # Without source context, retain the penalized search fallback (R-08).
         if len(token) <= 3:
             return None
         disambiguated = self._disambiguate_token_candidates(
             token, non_possessive_candidates or candidates, similarities
         )
         return disambiguated
+
+    def _collect_partial_references(self, query: str, source_text: str,
+                                    limit: int,
+                                    candidate_scores: Optional[dict] = None) -> list[str]:
+        """Recall complete bilingual examples, never promote them to entity hits."""
+        if not source_text or limit <= 0 or self._is_low_signal_query(query):
+            return []
+        if not self._raw_term_appears_in_source(query, source_text):
+            return []
+        normalized = self.glossary_manager.normalize_term_key(query)
+        variants = self._build_query_lookup_variants(normalized)
+        if len(normalized.split()) > 1:
+            variants = [normalized]
+        tokens = list(dict.fromkeys(token for value in variants for token in value.split()))
+        lookup = getattr(self.glossary_manager, "lookup_reference_candidates", None)
+        if not callable(lookup):
+            lookup = getattr(self.glossary_manager, "lookup_token_candidates", None)
+        if not callable(lookup):
+            return []
+
+        pool: dict[str, None] = {}
+        for token in tokens:
+            if (
+                len(token) < 3
+                or token in self.glossary_manager._COMMON_WORDS
+                or token in self._LOW_SIGNAL_ADVERBS
+                or token in self._NEGATION_CONTRACTION_STEMS
+                or not self.glossary_manager.is_signal_token(token)
+            ):
+                continue
+            for term in lookup(token):
+                pool.setdefault(term, None)
+
+        scores = candidate_scores or {}
+        ranked: list[tuple[tuple, str, tuple]] = []
+        glossary = self.glossary_manager.glossary
+        for order, term in enumerate(pool):
+            if self._check_interrupt():
+                break
+            translation = glossary.get(term)
+            if not isinstance(term, str) or not isinstance(translation, str):
+                continue
+            # Also guard legacy glossary implementations without a reference
+            # index; references must remain complete and cheap to display.
+            if any(
+                not text.strip() or len(text) > 240
+                or GlossaryManager._REFERENCE_UNSAFE_RE.search(text)
+                for text in (term, translation)
+            ):
+                continue
+            if self._raw_term_appears_in_source(term, source_text):
+                continue
+            term_norm = self.glossary_manager.normalize_term_key(term)
+            term_tokens = term_norm.split()
+            target_norm = self.glossary_manager.normalize_term_key(translation)
+            if not 1 < len(term_tokens) <= 40 or len(target_norm.split()) > 40:
+                continue
+            # A multiword keyword must occur as a full contiguous phrase.
+            if not any(self._is_query_contained_in_term(value, term_norm) for value in variants):
+                continue
+            sentence = self._is_sentence_like_term(term)
+            if sentence:
+                raw_score = scores.get(term)
+                has_score = isinstance(raw_score, (int, float)) and np.isfinite(raw_score)
+                score = float(raw_score) if has_score else 0.0
+                # Use vector similarity only when it is available.  Source
+                # overlap beyond the queried token is not evidence that a
+                # sentence example is a better translation reference.
+                rank = (1, 0 if has_score else 1, -score, len(term) + len(translation), order)
+            else:
+                # Preserve curated composite order; similarity is not evidence
+                # for an absent regional/name qualifier.
+                rank = (0, 0, 0, 0, order)
+            # Reordered copies such as "Title! No!" / "No, Title!" with
+            # the same translation should not consume both reference slots.
+            signature = (tuple(sorted(term_tokens)), target_norm)
+            ranked.append((rank, term, signature))
+
+        references: list[str] = []
+        seen_examples: set[tuple] = set()
+        for _rank, term, signature in sorted(ranked):
+            if signature in seen_examples:
+                continue
+            seen_examples.add(signature)
+            references.append(term)
+            if len(references) >= limit:
+                break
+        return references
+
 
     def _disambiguate_token_candidates(
             self,
@@ -1197,6 +1290,7 @@ class RAGSearcher:
         query_candidate_terms: Dict[str, list[str]] = {}
         query_debug_by_text: Dict[str, Dict[str, Any]] = {}
         query_finalizers: Dict[str, Callable[..., None]] = {}
+        reference_raw_scores: Dict[str, Dict[str, float]] = {}
         desired_top_k = max(top_k, total_limit * 2, 24)
         candidate_visits = 0
 
@@ -1209,6 +1303,7 @@ class RAGSearcher:
             query_norm = self.glossary_manager.normalize_term_key(query)
             query_terms: list[str] = []
             query_candidate_terms[query] = query_terms
+            reference_raw_scores[query] = {}
 
             query_details: Optional[Dict[str, Any]] = None
             if debug_info is not None:
@@ -1231,6 +1326,7 @@ class RAGSearcher:
                     "sentence_like_candidate_count": 0,
                     "source_boosted_terms": [],
                     "candidate_decisions": {},
+                    "reference_candidates": [],
                     "candidate_rejections": [],
                     "candidate_rejection_counts": {},
                     "threshold_filtered_terms": [],
@@ -1427,6 +1523,7 @@ class RAGSearcher:
                             if score < min_vector_score:
                                 continue
                             term = self.vector_store.terms[idx]
+                            reference_raw_scores[query][term] = score
                             add_candidate(term, score, candidate_source="semantic")
                             if return_debug:
                                 semantic_matches_debug.append((term, score))
@@ -1621,6 +1718,15 @@ class RAGSearcher:
                             term, normalized_scores.get(term, 0.0), "rejected", "below_threshold",
                             canonical_term=term, source="rank",
                         )
+                direct_match = query_details.get("direct_match")
+                query_norm = self.glossary_manager.normalize_term_key(query)
+                direct_norm = self.glossary_manager.normalize_term_key(direct_match or "")
+                if not direct_match or direct_norm == query_norm:
+                    references = self._collect_partial_references(
+                        query, source_text, min(2, total_limit),
+                        candidate_scores=reference_raw_scores.get(query),
+                    )
+                    query_details["reference_candidates"] = references
                 rejection_counts: Dict[str, int] = {}
                 rejection_rows: list[Dict[str, Any]] = []
                 for term, decision in decisions.items():

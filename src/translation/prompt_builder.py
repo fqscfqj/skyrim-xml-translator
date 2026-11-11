@@ -4,6 +4,7 @@ import re
 from typing import Any, Optional
 
 from src.logging_helper import emit as log_emit
+from src.rag.glossary_manager import GlossaryManager
 from src.translation.style_profiles import ResolvedStyleProfile, StyleProfileResolver
 from src.translation.text_analyzer import TextAnalyzer
 
@@ -42,7 +43,8 @@ class PromptBuilder:
               previous_source: Optional[str] = None,
               rich_meta: Optional[dict] = None,
               chunk_index: Optional[int] = None,
-              chunk_total: Optional[int] = None) -> tuple[str, str]:
+              chunk_total: Optional[int] = None,
+              reference_terms: Optional[dict] = None) -> tuple[str, str]:
         """Build complete (system_prompt, user_content) for a translation request.
 
         Phase B restructure: system prompt contains only core rules;
@@ -112,11 +114,12 @@ class PromptBuilder:
             glossary_source_text if glossary_source_text is not None else source_text,
             matched_terms,
             rich_meta=rich_meta,
+            reference_terms=reference_terms,
         )
         if glossary_context:
             glossary_append = self.prompt_manager.get(
                 "translator.glossary_instruction_append",
-                "\n术语表条目是默认译名，应全篇采用；仅当原文证据明确冲突"
+                "\n术语表中完整命中原文的条目是默认译名，应全篇采用；部分匹配可借鉴适用译法，不补限定。仅当原文证据明确冲突"
                 "（同词异指、专名被当普通词、性/数变形）时才忽略，"
                 "且忽略后仍须保持同一选择。",
             )
@@ -216,7 +219,11 @@ class PromptBuilder:
         used_chars = 0
         for item in items:
             text_len = len(str(item.get("text", "")))
-            gloss_len = sum(len(str(k)) + len(str(v or "")) for k, v in (item.get("matched_terms", {}) or {}).items())
+            gloss_len = sum(
+                len(str(k)) + len(str(v or ""))
+                for field in ("matched_terms", "reference_terms")
+                for k, v in (item.get(field, {}) or {}).items()
+            )
             item_cost = text_len + gloss_len + 300
             if sliced_items and used_chars + item_cost > char_budget:
                 break
@@ -255,11 +262,12 @@ class PromptBuilder:
                 source_text,
                 matched_terms,
                 rich_meta=item.get("rich_meta"),
+                reference_terms=item.get("reference_terms"),
             )
             if glossary_context:
                 glossary_append = self.prompt_manager.get(
                     "translator.glossary_instruction_append",
-                    "\n术语表条目是默认译名，应全篇采用；仅当原文证据明确冲突"
+                    "\n术语表中完整命中原文的条目是默认译名，应全篇采用；部分匹配可借鉴适用译法，不补限定。仅当原文证据明确冲突"
                     "（同词异指、专名被当普通词、性/数变形）时才忽略，"
                     "且忽略后仍须保持同一选择。",
                 )
@@ -503,7 +511,8 @@ class PromptBuilder:
         return len(stripped.split()) <= 4
 
     def build_glossary_context(self, source_text: str, matched_terms: dict,
-                               rich_meta: Optional[dict] = None) -> str:
+                               rich_meta: Optional[dict] = None,
+                               reference_terms: Optional[dict] = None) -> str:
         """Build flat glossary context with in-source vs reference grouping.
 
         R-30: rich metadata is consumed here:
@@ -511,7 +520,7 @@ class PromptBuilder:
         * ``forbidden`` variants are rendered as explicit prohibitions;
         * ``variants`` are rendered as source aliases for recognition.
         """
-        if not matched_terms:
+        if not matched_terms and not reference_terms:
             return ""
 
         try:
@@ -522,6 +531,13 @@ class PromptBuilder:
 
         in_source_lines: list[str] = []
         reference_lines: list[str] = []
+        partial_reference_lines: list[str] = []
+        partial_reference_hint_values: list[str] = []
+        matched_terms = matched_terms if isinstance(matched_terms, dict) else {}
+        reference_terms = {
+            term: translation for term, translation in reference_terms.items()
+            if term not in matched_terms
+        } if isinstance(reference_terms, dict) else {}
 
         items = [
             (term, translation)
@@ -544,19 +560,28 @@ class PromptBuilder:
             # Python's sort is stable: equal priorities keep RAG order.
             items.sort(key=lambda item: -_priority_key(item))
 
+        items.extend(
+            (term, translation) for term, translation in reference_terms.items()
+            if isinstance(term, str) and term.strip() and len(term) <= 240
+            and term not in matched_terms
+        )
         for term, translation in items:
             v_str = "" if translation is None else str(translation)
             raw_display_term = self._strip_term_edge_punct(term) or term
+            # Reference-index rows are already bounded complete bilingual
+            # examples.  Keep them intact so the queried fragment and its
+            # aligned translation cannot be truncated by the term-entry cap.
+            display_max_chars = 240 if term in reference_terms else entry_max_chars
             display_term = self._sanitize_glossary_field(
-                raw_display_term, max_chars=entry_max_chars)
+                raw_display_term, max_chars=display_max_chars)
             display_translation = self._sanitize_glossary_field(
-                self._compact_glossary_value(v_str, entry_max_chars),
-                max_chars=entry_max_chars,
+                self._compact_glossary_value(v_str, display_max_chars),
+                max_chars=display_max_chars,
             )
 
             extras: list[str] = []
             meta = meta_map.get(term)
-            if isinstance(meta, dict):
+            if isinstance(meta, dict) and term not in reference_terms:
                 forbidden = self._coerce_meta_list(meta.get("forbidden"))
                 if not forbidden:
                     for key in ("forbidden_translations", "banned"):
@@ -597,12 +622,29 @@ class PromptBuilder:
             if extras:
                 line = f"{line}（{'；'.join(extras)}）"
 
-            if self._term_appears_in_source(raw_display_term, source_text):
+            if term in reference_terms:
+                fragments = list(dict.fromkeys(
+                    token for token in re.findall(r"[^\W_]+(?:['-][^\W_]+)*", raw_display_term)
+                    if len(token) >= 3 and token.casefold() not in GlossaryManager._COMMON_WORDS
+                    and self._term_appears_in_source(token, source_text)
+                ))
+                if fragments:
+                    fragment_text = self._sanitize_glossary_field(" / ".join(fragments[:3]), 80)
+                    partial_reference_lines.append(f"{line}（原文片段：{fragment_text}）")
+                    if (
+                        not re.search(r"[.!?。！？,，;；]", term)
+                        and len(term.split()) <= 8
+                        and len(term) <= 80
+                    ):
+                        partial_reference_hint_values.append(v_str)
+                    else:
+                        partial_reference_hint_values.append("")
+            elif self._term_appears_in_source(raw_display_term, source_text):
                 in_source_lines.append(line)
             else:
                 reference_lines.append(line)
 
-        if not in_source_lines and not reference_lines:
+        if not in_source_lines and not reference_lines and not partial_reference_lines:
             return ""
 
         glossary_header = self.prompt_manager.get(
@@ -611,15 +653,31 @@ class PromptBuilder:
         )
 
         def build_context() -> str:
+            # Recompute after each budget trim; a hint requires two displayed
+            # short references, not merely two rows that were later dropped.
+            shared_hint = self._shared_translation_suffix(partial_reference_hint_values)
             sections: list[str] = []
             if in_source_lines:
                 sections.append(
                     "术语（默认译名，应全篇采用；原文证据明确冲突时除外）\n"
                     + "\n".join(in_source_lines)
                 )
+            if partial_reference_lines:
+                sections.append(
+                    "部分匹配参考（不是当前完整实体命中）：可借鉴对应片段的词义与译法；"
+                    "对应清楚、语境相符时优先沿用，多条一致可相互佐证；不机械拆词，"
+                    "不确定则保留歧义。句子译例仅用于对齐所示片段，不照搬例句的参与者、动作或语气；"
+                    "不得套用整条译名或带入未出现的地区、身份等限定；"
+                    "完整命中的默认译名优先。"
+                    + (f"多条参考的共同译词线索：{self._sanitize_glossary_field(shared_hint, 80)}；"
+                       "仅辅助选择，不构成新增术语。" if shared_hint else "")
+                    + "\n"
+                    + "\n".join(partial_reference_lines)
+                )
             if reference_lines:
                 sections.append(
-                    "以下条目仅提供可能相关的设定背景，不构成当前文本中的实体或译名证据；不得据此新增、替换或消歧原文未支持的信息。\n"
+                    "相关条目可供词义与译词参考；对应清楚且语境相符时可复用适用部分，"
+                    "不得认定为同一完整实体或带入原文未出现的限定。\n"
                     "背景参考\n"
                     + "\n".join(reference_lines)
                 )
@@ -655,6 +713,12 @@ class PromptBuilder:
         dropped_in_source = 0
         while reference_lines and len(context) > max_chars:
             reference_lines.pop()
+            dropped_reference += 1
+            context = build_context()
+        while partial_reference_lines and len(context) > max_chars:
+            partial_reference_lines.pop()
+            if partial_reference_hint_values:
+                partial_reference_hint_values.pop()
             dropped_reference += 1
             context = build_context()
         while in_source_lines and len(context) > max_chars:
@@ -921,6 +985,23 @@ class PromptBuilder:
         if max_chars is not None and max_chars > 0 and len(text) > max_chars:
             text = text[:max_chars].rstrip() + "…"
         return text
+
+    @staticmethod
+    def _shared_translation_suffix(values: Any) -> str:
+        """Return a conservative common suffix usable as a translation hint."""
+        cleaned = [re.sub(r"\s+", " ", str(value or "")).strip() for value in values]
+        cleaned = [value for value in cleaned if value]
+        if len(cleaned) < 2:
+            return ""
+        max_width = min(len(value) for value in cleaned)
+        for width in range(max_width, 1, -1):
+            suffix = cleaned[0][-width:]
+            if not all(value.endswith(suffix) for value in cleaned[1:]):
+                continue
+            cjk_count = sum("\u4e00" <= char <= "\u9fff" for char in suffix)
+            if cjk_count >= 2 or (cjk_count >= 1 and len(suffix) >= 3):
+                return suffix
+        return ""
 
     def _compact_glossary_value(self, value: str, max_chars: int) -> str:
         text = re.sub(r"\s+", " ", str(value or "")).strip()

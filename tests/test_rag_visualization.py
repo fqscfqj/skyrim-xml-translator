@@ -244,6 +244,33 @@ def test_selected_long_payload_is_complete_plain_text(qt_app):
         dialog.close()
 
 
+def test_reference_only_recall_is_explicit_in_full_log(qt_app):
+    source = "As your Housecarl, I obey. But let's be discreet."
+    examples = {"What does a housecarl do?": "侍卫的职责是什么？"}
+    debug = {
+        "rag_tasks": ["Housecarl"],
+        "matched_terms": {},
+        "reference_terms": examples,
+        "search_results": [{
+            "query": "Housecarl", "task_limit": 3, "short_limit": 2, "long_limit": 1,
+            "selected_short_count": 0, "selected_long_count": 0,
+            "reference_candidates": list(examples),
+        }],
+    }
+    dialog = RAGVisualizationDialog(None, source, "身为你的侍卫，我遵命。", None,
+                                     cached_debug_info=debug)
+    try:
+        qt_app.processEvents()
+        log = dialog._format_rag_log_text()
+        assert "selected=0+0; references=1" in log
+        assert "Reference-Only Candidates (not mandatory matches)" in log
+        assert "What does a housecarl do?" in log
+        assert "侍卫的职责是什么" in log
+        assert _find_payload_items(dialog.rag_tree, "What does a housecarl do? -> 侍卫的职责是什么？")
+    finally:
+        dialog.close()
+
+
 def test_empty_async_result_is_ready_without_a_second_request(qt_app):
     class _SlowTranslator:
         def __init__(self):

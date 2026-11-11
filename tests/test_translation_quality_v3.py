@@ -5,9 +5,14 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from src.llm.client import ResponseTruncatedError
 from src.prompt.prompt_manager import PromptManager
+from src.rag.engine import RAGEngine
+from src.rag.glossary_manager import GlossaryManager
+from src.rag.keyword_extractor import KeywordExtractor
+from src.rag.search import RAGSearcher
 from src.translation.prompt_builder import PromptBuilder
 from src.translation.quality_checker import QualityChecker
 from src.translation.text_analyzer import TextAnalyzer
@@ -56,6 +61,33 @@ class _FakeRAG:
 
     def get_rich_meta(self, term):
         return dict(self.rich_meta.get(term, {}))
+
+
+class _LocalExtractionRAG(_FakeRAG):
+    """Use production local extraction/search without API or vector storage."""
+
+    def __init__(self, config, glossary):
+        super().__init__(config, glossary=glossary)
+        manager = object.__new__(GlossaryManager)
+        manager.config = config
+        manager.glossary = self.glossary
+        manager.rebuild_lookup()
+        self._keyword_extractor = KeywordExtractor(None, PromptManager(), config, manager)
+        self._searcher = RAGSearcher(
+            SimpleNamespace(terms=[], vectors=None), manager, config, None)
+        self.local_calls = []
+
+    def extract_local_keywords(self, text, log_callback=None, return_debug=False):
+        self.local_calls.append(text)
+        return RAGEngine.extract_local_keywords(
+            self, text, log_callback=log_callback, return_debug=return_debug)
+
+    def search_terms(self, keywords, threshold=None, log_callback=None,
+                     source_text="", return_debug=True):
+        self.search_calls.append(list(keywords))
+        return self._searcher.search(
+            keywords, source_text=source_text, threshold=threshold,
+            return_debug=return_debug, log_callback=log_callback)
 
 
 class _ScriptedLLM:
@@ -466,6 +498,154 @@ class RichMetaTests(unittest.TestCase):
             {"Thane of the Pale": "苍原武卫"},
             result["matched_terms"],
         )
+        self.assertEqual({}, result["reference_terms"])
+
+
+    def test_thane_composite_examples_guide_exact_term_without_adding_scope(self):
+        config = _FakeConfig()
+        glossary = {
+            "Thane": "武卫",
+            "Thane of the Pale": "苍原武卫",
+            "Thane of Falkreath": "佛克瑞斯武卫",
+        }
+        rag = _FakeRAG(
+            config,
+            glossary=glossary,
+            keywords=["Thane"],
+            terms={"Thane": "武卫"},
+            search_debug=[{
+                "query": "Thane",
+                "direct_match": "Thane",
+                "selected_terms": ["Thane"],
+                "reference_candidates": [
+                    "Thane of the Pale", "Thane of Falkreath",
+                ],
+            }],
+        )
+        translator = _make_translator(
+            _ScriptedLLM(['{"translation":"听候您的差遣，武卫。"}']),
+            rag=rag,
+            config=config,
+        )
+
+        result = translator._run_rag_phase(
+            "At your service, Thane.", use_rag=True)
+        self.assertEqual({"Thane": "武卫"}, result["matched_terms"])
+        self.assertEqual(
+            {
+                "Thane of the Pale": "苍原武卫",
+                "Thane of Falkreath": "佛克瑞斯武卫",
+            },
+            result["reference_terms"],
+        )
+        self.assertIn("Thane of the Pale", result["glossary_context"])
+        self.assertIn("Thane of Falkreath", result["glossary_context"])
+        self.assertIn("原文片段：Thane", result["glossary_context"])
+        self.assertIn("不得套用整条译名", result["glossary_context"])
+
+        translation, debug = translator.translate_text(
+            "At your service, Thane.", use_rag=True, max_retries=0,
+            return_debug_info=True,
+        )
+        self.assertEqual("听候您的差遣，武卫。", translation)
+        prompt_sent = translator.llm_client.messages_seen[-1][-1]["content"]
+        self.assertIn("部分匹配参考", prompt_sent)
+        self.assertIn("苍原武卫", prompt_sent)
+        self.assertIn("共同译词线索：武卫", prompt_sent)
+        self.assertEqual({"Thane": "武卫"}, debug["matched_terms"])
+        self.assertIn("Thane of the Pale", debug["reference_terms"])
+
+    def test_partial_examples_without_exact_term_stay_reference_only(self):
+        config = _FakeConfig()
+        rag = _FakeRAG(
+            config,
+            glossary={
+                "Thane of the Pale": "苍原武卫",
+                "Thane of Falkreath": "佛克瑞斯武卫",
+            },
+            keywords=["Thane"],
+            terms={},
+            search_debug=[{
+                "query": "Thane",
+                "reference_candidates": [
+                    "Thane of the Pale", "Thane of Falkreath",
+                ],
+            }],
+        )
+        translator = _make_translator(
+            _ScriptedLLM(['{"translation":"听候您的差遣，武卫。"}']),
+            rag=rag,
+            config=config,
+        )
+
+        translation, debug = translator.translate_text(
+            "At your service, Thane.", use_rag=True, max_retries=0,
+            return_debug_info=True,
+        )
+
+        self.assertEqual("听候您的差遣，武卫。", translation)
+        prompt_sent = translator.llm_client.messages_seen[-1][-1]["content"]
+        self.assertEqual({}, debug["matched_terms"])
+        self.assertIn("Thane of the Pale", debug["reference_terms"])
+        self.assertIn("部分匹配参考", prompt_sent)
+        self.assertIn("原文片段：Thane", prompt_sent)
+        self.assertIn("苍原武卫", prompt_sent)
+        self.assertIn("共同译词线索：武卫", prompt_sent)
+        self.assertIn("不得套用整条译名", prompt_sent)
+        self.assertNotIn("苍原武卫", debug["matched_terms"].values())
+
+
+class SentenceReferenceFlowTests(unittest.TestCase):
+    def test_sentence_examples_reach_actual_translate_call_and_batch_prompt(self):
+        config = _FakeConfig()
+        examples = {
+            "What does a housecarl do?": "侍卫的职责是什么？",
+            "Housecarl! No!": "侍卫！不！",
+        }
+        source = "As your Housecarl, I obey. But let's be discreet."
+        rag = _FakeRAG(config, glossary=examples, keywords=["Housecarl"], terms={},
+                       search_debug=[{"query": "Housecarl", "reference_candidates": list(examples)}])
+        llm = _ScriptedLLM(['{"translation":"身为你的侍卫，我自当遵命。不过我们得低调些。"}'])
+        translator = _make_translator(llm, rag=rag, config=config)
+        _translation, debug = translator.translate_text(
+            source, use_rag=True, return_debug_info=True, max_retries=0)
+        self.assertEqual({}, debug["matched_terms"])
+        self.assertEqual(examples, debug["reference_terms"])
+        self.assertEqual(1, llm.calls)
+        prompt = llm.messages_seen[-1][-1]["content"]
+        self.assertIn("侍卫的职责是什么", prompt)
+        self.assertIn("原文片段：Housecarl", prompt)
+        self.assertIn("不照搬例句的参与者、动作或语气", prompt)
+        _system, batch_prompt = translator._prompt_builder.build_batch([
+            {"id": 0, "text": source, "matched_terms": {}, "reference_terms": examples},
+        ])
+        self.assertIn("侍卫的职责是什么", batch_prompt)
+
+    def test_reference_examples_remain_complete_under_entry_cap(self):
+        builder = PromptBuilder(PromptManager(), _FakeConfig({
+            ("rag", "glossary_entry_max_chars"): 60,
+        }))
+        example = "The veteran followed the winding path beyond the northern gate before reporting to the Housecarl."
+        translation = "老兵沿着蜿蜒的小路穿过北门，随后向侍卫报告。"
+        context = builder.build_glossary_context(
+            "The Housecarl will wait for me.", {}, reference_terms={example: translation})
+        self.assertIn(example.rstrip("."), context)
+        self.assertIn(translation, context)
+        self.assertIn("原文片段：Housecarl", context)
+        self.assertNotIn("原文片段：The", context)
+
+    def test_trimmed_or_sentence_references_do_not_create_suffix_hints(self):
+        refs = {"Northern Housecarl": "北侍卫", "Southern Housecarl": "南侍卫"}
+        builder = PromptBuilder(PromptManager(), _FakeConfig())
+        full = builder.build_glossary_context("Housecarl", {}, reference_terms=refs)
+        builder.config = _FakeConfig({("rag", "glossary_context_max_chars"): len(full) - 1})
+        trimmed = builder.build_glossary_context("Housecarl", {}, reference_terms=refs)
+        self.assertNotIn("Southern Housecarl", trimmed)
+        self.assertNotIn("共同译词线索", trimmed)
+        sentences = {"The Housecarl waits.": "侍卫在这里等着。", "The Housecarl rests.": "侍卫在这里歇着。"}
+        builder.config = _FakeConfig()
+        context = builder.build_glossary_context("Housecarl", {}, reference_terms=sentences)
+        self.assertNotIn("共同译词线索", context)
 
 
 class LocalKeywordPathTests(unittest.TestCase):
@@ -485,6 +665,55 @@ class LocalKeywordPathTests(unittest.TestCase):
         self.assertEqual("生命值", result)
         self.assertEqual(0, rag.extract_calls)
         self.assertEqual([["Health"]], rag.search_calls)
+
+    def test_short_dialogue_extracts_embedded_title_and_reaches_real_prompt(self):
+        entries = {"Thane of the Pale": "苍原武卫", "Thane of Falkreath": "佛克瑞斯武卫"}
+        config = _FakeConfig()
+        rag = _LocalExtractionRAG(config, entries)
+        llm = _ScriptedLLM(['{"translation":"当心，武卫。"}'])
+        translator = _make_translator(llm, rag=rag)
+        source = "On guard, Thane."
+        _translation, debug = translator.translate_text(
+            source, use_rag=True, max_retries=0, return_debug_info=True)
+        self.assertEqual(0, rag.extract_calls)
+        self.assertEqual([source], rag.local_calls)
+        self.assertEqual([["Thane"]], rag.search_calls)
+        self.assertEqual(["Thane"], debug["keywords"])
+        self.assertEqual("short_text_local", debug["keyword_extraction"]["result_source"])
+        self.assertTrue(debug["keyword_extraction"]["finalization_steps"])
+        self.assertEqual(entries, debug["reference_terms"])
+        self.assertEqual({}, debug["matched_terms"])
+        self.assertIn("原文片段：Thane", llm.messages_seen[0][-1]["content"])
+        self.assertIn("共同译词线索：武卫", llm.messages_seen[0][-1]["content"])
+        self.assertEqual(1, llm.calls)
+
+    def test_all_local_fallback_routes_share_keyword_extractor(self):
+        for route in ("index", "circuit", "failure"):
+            with self.subTest(route=route):
+                config = _FakeConfig()
+                rag = _LocalExtractionRAG(config, {"I am your Housecarl.": "我是你的侍卫。"})
+                translator = _make_translator(_ScriptedLLM(['{"translation":"侍卫"}']), rag=rag)
+                source = "As your Housecarl, I obey. But let us be discreet."
+                if route == "index":
+                    rag.get_vector_index_status = lambda: SimpleNamespace(is_ready=False)
+                    result = translator._run_rag_phase(source)
+                    keywords, debug = result["keywords"], result["keyword_debug"]
+                    self.assertEqual("index_unavailable_local", debug["result_source"])
+                else:
+                    if route == "circuit":
+                        translator._keyword_circuit_open_until = time.time() + 60
+                    else:
+                        def fail(*_args, **_kwargs):
+                            rag.extract_calls += 1
+                            raise TimeoutError("keyword unavailable")
+                        rag.extract_keywords = fail
+                    keywords, debug = translator._extract_keywords_with_circuit(source)
+                    expected = "keyword_circuit_local" if route == "circuit" else "keyword_failure_local"
+                    self.assertEqual(expected, debug["result_source"])
+                self.assertEqual(["Housecarl"], keywords)
+                self.assertEqual([source], rag.local_calls)
+                self.assertEqual(1 if route == "failure" else 0, rag.extract_calls)
+                self.assertTrue(debug["finalization_steps"])
 
     def test_short_text_local_path_can_be_disabled(self):
         config = _FakeConfig({("rag", "short_text_local_keywords"): False})
@@ -527,14 +756,14 @@ class LocalKeywordPathTests(unittest.TestCase):
 
         for _ in range(3):
             keywords, debug = translator._extract_keywords_with_circuit("Hello there")
-            self.assertTrue(keywords)
+            self.assertEqual([], keywords)
             self.assertEqual("keyword_failure_local", debug["result_source"])
 
         rag.extract_calls = 0
         keywords, debug = translator._extract_keywords_with_circuit("Hello there")
         self.assertEqual(0, rag.extract_calls)
         self.assertEqual("keyword_circuit_local", debug["result_source"])
-        self.assertIn("Hello there", keywords)
+        self.assertEqual([], keywords)
 
 
 class CachePolicyTests(unittest.TestCase):

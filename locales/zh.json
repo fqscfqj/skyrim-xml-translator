@@ -119,6 +119,7 @@
     "rag_system_prompt": "系统提示词",
     "rag_user_prompt": "用户提示词",
     "rag_glossary_context": "术语表上下文",
+    "rag_reference_terms": "部分匹配参考",
     "rag_none": "（无）",
     "rag_stage_primary": "主搜索模型",
     "rag_stage_fallback": "兜底搜索模型",

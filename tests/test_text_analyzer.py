@@ -442,6 +442,27 @@ class PromptBuilderGlossaryContextTests(unittest.TestCase):
 
         self.assertIn("Follower -> <Alias=NPC> 追随者", context)
 
+    def test_batch_prompt_renders_partial_glossary_references(self):
+        builder = PromptBuilder(_DummyPromptManager(), _DummyConfig())
+
+        _system, user_prompt = builder.build_batch(
+            [{
+                "id": 1,
+                "text": "At your service, Thane.",
+                "matched_terms": {"Thane": "武卫"},
+                "reference_terms": {
+                    "Thane of the Pale": "苍原武卫",
+                    "Thane of Falkreath": "佛克瑞斯武卫",
+                },
+            }],
+        )
+
+        self.assertIn("部分匹配参考", user_prompt)
+        self.assertIn("Thane -> 武卫", user_prompt)
+        self.assertIn("苍原武卫", user_prompt)
+        self.assertIn("原文片段：Thane", user_prompt)
+        self.assertIn("不得套用整条译名", user_prompt)
+
     def test_build_adds_dialogue_whitespace_rule_for_dialogue_text(self):
         # Q-47: relaxed spacing alone is not enough; dialogue rules require
         # dialogue context (text_kind / record type / quoted dialogue).

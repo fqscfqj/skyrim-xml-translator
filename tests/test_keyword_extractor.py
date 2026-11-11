@@ -255,7 +255,7 @@ class KeywordExtractorPromptStructureTests(unittest.TestCase):
         self.assertEqual([], keywords)
         source_filter_step = next(
             step for step in debug["finalization_steps"]
-            if step["phase"] == "llm" and step["name"] == "filter_keyword_is_source_text"
+            if step["phase"] == "llm" and step["name"] == "repair_sentence_keywords"
         )
         self.assertEqual(["Give it to me"], source_filter_step["dropped"])
 

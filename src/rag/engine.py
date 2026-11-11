@@ -442,6 +442,11 @@ class RAGEngine:
             should_pause=lambda: self.pause_flag,
         )
 
+    def extract_local_keywords(self, text, log_callback=None, return_debug: bool = False):
+        return self._keyword_extractor.extract_local(
+            text, log_callback=log_callback, return_debug=return_debug,
+        )
+
     def extract_keywords(self, text, log_callback=None, return_debug: bool = False):
         return self._keyword_extractor.extract(
             text,

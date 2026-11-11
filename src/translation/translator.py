@@ -29,7 +29,7 @@ class _ChunkQualityFailure(RuntimeError):
 
 
 class Translator:
-    _CACHE_POLICY_VERSION = "translation_policy_v3"
+    _CACHE_POLICY_VERSION = "translation_policy_v6"
     _FORMAT_SHELL_VERSION = "format_shell_v1"
     _QUALITY_RULES_VERSION = "quality_rules_v8"
     _GLOSSARY_IMPORT_FORMAT_VERSION = "glossary_import_v1"
@@ -274,6 +274,7 @@ class Translator:
             "keyword_extraction": {},
             "search_results": [],
             "matched_terms": {},
+            "reference_terms": {},
             "glossary_context": "",
             "system_prompt": "",
             "user_prompt": "",
@@ -296,6 +297,7 @@ class Translator:
         debug_info["keyword_extraction"] = rag_result["keyword_debug"]
         debug_info["search_results"] = rag_result["search_debug"]
         debug_info["matched_terms"] = rag_result["matched_terms"]
+        debug_info["reference_terms"] = rag_result.get("reference_terms", {})
         debug_info["glossary_context"] = rag_result["glossary_context"]
 
         prompt_style = self._resolve_prompt_style_for_context(resolved_context_hint)
@@ -305,6 +307,7 @@ class Translator:
             mcm_ui_mode=mcm_ui_mode, context_hint=resolved_context_hint,
             rich_meta=self._collect_rich_meta(debug_info.get("matched_terms", {})),
             previous_source=self._resolve_previous_source(None, context_hint),
+            reference_terms=rag_result.get("reference_terms"),
         )
 
         debug_info["system_prompt"] = system_prompt
@@ -324,6 +327,7 @@ class Translator:
             "keywords": [],
             "keyword_debug": {},
             "matched_terms": {},
+            "reference_terms": {},
             "search_debug": [],
             "glossary_context": "",
         }
@@ -351,17 +355,17 @@ class Translator:
         index_unavailable = self._vector_index_unavailable()
 
         if short_local:
-            # R-34: short labels go straight to deterministic lookup with the
-            # text itself as the query; no keyword LLM call.
-            result["keywords"] = [stripped]
-            result["keyword_debug"] = {"result_source": "short_text_local"}
+            result["keywords"], result["keyword_debug"] = self._local_keywords(
+                text, log_callback=log_callback, return_debug=True)
+            result["keyword_debug"]["result_source"] = "short_text_local"
             log_emit(log_callback, self.rag_engine.config, "DEBUG",
-                     f"[RAG] Short-text local path: query={stripped!r} "
+                     f"[RAG] Short-text local keywords: {result['keywords']!r} "
                      "(keyword LLM skipped)",
                      module="translator", func="_run_rag_phase")
         elif index_unavailable:
-            result["keywords"] = self._local_keywords(text)
-            result["keyword_debug"] = {"result_source": "index_unavailable_local"}
+            result["keywords"], result["keyword_debug"] = self._local_keywords(
+                text, log_callback=log_callback, return_debug=True)
+            result["keyword_debug"]["result_source"] = "index_unavailable_local"
             if not self._index_unavailable_logged:
                 self._index_unavailable_logged = True
                 log_emit(log_callback, self.rag_engine.config, "WARNING",
@@ -398,20 +402,20 @@ class Translator:
         if not isinstance(result["search_debug"], list):
             result["search_debug"] = []
 
-        # Q-55: one canonical matched_terms set for prompt, cache and quality.
-        if not isinstance(result["matched_terms"], dict):
-            result["matched_terms"] = {}
         direct_match_terms = self._direct_match_terms_from_search_debug(
             result["search_debug"]
         )
+        # Q-55: one canonical matched_terms set for prompt, cache and quality.
+        if not isinstance(result["matched_terms"], dict):
+            result["matched_terms"] = {}
         # R-30: expand variants first so an alias that occurs in the source can
         # keep its parent entry (the parent spelling itself may not appear).
-        result["matched_terms"] = self._expand_matched_term_aliases(
+        recalled_terms = self._expand_matched_term_aliases(
             text, result["matched_terms"])
         result["matched_terms"] = self._filter_matched_terms_present_in_source(
-            text,
-            result["matched_terms"],
-            direct_terms=direct_match_terms,
+            text, recalled_terms, direct_terms=direct_match_terms)
+        result["reference_terms"] = self._collect_reference_terms(
+            text, recalled_terms, result["matched_terms"], result["search_debug"],
         )
 
         # Best-effort cache for visualization (shared across threads)
@@ -422,6 +426,7 @@ class Translator:
             "keyword_extraction": result["keyword_debug"],
             "search_results": result["search_debug"],
             "matched_terms": result["matched_terms"],
+            "reference_terms": result["reference_terms"],
         })
 
         try:
@@ -433,11 +438,12 @@ class Translator:
         except Exception:
             pass
 
-        if result["matched_terms"]:
+        if result["matched_terms"] or result["reference_terms"]:
             result["glossary_context"] = self._prompt_builder.build_glossary_context(
                 text,
                 result["matched_terms"],
                 rich_meta=self._collect_rich_meta(result["matched_terms"]),
+                reference_terms=result["reference_terms"],
             )
 
         return result
@@ -596,6 +602,7 @@ class Translator:
             glossary_source_text=source_text,
             previous_source=effective_previous_source,
             rich_meta=rich_meta,
+            reference_terms=rag_result.get("reference_terms"),
         )
 
         debug_info = None
@@ -607,6 +614,7 @@ class Translator:
                 "keyword_extraction": keyword_debug,
                 "search_results": search_debug,
                 "matched_terms": matched_terms,
+                "reference_terms": rag_result.get("reference_terms", {}),
                 "glossary_context": glossary_context,
                 "system_prompt": system_prompt,
                 "user_prompt": user_content,
@@ -1002,6 +1010,7 @@ class Translator:
                 "keyword_debug": rag_result["keyword_debug"],
                 "search_debug": rag_result["search_debug"],
                 "matched_terms": rag_result["matched_terms"],
+                "reference_terms": rag_result.get("reference_terms", {}),
                 "rich_meta": self._collect_rich_meta(rag_result["matched_terms"]),
                 "previous_source": (
                     resolved_context_hint.get("previous_source")
@@ -1090,6 +1099,7 @@ class Translator:
                             "keyword_extraction": item.get("keyword_debug", {}),
                             "search_results": item.get("search_debug", []),
                             "matched_terms": item.get("matched_terms", {}),
+                            "reference_terms": item.get("reference_terms", {}),
                             "glossary_context": item.get("glossary_context", ""),
                             "system_prompt": system_prompt,
                             "user_prompt": user_content,
@@ -1281,6 +1291,7 @@ class Translator:
                 "keyword_extraction": rag_result["keyword_debug"],
                 "search_results": rag_result["search_debug"],
                 "matched_terms": matched_terms,
+                "reference_terms": rag_result.get("reference_terms", {}),
                 "glossary_context": rag_result["glossary_context"],
                 "system_prompt": "",
                 "user_prompt": "",
@@ -1319,6 +1330,7 @@ class Translator:
                 rich_meta=chunk_rich_meta,
                 chunk_index=idx,
                 chunk_total=len(chunks),
+                reference_terms=rag_result.get("reference_terms"),
             )
             if previous_translation:
                 context_snippet = self._truncate_previous_translation(previous_translation, 1000)
@@ -1679,20 +1691,19 @@ class Translator:
                 expanded[alias] = translation
         return expanded
 
-    def _local_keywords(self, text: str) -> list[str]:
-        """R-34/R-40 deterministic fallback: text itself + regex scan."""
+    def _local_keywords(self, text: str, log_callback=None,
+                        return_debug: bool = False):
+        """Share the glossary-grounded extractor across all local paths."""
+        extract = getattr(self.rag_engine, "extract_local_keywords", None)
+        if callable(extract):
+            return extract(text, log_callback=log_callback, return_debug=return_debug)
+        # Compatibility for engines without a local-extraction API: only an
+        # exact glossary entry is grounded, never a guessed sentence query.
         stripped = str(text or "").strip()
-        keywords: list[str] = []
-        if stripped:
-            # Never send an entire long document as one search query.
-            keywords.append(stripped if len(stripped) <= 200 else stripped[:200])
-        for match in re.finditer(r"[A-Z][A-Za-z'\-]{1,}", stripped):
-            word = match.group(0)
-            if word in keywords:
-                continue
-            keywords.append(word)
-            if len(keywords) >= 9:
-                break
+        glossary = getattr(self.rag_engine, "glossary", {})
+        keywords = [stripped] if stripped and stripped in glossary else []
+        if return_debug:
+            return keywords, {"result_source": "local_exact", "final_keywords": list(keywords)}
         return keywords
 
     def _extract_keywords_with_circuit(self, text: str, log_callback=None):
@@ -1707,10 +1718,11 @@ class Translator:
                 self._keyword_circuit_logged = False
                 open_until = 0.0
         if open_until and now < open_until:
-            return self._local_keywords(text), {
-                "result_source": "keyword_circuit_local",
-                "circuit_seconds_left": round(open_until - now, 1),
-            }
+            keywords, debug = self._local_keywords(
+                text, log_callback=log_callback, return_debug=True)
+            debug.update({"result_source": "keyword_circuit_local",
+                          "circuit_seconds_left": round(open_until - now, 1)})
+            return keywords, debug
 
         try:
             keyword_result = self.rag_engine.extract_keywords(
@@ -1741,10 +1753,10 @@ class Translator:
                     module="translator",
                     func="_extract_keywords_with_circuit",
                 )
-            return self._local_keywords(text), {
-                "result_source": "keyword_failure_local",
-                "error": str(exc),
-            }
+            keywords, debug = self._local_keywords(
+                text, log_callback=log_callback, return_debug=True)
+            debug.update({"result_source": "keyword_failure_local", "error": str(exc)})
+            return keywords, debug
 
         with self._keyword_circuit_lock:
             self._keyword_failure_count = 0
@@ -1966,6 +1978,30 @@ class Translator:
                 part, part_translation, target_lang))
         return "".join(results)
 
+    def _collect_reference_terms(self, source_text: str, recalled_terms: dict,
+                                 matched_terms: dict, search_debug: list) -> dict:
+        """Keep partial examples outside the mandatory glossary/QC set."""
+        references = {
+            term: translation for term, translation in recalled_terms.items()
+            if term not in matched_terms
+        }
+        glossary = getattr(self.rag_engine, "glossary", {})
+        if isinstance(glossary, dict):
+            for item in search_debug:
+                if not isinstance(item, dict):
+                    continue
+                query = item.get("query")
+                if not isinstance(query, str) or not self._prompt_builder._term_appears_in_source(query, source_text):
+                    continue
+                candidates = item.get("reference_candidates", [])
+                if not isinstance(candidates, list):
+                    continue
+                for term in candidates[:2]:
+                    if not isinstance(term, str) or term not in glossary or term in matched_terms:
+                        continue
+                    references[term] = glossary[term]
+        return dict(list(references.items())[:8])
+
     @staticmethod
     def _direct_match_terms_from_search_debug(search_debug) -> dict[str, set[str]]:
         direct_terms: dict[str, set[str]] = {}
@@ -2049,6 +2085,7 @@ class Translator:
             "keyword_extraction": {},
             "search_results": [],
             "matched_terms": {},
+            "reference_terms": {},
             "glossary_context": "",
             "system_prompt": "",
             "user_prompt": "",
