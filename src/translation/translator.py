@@ -16,6 +16,8 @@ from src.translation.text_analyzer import TextAnalyzer
 from src.translation.prompt_builder import PromptBuilder
 from src.translation.response_parser import ModelRefusalError, ResponseParser
 from src.translation.quality_checker import QualityChecker, QualityIssue, QualityIssueType
+from src.xml_content import preserve_outer_markup
+from src.safe_xml import etree
 from src.cache.translation_cache import TranslationCache
 from src.logging_helper import emit as log_emit
 from src.llm.retry import ErrorType, classify_error, format_provider_error
@@ -30,6 +32,10 @@ class _ChunkQualityFailure(RuntimeError):
 
 
 class Translator:
+    _SOURCE_MARKUP_TAGS = frozenset({
+        "b", "i", "u", "em", "strong", "font", "br", "span",
+        "sub", "sup", "small", "big", "a",
+    })
     _CACHE_POLICY_VERSION = "translation_policy_v7"
     _FORMAT_SHELL_VERSION = "format_shell_v1"
     _QUALITY_RULES_VERSION = "quality_rules_v9"
@@ -2371,6 +2377,16 @@ class Translator:
                                    source_text: Optional[str] = None,
                                    whitespace_policy: Optional[str] = None) -> str:
         text = "" if translation is None else str(translation)
+        if source_text is not None:
+            try:
+                text = preserve_outer_markup(
+                    str(source_text),
+                    text,
+                    etree,
+                    allowed_tags=self._SOURCE_MARKUP_TAGS,
+                )
+            except Exception:
+                pass
         if self._is_cjk_target_language(target_lang):
             text = self._text_analyzer.normalize_cjk_runtime_tag_spacing(text)
         if source_text is not None and (

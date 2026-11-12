@@ -195,6 +195,17 @@ class QualityCheckerPlaceholderResidueTests(unittest.TestCase):
             issues,
         )
 
+    def test_rejects_missing_opening_tag_with_greater_than_attribute(self):
+        source = '<a title="1 > 0">Hello</a>'
+        translation = '你好</a>'
+
+        issues = self.checker.check(source, translation, target_lang="zh")
+
+        self.assertTrue(
+            any(issue.rule_id == "protected_token_sequence" for issue in issues),
+            issues,
+        )
+
     def test_accepts_cjk_translation_without_spaces_around_runtime_tags(self):
         source = (
             "Tell <Alias.ShortName=Questgiver> what "

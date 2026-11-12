@@ -421,6 +421,75 @@ def _is_valid_xml_fragment(fragment: str, etree_module: Any, nsmap: Any = None) 
         return False
 
 
+def preserve_outer_markup(
+    source: str,
+    translation: str,
+    etree_module: Any,
+    allowed_tags: set[str] | frozenset[str] | None = None,
+) -> str:
+    """Keep a balanced source wrapper around a translated value.
+
+    XML files commonly encode Skyrim book formatting as escaped text, e.g.
+    ``&lt;font ...&gt;``.  After parsing, that looks like text rather than a
+    child element, so a translation that omits the wrapper would otherwise
+    silently lose the formatting.  Only a complete outer XML fragment is
+    restored; literal/partial angle tokens are left untouched.
+    """
+    source_text = "" if source is None else str(source)
+    translated = "" if translation is None else str(translation)
+    source_core = source_text.strip()
+    if not source_core.startswith("<"):
+        return translated
+
+    source_end = _find_balanced_xml_fragment_end(source_core, 0, etree_module)
+    if source_end is None or source_core[source_end:].strip():
+        return translated
+    source_first = _match_tag_token(source_core, 0)
+    if source_first is None or source_first[0] != "open":
+        return translated
+    source_tags = list(_TAG_TOKEN_RE.finditer(source_core[:source_end]))
+    if not source_tags:
+        return translated
+    source_last = source_tags[-1]
+    if not source_last.group("closing") or source_last.group("selfclosing"):
+        return translated
+    source_name = source_first[1].rsplit(":", 1)[-1].lower()
+    if source_last.group("name").rsplit(":", 1)[-1].lower() != source_name:
+        return translated
+    if allowed_tags is not None and source_name not in {
+        str(tag or "").strip().lower().rsplit(":", 1)[-1]
+        for tag in allowed_tags
+    }:
+        return translated
+
+    source_open = source_core[:source_first[2]]
+    source_close = source_last.group(0)
+    translated_core = translated.strip()
+    translated_end = _find_balanced_xml_fragment_end(
+        translated_core, 0, etree_module
+    ) if translated_core.startswith("<") else None
+    if translated_end is not None and not translated_core[translated_end:].strip():
+        translated_first = _match_tag_token(translated_core, 0)
+        translated_tags = list(_TAG_TOKEN_RE.finditer(translated_core[:translated_end]))
+        if translated_first is not None and translated_tags:
+            translated_last = translated_tags[-1]
+            if (
+                translated_first[0] == "open"
+                and translated_last.group("closing")
+                and translated_last.group("name").rsplit(":", 1)[-1].lower()
+                == source_name
+            ):
+                return (
+                    translated[:len(translated) - len(translated.lstrip())]
+                    + source_open
+                    + translated_core[translated_first[2]:translated_last.start()]
+                    + source_close
+                    + translated[len(translated.rstrip()):]
+                )
+
+    return source_open + translated + source_close
+
+
 def _is_formatting_whitespace(text: str, has_children: bool) -> bool:
     if not has_children or not text:
         return False

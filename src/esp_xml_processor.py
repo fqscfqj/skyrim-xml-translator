@@ -18,6 +18,8 @@ from src.safe_xml import (
 from src.xml_content import (
     get_node_inner_content,
     insert_child_like_siblings,
+    node_has_child_elements,
+    preserve_outer_markup,
     set_node_inner_content,
     set_node_text_content,
 )
@@ -238,10 +240,34 @@ class ESPXMLProcessor:
             created = True
 
         existing_content = get_node_inner_content(traduit_node, etree)
+        original_node = _find_child(esp_node, "ORIGINAL")
+        original_content = (
+            get_node_inner_content(original_node, etree)
+            if original_node is not None else ""
+        )
+        source_markup_tags = set(_INLINE_MARKUP_TAGS)
+        if original_node is not None:
+            source_markup_tags.update(
+                _local_name(getattr(child, "tag", "")).lower()
+                for child in original_node.iter()
+                if isinstance(getattr(child, "tag", None), str)
+            )
+        safe_translation = preserve_outer_markup(
+            original_content,
+            safe_translation,
+            etree,
+            allowed_tags=source_markup_tags,
+        )
         if not (overwrite or not str(existing_content or "").strip()):  # 空白统一视为空
             return False
         try:
-            if _has_whitelisted_markup(safe_translation):  # 以译文白名单标签为准
+            # Existing/source child elements indicate that angle-bracket content
+            # is document markup, including tags outside the common inline list.
+            if (
+                node_has_child_elements(original_node)
+                or node_has_child_elements(traduit_node)
+                or _has_whitelisted_markup(safe_translation)
+            ):
                 set_node_inner_content(traduit_node, safe_translation, etree)
             else:
                 set_node_text_content(traduit_node, safe_translation, etree)

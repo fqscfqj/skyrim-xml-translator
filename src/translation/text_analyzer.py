@@ -62,7 +62,13 @@ class TextAnalyzer:
     )
     _PERCENT_LITERAL_PATTERN = r"(?:(?<=[>\d])%|%(?![A-Za-z0-9_]))"
     _BRACKET_TOKEN_PATTERN = r"\[[^\]]{1,4096}\]"
-    _ANGLE_BLOCK_RE = re.compile(r"<[^>]{0,4096}>")
+    # XML/Skyrim tags may contain a literal ``>`` inside a quoted attribute.
+    # Match quoted values as one unit so the opening tag is never truncated.
+    _ANGLE_TOKEN_PATTERN = (
+        r"<(?:(?:[^<>\"']|\"[^\"\r\n]{0,4096}\"|"
+        r"'[^'\r\n]{0,4096}')){1,4096}>"
+    )
+    _ANGLE_BLOCK_RE = re.compile(_ANGLE_TOKEN_PATTERN)
     _XML_TAG_NAME_RE = re.compile(r"^[A-Za-z_][\w:.-]*$")
     _XML_ATTRS_RE = re.compile(
         r'^[A-Za-z_:][\w:.-]*\s*=\s*(?:"[^"]*"|\'[^\']*\'|[^<>\s"\']+)'
@@ -86,7 +92,7 @@ class TextAnalyzer:
     # comment/CDATA scanner separately (``_iter_protected_tokens``).
     _TOKEN_ALTERNATIVES_PATTERN = (
         _FORMAT_SENTINEL_PATTERN
-        + r"|<[^>]{0,4096}>|"
+        + r"|" + _ANGLE_TOKEN_PATTERN + r"|"
         + _PERCENT_PLACEHOLDER_PATTERN
         + r"|"
         + _PERCENT_LITERAL_PATTERN
@@ -122,10 +128,10 @@ class TextAnalyzer:
     )
     _CJK_BEFORE_TAG_RE = re.compile(
         r"(?P<left>[" + _CJK_SPACING_CHARS + r"])(?P<gap>[ \t\u3000]+)"
-        r"(?P<tag><[^>]{0,4096}>)"
+        + r"(?P<tag>" + _ANGLE_TOKEN_PATTERN + r")"
     )
     _CJK_AFTER_TAG_RE = re.compile(
-        r"(?P<tag><[^>]{0,4096}>)(?P<gap>[ \t\u3000]+)"
+        r"(?P<tag>" + _ANGLE_TOKEN_PATTERN + r")(?P<gap>[ \t\u3000]+)"
         r"(?P<right>[" + _CJK_SPACING_CHARS + r"])"
     )
     # Chunk boundary probes, strongest first.  The CJK branch deliberately

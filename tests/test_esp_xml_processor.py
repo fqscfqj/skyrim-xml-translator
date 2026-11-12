@@ -60,6 +60,59 @@ class ESPXMLProcessorInnerContentTests(unittest.TestCase):
         self.assertEqual("TEXT", context["field_type"])
         self.assertEqual("sample_esp.xml", context["source_file"])
 
+    def test_update_dest_preserves_source_font_markup_and_attribute(self):
+        file_path = self._write_fixture(
+            '<?xml version="1.0" encoding="utf-8"?>\n'
+            '<Root><ESP><EDID>BookText</EDID>'
+            '<ORIGINAL>&lt;font face="$HandwrittenFont"&gt;Wait here.&lt;/font&gt;</ORIGINAL>'
+            '<TRADUIT></TRADUIT></ESP></Root>'
+        )
+
+        processor = ESPXMLProcessor()
+        self.assertTrue(processor.load_file(file_path))
+        node = next(processor.get_strings())[0]
+        processor.update_dest(
+            node,
+            '请稍候。',
+            overwrite=True,
+        )
+        self.assertTrue(processor.save_file(file_path))
+
+        reloaded = ESPXMLProcessor()
+        self.assertTrue(reloaded.load_file(file_path))
+        traduit_node = reloaded.root.find('.//TRADUIT')
+        self.assertIsNotNone(traduit_node)
+        self.assertEqual(1, len(list(traduit_node)))
+        self.assertEqual('font', traduit_node[0].tag)
+        self.assertEqual('$HandwrittenFont', traduit_node[0].attrib['face'])
+        self.assertEqual('请稍候。', traduit_node[0].text)
+
+    def test_update_dest_preserves_non_whitelisted_source_markup(self):
+        file_path = self._write_fixture(
+            '<?xml version="1.0" encoding="utf-8"?>\n'
+            '<Root><ESP><EDID>BookText</EDID>'
+            '<ORIGINAL><custom face="$HandwrittenFont">Wait here.</custom></ORIGINAL>'
+            '<TRADUIT></TRADUIT></ESP></Root>'
+        )
+
+        processor = ESPXMLProcessor()
+        self.assertTrue(processor.load_file(file_path))
+        node = next(processor.get_strings())[0]
+        processor.update_dest(
+            node,
+            '请稍候。',
+            overwrite=True,
+        )
+        self.assertTrue(processor.save_file(file_path))
+
+        reloaded = ESPXMLProcessor()
+        self.assertTrue(reloaded.load_file(file_path))
+        traduit_node = reloaded.root.find('.//TRADUIT')
+        self.assertIsNotNone(traduit_node)
+        self.assertEqual(1, len(list(traduit_node)))
+        self.assertEqual('custom', traduit_node[0].tag)
+        self.assertEqual('$HandwrittenFont', traduit_node[0].attrib['face'])
+
     def test_update_dest_round_trips_inline_markup(self):
         file_path = self._write_fixture(
             "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"

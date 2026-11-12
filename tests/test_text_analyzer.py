@@ -90,6 +90,16 @@ class TextAnalyzerPercentProtectionTests(unittest.TestCase):
         self.assertEqual(["<mag>", "%", "<dur>"], self.non_space_tokens(format_tokens))
         self.assertNotIn("% m", format_tokens)
 
+    def test_xml_tag_attributes_with_greater_than_are_protected_as_one_token(self):
+        source = '<a title="1 > 0">Hello</a>'
+
+        shell = self.assert_round_trips(source)
+
+        self.assertEqual(
+            ['<a title="1 > 0">', '</a>'],
+            self.non_space_tokens(shell.tokens),
+        )
+
     def test_runtime_tag_shell_keeps_only_tags_and_cjk_normalizer_removes_manual_spaces(self):
         source = (
             "Tell <Alias.ShortName=Questgiver> what "

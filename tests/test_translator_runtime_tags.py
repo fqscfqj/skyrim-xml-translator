@@ -59,6 +59,20 @@ def _make_translator(llm: _DummyLLMClient, rag_engine: _DummyRAGEngine | None = 
 
 
 class TranslatorRuntimeTagTests(unittest.TestCase):
+    def test_finalize_restores_omitted_source_font_wrapper(self):
+        translator = _make_translator(_DummyLLMClient('{"translation":"请稍候。"}'))
+
+        result = translator._finalize_translation_text(
+            "请稍候。",
+            target_lang="zh",
+            source_text='<font face="$HandwrittenFont">Wait here.</font>',
+        )
+
+        self.assertEqual(
+            '<font face="$HandwrittenFont">请稍候。</font>',
+            result,
+        )
+
     def test_batch_fallback_reuses_precomputed_rag_results(self):
         llm = _SequenceLLMClient([
             '{"translations":[{"id":0,"translation":""},{"id":1,"translation":"再见"}]}',

@@ -60,6 +60,61 @@ class XMLProcessorInnerContentTests(unittest.TestCase):
         self.assertIn("<i>怀疑者</i>", raw_output)
         self.assertIn("&lt;mag&gt;", raw_output)
 
+    def test_update_dest_preserves_source_font_markup_and_attribute(self):
+        file_path = self._write_fixture(
+            '<?xml version="1.0" encoding="utf-8"?>\n'
+            '<Root><String id="1" EDID="BookText">'
+            '<Source>&lt;font face="$HandwrittenFont"&gt;Wait here.&lt;/font&gt;</Source>'
+            '<Dest></Dest>'
+            '</String></Root>'
+        )
+
+        processor = XMLProcessor()
+        self.assertTrue(processor.load_file(file_path))
+        node = next(processor.get_strings())[0]
+        processor.update_dest(
+            node,
+            '请稍候。',
+            overwrite=True,
+        )
+        self.assertTrue(processor.save_file(file_path))
+
+        reloaded = XMLProcessor()
+        self.assertTrue(reloaded.load_file(file_path))
+        dest_node = reloaded.root.find('.//Dest')
+        self.assertIsNotNone(dest_node)
+        self.assertEqual(1, len(list(dest_node)))
+        self.assertEqual('font', dest_node[0].tag)
+        self.assertEqual('$HandwrittenFont', dest_node[0].attrib['face'])
+        self.assertEqual('请稍候。', dest_node[0].text)
+
+    def test_update_dest_preserves_non_whitelisted_source_markup(self):
+        file_path = self._write_fixture(
+            '<?xml version="1.0" encoding="utf-8"?>\n'
+            '<Root><String id="1" EDID="BookText">'
+            '<Source><custom face="$HandwrittenFont">Wait here.</custom></Source>'
+            '<Dest></Dest>'
+            '</String></Root>'
+        )
+
+        processor = XMLProcessor()
+        self.assertTrue(processor.load_file(file_path))
+        node = next(processor.get_strings())[0]
+        processor.update_dest(
+            node,
+            '请稍候。',
+            overwrite=True,
+        )
+        self.assertTrue(processor.save_file(file_path))
+
+        reloaded = XMLProcessor()
+        self.assertTrue(reloaded.load_file(file_path))
+        dest_node = reloaded.root.find('.//Dest')
+        self.assertIsNotNone(dest_node)
+        self.assertEqual(1, len(list(dest_node)))
+        self.assertEqual('custom', dest_node[0].tag)
+        self.assertEqual('$HandwrittenFont', dest_node[0].attrib['face'])
+
     def test_update_dest_keeps_literal_book_tags_as_escaped_text(self):
         file_path = self._write_fixture(
             "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
