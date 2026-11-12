@@ -2,6 +2,8 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from xml.etree import ElementTree
+from xml.sax.saxutils import escape
 
 from src.xml_processor import XMLProcessor
 
@@ -83,10 +85,87 @@ class XMLProcessorInnerContentTests(unittest.TestCase):
         self.assertTrue(reloaded.load_file(file_path))
         dest_node = reloaded.root.find('.//Dest')
         self.assertIsNotNone(dest_node)
-        self.assertEqual(1, len(list(dest_node)))
-        self.assertEqual('font', dest_node[0].tag)
-        self.assertEqual('$HandwrittenFont', dest_node[0].attrib['face'])
-        self.assertEqual('请稍候。', dest_node[0].text)
+        self.assertEqual(0, len(list(dest_node)))
+        self.assertEqual('<font face="$HandwrittenFont">请稍候。</font>', dest_node.text)
+        self.assertEqual(dest_node.text, ElementTree.parse(file_path).find('.//Dest').text)
+        self.assertIn('&lt;font face="$HandwrittenFont"&gt;', Path(file_path).read_text(encoding='utf-8'))
+
+    def test_escaped_nested_markup_round_trips_through_xml_text_consumers(self):
+        source = "<font face='$HandwrittenFont' color='#ffffff'><p align=\"center\">Wait <b>here</b>.</p></font>"
+        file_path = self._write_fixture(
+            f'<Root><String EDID="AmorousAdvJenassaBountyLetter"><Source>{escape(source)}</Source>'
+            '<Dest/></String></Root>'
+        )
+        processor = XMLProcessor()
+        self.assertTrue(processor.load_file(file_path))
+
+        for text in ('请稍候。', '第二次译文。'):
+            with self.subTest(text=text):
+                translation = f'<font face="wrong"><p align="center">{text}<b title="A &amp; B">重点</b></p></font>'
+                expected = f"<font face='$HandwrittenFont' color='#ffffff'><p align=\"center\">{text}<b title=\"A &amp; B\">重点</b></p></font>"
+                node = next(processor.get_strings())[0]
+                self.assertTrue(processor.update_dest(node, translation, overwrite=True))
+                self.assertTrue(processor.save_file())
+                consumer_dest = ElementTree.parse(file_path).find('.//Dest')
+                self.assertEqual(0, len(consumer_dest))
+                self.assertEqual(expected, consumer_dest.text)
+                self.assertIn('&lt;font', Path(file_path).read_text(encoding='utf-8'))
+                processor = XMLProcessor()
+                self.assertTrue(processor.load_file(file_path))
+                self.assertEqual((source, expected), next(processor.get_strings())[2:])
+
+    def test_save_normalizes_legacy_child_dest_only_for_escaped_source(self):
+        source = "<font face='$HandwrittenFont'><p align=\"center\">Wait.</p></font>"
+        legacy_dest = '<font face="$HandwrittenFont"><p align="center">中文 <b title="A &amp; B">重点</b></p></font>尾'
+        expected = "<font face='$HandwrittenFont'><p align=\"center\">中文 <b title=\"A &amp; B\">重点</b></p></font>尾"
+        for save_as in (False, True):
+            with self.subTest(save_as=save_as):
+                file_path = self._write_fixture(
+                    f'<Root><String id="broken"><Source>{escape(source)}</Source><Dest>{legacy_dest}</Dest></String>'
+                    '<String id="mixed"><Source>Before <i>source</i></Source><Dest>旧 <i>译文</i></Dest></String>'
+                    '<String id="cdata-source"><Source><![CDATA[<font>Source</font>]]></Source><Dest><font>旧译文</font></Dest></String>'
+                    f'<String id="cdata-dest"><Source>{escape(source)}</Source><Dest><![CDATA[<font>已有译文</font>]]></Dest></String>'
+                    '</Root>'
+                )
+                original_bytes = Path(file_path).read_bytes()
+                processor = XMLProcessor()
+                self.assertTrue(processor.load_file(file_path))
+                row = next(processor.get_strings())
+                self.assertEqual(legacy_dest, row[3])
+                self.assertEqual(1, len(row[0].find('Dest')))
+                self.assertFalse(processor.update_dest(row[0], '不可覆盖', overwrite=False))
+                self.assertEqual(original_bytes, Path(file_path).read_bytes())
+                target = Path(file_path).with_name('export.xml') if save_as else Path(file_path)
+                self.assertTrue(processor.save_file(str(target)))
+                consumer = ElementTree.parse(target)
+                dest_node = consumer.find('.//String[@id="broken"]/Dest')
+                self.assertEqual(0, len(dest_node))
+                self.assertEqual(expected, dest_node.text)
+                self.assertEqual(1, len(consumer.find('.//String[@id="mixed"]/Dest')))
+                self.assertEqual(1, len(consumer.find('.//String[@id="cdata-source"]/Dest')))
+                self.assertIn('<Dest><![CDATA[<font>已有译文</font>]]></Dest>', target.read_text(encoding='utf-8'))
+                if save_as:
+                    self.assertEqual(original_bytes, Path(file_path).read_bytes())
+                reloaded = XMLProcessor()
+                self.assertTrue(reloaded.load_file(str(target)))
+                self.assertEqual(expected, next(reloaded.get_strings())[3])
+                normalized_bytes = target.read_bytes()
+                self.assertTrue(reloaded.save_file())
+                self.assertEqual(normalized_bytes, target.read_bytes())
+
+    def test_update_marks_shape_only_legacy_dest_normalization_as_changed(self):
+        content = '<font face="$HandwrittenFont">中文</font>'
+        file_path = self._write_fixture(
+            f'<Root><String><Source>{escape(content)}</Source><Dest>{content}</Dest></String></Root>'
+        )
+        processor = XMLProcessor()
+        self.assertTrue(processor.load_file(file_path))
+        node = next(processor.get_strings())[0]
+        self.assertTrue(processor.update_dest(node, content, overwrite=True))
+        self.assertEqual(0, len(node.find('Dest')))
+        self.assertFalse(processor.update_dest(node, content, overwrite=True))
+        self.assertTrue(processor.save_file())
+        self.assertEqual(content, ElementTree.parse(file_path).find('.//Dest').text)
 
     def test_update_dest_preserves_non_whitelisted_source_markup(self):
         file_path = self._write_fixture(

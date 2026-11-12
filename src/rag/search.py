@@ -9,7 +9,7 @@ import numpy as np
 from src.logging_helper import emit as log_emit
 from .deterministic_scan import DeterministicGlossaryScanner
 from .glossary_manager import GlossaryManager
-from .glossary_policy import glossary_translation_issue
+from .glossary_policy import glossary_translation_issue, has_sentence_punctuation
 from .vector_store import VectorStore
 from src.cache.embedding_cache import EmbeddingCache
 
@@ -138,8 +138,14 @@ class RAGSearcher:
             return
         # Filter before longest-match scanning so an untranslated outer phrase
         # cannot hide a translated entity inside it.
+        # The scanner deduplicates normalized spellings. Prefer entity keys
+        # over dialogue punctuation variants before that deduplication.
         scanner.ensure_built(
-            (term for term in glossary if not self._translation_issue(term)), fingerprint,
+            sorted(
+                (term for term in glossary if not self._translation_issue(term)),
+                key=has_sentence_punctuation,
+            ),
+            fingerprint,
         )
         self._scanner_fingerprint = fingerprint
 
@@ -158,7 +164,16 @@ class RAGSearcher:
         per extracted keyword, so the deterministic fallback uses the matching
         aggregate capacity.
         """
-        if not source_text or not self._deterministic_scan_enabled():
+        if not source_text:
+            return results
+        whole_source_term = self._lookup_surface_term(str(source_text).strip())
+        if (whole_source_term and has_sentence_punctuation(whole_source_term)
+                and not self._translation_issue(whole_source_term)
+                and not self._is_low_signal_term(whole_source_term)):
+            limit = short_limit if self._is_short_term_candidate(whole_source_term, short_term_max_chars) else long_limit
+            if limit > 0:
+                return {whole_source_term: self.glossary_manager.glossary[whole_source_term]}
+        if not self._deterministic_scan_enabled():
             return results
         scanner = self._deterministic_scanner
         if scanner is None:
@@ -209,11 +224,7 @@ class RAGSearcher:
             # is that same line; matching it inside a different sentence can
             # distort otherwise natural translation.
             if self._is_sentence_like_term(term):
-                normalized_source = self.glossary_manager.normalize_term_key(
-                    str(source_text or "")
-                )
-                normalized_term = self.glossary_manager.normalize_term_key(term)
-                if not normalized_source or normalized_source != normalized_term:
+                if str(source_text).strip().casefold() != term.strip().casefold():
                     continue
             if self._is_low_signal_term(term):
                 continue
@@ -783,7 +794,7 @@ class RAGSearcher:
         raw = term.strip()
         if not raw:
             return False
-        if "." in raw or "!" in raw or "?" in raw:
+        if has_sentence_punctuation(raw):
             return True
 
         normalized = self.glossary_manager.normalize_term_key(raw)
@@ -794,6 +805,12 @@ class RAGSearcher:
         tokens = [t for t in normalized.split() if t]
         return len(tokens) >= self._SENTENCE_LIKE_TOKEN_LIMIT
 
+    def _lookup_surface_term(self, text: str) -> Optional[str]:
+        if text in self.glossary_manager.glossary:
+            return text
+        lookup = getattr(self.glossary_manager, "lookup_surface", None)
+        return lookup(text) if callable(lookup) else None
+
     def _resolve_direct_match(
             self,
             query: str,
@@ -803,9 +820,10 @@ class RAGSearcher:
         if not query:
             return None
 
-        # 1) Exact glossary key hit.
-        if query in self.glossary_manager.glossary:
-            return query, 1.0
+        # 1) Exact spelling, retaining punctuation across case/width variants.
+        surface_term = self._lookup_surface_term(query)
+        if surface_term:
+            return surface_term, 1.0
 
         # 2) Normalized lookup.
         normalized_query = self.glossary_manager.normalize_term_key(query)
@@ -815,6 +833,8 @@ class RAGSearcher:
         for lookup_key in lookup_variants:
             candidate = self.glossary_manager.lookup_normalized(lookup_key)
             if not candidate:
+                continue
+            if self._is_sentence_like_term(candidate) and not self._raw_term_appears_in_source(candidate, source_text):
                 continue
 
             # 3) Keep only if surface form matches, candidate appears in source,
@@ -972,8 +992,18 @@ class RAGSearcher:
             term_norm = self.glossary_manager.normalize_term_key(term)
             term_tokens = term_norm.split()
             target_norm = self.glossary_manager.normalize_term_key(translation)
-            if not 1 < len(term_tokens) <= 40 or len(target_norm.split()) > 40:
+            single_dialogue_variant = (
+                len(term_tokens) == 1 and term_norm == normalized
+                and has_sentence_punctuation(term)
+            )
+            if (not term_tokens or len(term_tokens) > 40 or len(target_norm.split()) > 40
+                    or (len(term_tokens) == 1 and not single_dialogue_variant)):
                 continue
+            if single_dialogue_variant:
+                clean_term = self.glossary_manager.lookup_normalized(normalized)
+                if (clean_term and not has_sentence_punctuation(clean_term)
+                        and not self._translation_issue(clean_term)):
+                    continue
             # A multiword keyword must occur as a full contiguous phrase.
             if not any(self._is_query_contained_in_term(value, term_norm) for value in variants):
                 continue
@@ -1404,9 +1434,10 @@ class RAGSearcher:
                 if not term:
                     return
                 normalized = self.glossary_manager.normalize_term_key(term)
-                canonical_term = self.glossary_manager.lookup_normalized(normalized)
-                if canonical_term is None:
+                if term in self.glossary_manager.glossary:
                     canonical_term = term
+                else:
+                    canonical_term = self.glossary_manager.lookup_normalized(normalized) or term
                 if canonical_term not in self.glossary_manager.glossary:
                     if return_debug:
                         record_candidate_decision(
@@ -1433,23 +1464,13 @@ class RAGSearcher:
                     if return_debug:
                         sentence_like_candidate_terms.add(canonical_term)
                     if not self._raw_term_appears_in_source(canonical_term, source_text):
-                        # Allow through if the query (from source) matches the
-                        # canonical term after normalization — the only difference
-                        # is trailing punctuation (e.g. "Brurid" vs "Brurid?").
-                        normalized_canonical = self.glossary_manager.normalize_term_key(canonical_term)
-                        if not (
-                            query_norm
-                            and normalized_canonical
-                            and query_norm == normalized_canonical
-                            and self._raw_term_appears_in_source(query, source_text)
-                        ):
-                            sentence_like_filtered_count += 1
-                            if return_debug:
-                                record_candidate_decision(
-                                    term, raw_score, "rejected", "sentence_like_not_in_source",
-                                    canonical_term=canonical_term, source=candidate_source,
-                                )
-                            return
+                        sentence_like_filtered_count += 1
+                        if return_debug:
+                            record_candidate_decision(
+                                term, raw_score, "rejected", "sentence_like_not_in_source",
+                                canonical_term=canonical_term, source=candidate_source,
+                            )
+                        return
                 if not direct and raw_score < 1.0 and not self._has_signal_overlap(query, canonical_term):
                     if return_debug:
                         record_candidate_decision(

@@ -73,6 +73,37 @@ def node_has_child_elements(node: Any) -> bool:
     return bool(list(node))
 
 
+def node_uses_escaped_markup(node: Any, etree_module: Any) -> bool:
+    """Identify literal game markup, without changing mixed XML or CDATA policy."""
+    if node is None or node_has_child_elements(node):
+        return False
+    text = node.text or ""
+    return (
+        "<" in text
+        and _TAG_TOKEN_RE.search(text) is not None
+        and not _node_text_uses_cdata(node, etree_module)
+    )
+
+
+def normalize_escaped_markup_dest(source: Any, dest: Any, etree_module: Any) -> bool:
+    """Repair legacy element destinations whose source stores markup as text."""
+    if not node_has_child_elements(dest) or not node_uses_escaped_markup(source, etree_module):
+        return False
+    content = get_node_inner_content(dest, etree_module)
+    source_first = _match_tag_token((source.text or "").lstrip(), 0)
+    dest_first = _match_tag_token(content, 0)
+    if source_first and dest_first and source_first[1] == dest_first[1]:
+        fragment_end = _find_balanced_xml_fragment_end(content, 0, etree_module)
+        if fragment_end is not None:
+            # Restore source wrapper spelling without moving any destination tail.
+            content = (
+                preserve_outer_markup(source.text, content[:fragment_end], etree_module)
+                + content[fragment_end:]
+            )
+    set_node_text_content(dest, content, etree_module)
+    return True
+
+
 def insert_child_like_siblings(parent: Any, tag_name: str, etree_module: Any) -> Any:
     """Append a new child element that follows its siblings' indentation (X-06).
 
@@ -128,11 +159,14 @@ def set_node_text_content(node: Any, value: str, etree_module: Any = None) -> No
     _assign_node_text(node, content, etree_module, preserve_cdata=preserve_cdata)
 
 
-def set_node_inner_content(node: Any, value: str, etree_module: Any) -> None:
-    """Replace node inner content, preserving balanced child XML fragments as elements.
+def set_node_inner_content(
+    node: Any, value: str, etree_module: Any, *, text_only: bool = False
+) -> None:
+    """Replace node content, restoring balanced fragments unless *text_only*.
 
     Unbalanced angle-bracket tokens such as ``<mag>`` are treated as literal text,
     while balanced XML fragments such as ``<p>...</p>`` are restored as children.
+    ``text_only=True`` preserves a source's escaped game-markup semantics.
 
     CDATA consistency (X-05): a node whose text is a CDATA section has *text*
     semantics, not element semantics.  A CDATA section cannot contain elements,
@@ -153,6 +187,11 @@ def set_node_inner_content(node: Any, value: str, etree_module: Any) -> None:
         if _MARKUP_LIKE_RE.search(content):
             _warn_cdata_text_semantics(content)
         _assign_node_text(node, content, etree_module, preserve_cdata=True)
+        return
+
+    if text_only:
+        _clear_node_children(node)
+        node.text = content
         return
 
     nsmap = getattr(node, "nsmap", None)  # fragment校验继承父nsmap

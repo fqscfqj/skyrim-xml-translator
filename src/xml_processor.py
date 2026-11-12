@@ -19,6 +19,8 @@ from src.xml_content import (
     get_node_inner_content,
     insert_child_like_siblings,
     node_has_child_elements,
+    node_uses_escaped_markup,
+    normalize_escaped_markup_dest,
     preserve_outer_markup,
     set_node_inner_content,
     set_node_text_content,
@@ -173,8 +175,9 @@ class XMLProcessor:
     Byte fidelity (X-01): ``load_file`` records the original file's sha256,
     declaration bytes, BOM, newline style, trailing-newline flag and encoding.
     When no ``<Dest>`` was changed, ``save_file`` does not rewrite the document
-    at all (the original bytes stay on disk); when something changed it
-    re-serializes the tree and puts the recorded declaration/BOM/EOLs back.
+    at all (the original bytes stay on disk), except to repair a legacy element
+    destination paired with escaped source markup. Modified saves re-serialize
+    the tree and put the recorded declaration/BOM/EOLs back.
 
     Known limits that are *not* preserved on a modified save: ``<Dest></Dest>``
     is written as ``<Dest/>``, character references such as ``&#160;`` become
@@ -259,9 +262,10 @@ class XMLProcessor:
 
         Semantics:
 
-        * Ordinary ``<Dest>`` receives real child elements for whitelisted
-          inline markup (``<font>``, ``<i>``, ...) and escaped literal text for
-          anything else.
+        * Escaped markup in ``<Source>`` stays text in ``<Dest>``, even when
+          an older destination contains real child elements. Otherwise ordinary
+          destinations receive child elements for whitelisted inline markup
+          (``<font>``, ``<i>``, ...) and escaped text for anything else.
         * CDATA ``<Dest>`` keeps *text* semantics: inline markup is stored as
           literal CDATA text and a WARNING is logged (X-05), because a CDATA
           section cannot contain elements.
@@ -281,6 +285,7 @@ class XMLProcessor:
             created = True
 
         existing_content = get_node_inner_content(dest_node, etree)
+        existing_has_children = node_has_child_elements(dest_node)
         source_node = _find_child(string_node, "Source")
         source_content = get_node_inner_content(source_node, etree) if source_node is not None else ""
         source_markup_tags = set(_INLINE_MARKUP_TAGS)
@@ -299,11 +304,12 @@ class XMLProcessor:
         if not (overwrite or not str(existing_content or "").strip()):  # 空白统一视为空
             return False
         try:
-            # Existing/source child elements indicate that angle-bracket content
-            # is document markup, including tags outside the common inline list.
-            if (
+            # Source text markup takes precedence over legacy child destinations.
+            if node_uses_escaped_markup(source_node, etree):
+                set_node_inner_content(dest_node, safe_translation, etree, text_only=True)
+            elif (
                 node_has_child_elements(source_node)
-                or node_has_child_elements(dest_node)
+                or existing_has_children
                 or _has_whitelisted_markup(safe_translation)
             ):
                 set_node_inner_content(dest_node, safe_translation, etree)
@@ -317,7 +323,11 @@ class XMLProcessor:
                     pass
             raise  # P0-04 向上抛错，由调用方标记该行失败
 
-        changed = created or get_node_inner_content(dest_node, etree) != existing_content
+        changed = (
+            created
+            or get_node_inner_content(dest_node, etree) != existing_content
+            or node_has_child_elements(dest_node) != existing_has_children
+        )
         if changed:
             self._dirty = True
         return changed
@@ -331,12 +341,13 @@ class XMLProcessor:
         self._dirty = True
 
     def save_file(self, output_path=None) -> bool:
-        """Save the document, byte-for-byte unchanged when nothing was edited.
+        """Save, keeping original bytes unless edited or repairing legacy markup.
 
         X-01: with no modified ``<Dest>`` the original bytes are kept (same path
-        means no write at all, a save-as copies the bytes).  Modified documents
-        keep their declaration, BOM, newline style and trailing newline.
-        X-03: a successful save-as switches the write target.
+        means no write at all, a save-as copies the bytes). Legacy element
+        destinations paired with escaped source markup are normalized first.
+        Modified documents keep their declaration, BOM, newline style and
+        trailing newline. X-03: a successful save-as switches the write target.
         """
         target = str(output_path or self.file_path or "").strip() or None
         if target is None:
@@ -347,6 +358,12 @@ class XMLProcessor:
         same_target = _same_path(target, source)
         cfg = _config_manager()
         self.last_save_warnings = []
+
+        for string_node in _iter_by_localname(self.root, "String"):
+            if normalize_escaped_markup_dest(
+                _find_child(string_node, "Source"), _find_child(string_node, "Dest"), etree
+            ):
+                self._dirty = True
 
         payload: Optional[bytes] = None
         if not self._dirty:

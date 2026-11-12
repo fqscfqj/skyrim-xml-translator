@@ -19,6 +19,8 @@ from src.xml_content import (
     get_node_inner_content,
     insert_child_like_siblings,
     node_has_child_elements,
+    node_uses_escaped_markup,
+    normalize_escaped_markup_dest,
     preserve_outer_markup,
     set_node_inner_content,
     set_node_text_content,
@@ -148,8 +150,9 @@ class ESPXMLProcessor:
 
     Byte fidelity (X-01) matches :class:`src.xml_processor.XMLProcessor`:
     ``load_file`` records sha256/declaration/BOM/newline/trailing/encoding, an
-    unchanged document is never rewritten, and a modified document keeps those
-    byte-level traits.  CDATA ``<TRADUIT>`` keeps text semantics (X-05), new
+    unchanged document is never rewritten unless it has legacy element
+    destinations paired with escaped source markup; a modified document keeps
+    those byte-level traits. CDATA ``<TRADUIT>`` keeps text semantics (X-05), new
     ``<TRADUIT>`` nodes follow sibling indentation (X-06), a node from a
     previous load raises ``StaleNodeError`` (X-11), and load failures report the
     real reason through ``load_failed`` (X-10).
@@ -240,6 +243,7 @@ class ESPXMLProcessor:
             created = True
 
         existing_content = get_node_inner_content(traduit_node, etree)
+        existing_has_children = node_has_child_elements(traduit_node)
         original_node = _find_child(esp_node, "ORIGINAL")
         original_content = (
             get_node_inner_content(original_node, etree)
@@ -261,11 +265,12 @@ class ESPXMLProcessor:
         if not (overwrite or not str(existing_content or "").strip()):  # 空白统一视为空
             return False
         try:
-            # Existing/source child elements indicate that angle-bracket content
-            # is document markup, including tags outside the common inline list.
-            if (
+            # Source text markup takes precedence over legacy child destinations.
+            if node_uses_escaped_markup(original_node, etree):
+                set_node_inner_content(traduit_node, safe_translation, etree, text_only=True)
+            elif (
                 node_has_child_elements(original_node)
-                or node_has_child_elements(traduit_node)
+                or existing_has_children
                 or _has_whitelisted_markup(safe_translation)
             ):
                 set_node_inner_content(traduit_node, safe_translation, etree)
@@ -279,7 +284,11 @@ class ESPXMLProcessor:
                     pass
             raise  # P0-04 向上抛错，由调用方标记该行失败
 
-        changed = created or get_node_inner_content(traduit_node, etree) != existing_content
+        changed = (
+            created
+            or get_node_inner_content(traduit_node, etree) != existing_content
+            or node_has_child_elements(traduit_node) != existing_has_children
+        )
         if changed:
             self._dirty = True
         return changed
@@ -293,7 +302,7 @@ class ESPXMLProcessor:
         self._dirty = True
 
     def save_file(self, output_path=None) -> bool:
-        """Save with X-01 byte fidelity; a save-as switches the write target."""
+        """Save with X-01 fidelity, repairing legacy escaped-markup mismatches."""
         target = str(output_path or self.file_path or "").strip() or None
         if target is None:
             return False
@@ -303,6 +312,12 @@ class ESPXMLProcessor:
         same_target = _same_path(target, source)
         cfg = _config_manager()
         self.last_save_warnings = []
+
+        for esp_node in _iter_by_localname(self.root, "ESP"):
+            if normalize_escaped_markup_dest(
+                _find_child(esp_node, "ORIGINAL"), _find_child(esp_node, "TRADUIT"), etree
+            ):
+                self._dirty = True
 
         payload: Optional[bytes] = None
         if not self._dirty:

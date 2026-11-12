@@ -9,6 +9,12 @@ _CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]")
 _LATIN_RE = re.compile(r"[A-Za-z]")
 _ACRONYM_RE = re.compile(r"[A-Z][A-Z0-9]{1,7}")
 _IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9]*(?:[_.:-][A-Za-z0-9]+)*")
+_SENTENCE_PUNCTUATION_RE = re.compile(r"[.!?\u3002\uff01\uff1f\u2026]")
+
+
+def has_sentence_punctuation(text: Any) -> bool:
+    """Distinguish dialogue examples from punctuation-free entity keys."""
+    return bool(_SENTENCE_PUNCTUATION_RE.search(str(text or "")))
 
 
 def glossary_translation_issue(term: Any, translation: Any,

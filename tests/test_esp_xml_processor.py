@@ -1,6 +1,8 @@
 import tempfile
 import unittest
 from pathlib import Path
+from xml.etree import ElementTree
+from xml.sax.saxutils import escape
 
 from src.esp_xml_processor import ESPXMLProcessor
 
@@ -82,10 +84,87 @@ class ESPXMLProcessorInnerContentTests(unittest.TestCase):
         self.assertTrue(reloaded.load_file(file_path))
         traduit_node = reloaded.root.find('.//TRADUIT')
         self.assertIsNotNone(traduit_node)
-        self.assertEqual(1, len(list(traduit_node)))
-        self.assertEqual('font', traduit_node[0].tag)
-        self.assertEqual('$HandwrittenFont', traduit_node[0].attrib['face'])
-        self.assertEqual('请稍候。', traduit_node[0].text)
+        self.assertEqual(0, len(list(traduit_node)))
+        self.assertEqual('<font face="$HandwrittenFont">请稍候。</font>', traduit_node.text)
+        self.assertEqual(traduit_node.text, ElementTree.parse(file_path).find('.//TRADUIT').text)
+        self.assertIn('&lt;font face="$HandwrittenFont"&gt;', Path(file_path).read_text(encoding='utf-8'))
+
+    def test_escaped_nested_markup_round_trips_through_xml_text_consumers(self):
+        source = "<font face='$HandwrittenFont' color='#ffffff'><p align=\"center\">Wait <b>here</b>.</p></font>"
+        file_path = self._write_fixture(
+            f'<Root><ESP><EDID>AmorousAdvJenassaBountyLetter</EDID><ORIGINAL>{escape(source)}</ORIGINAL>'
+            '<TRADUIT/></ESP></Root>'
+        )
+        processor = ESPXMLProcessor()
+        self.assertTrue(processor.load_file(file_path))
+
+        for text in ('请稍候。', '第二次译文。'):
+            with self.subTest(text=text):
+                translation = f'<font face="wrong"><p align="center">{text}<b title="A &amp; B">重点</b></p></font>'
+                expected = f"<font face='$HandwrittenFont' color='#ffffff'><p align=\"center\">{text}<b title=\"A &amp; B\">重点</b></p></font>"
+                node = next(processor.get_strings())[0]
+                self.assertTrue(processor.update_dest(node, translation, overwrite=True))
+                self.assertTrue(processor.save_file())
+                consumer_dest = ElementTree.parse(file_path).find('.//TRADUIT')
+                self.assertEqual(0, len(consumer_dest))
+                self.assertEqual(expected, consumer_dest.text)
+                self.assertIn('&lt;font', Path(file_path).read_text(encoding='utf-8'))
+                processor = ESPXMLProcessor()
+                self.assertTrue(processor.load_file(file_path))
+                self.assertEqual((source, expected), next(processor.get_strings())[2:])
+
+    def test_save_normalizes_legacy_child_dest_only_for_escaped_source(self):
+        source = "<font face='$HandwrittenFont'><p align=\"center\">Wait.</p></font>"
+        legacy_dest = '<font face="$HandwrittenFont"><p align="center">中文 <b title="A &amp; B">重点</b></p></font>尾'
+        expected = "<font face='$HandwrittenFont'><p align=\"center\">中文 <b title=\"A &amp; B\">重点</b></p></font>尾"
+        for save_as in (False, True):
+            with self.subTest(save_as=save_as):
+                file_path = self._write_fixture(
+                    f'<Root><ESP id="broken"><ORIGINAL>{escape(source)}</ORIGINAL><TRADUIT>{legacy_dest}</TRADUIT></ESP>'
+                    '<ESP id="mixed"><ORIGINAL>Before <i>source</i></ORIGINAL><TRADUIT>旧 <i>译文</i></TRADUIT></ESP>'
+                    '<ESP id="cdata-source"><ORIGINAL><![CDATA[<font>Source</font>]]></ORIGINAL><TRADUIT><font>旧译文</font></TRADUIT></ESP>'
+                    f'<ESP id="cdata-dest"><ORIGINAL>{escape(source)}</ORIGINAL><TRADUIT><![CDATA[<font>已有译文</font>]]></TRADUIT></ESP>'
+                    '</Root>'
+                )
+                original_bytes = Path(file_path).read_bytes()
+                processor = ESPXMLProcessor()
+                self.assertTrue(processor.load_file(file_path))
+                row = next(processor.get_strings())
+                self.assertEqual(legacy_dest, row[3])
+                self.assertEqual(1, len(row[0].find('TRADUIT')))
+                self.assertFalse(processor.update_dest(row[0], '不可覆盖', overwrite=False))
+                self.assertEqual(original_bytes, Path(file_path).read_bytes())
+                target = Path(file_path).with_name('export.xml') if save_as else Path(file_path)
+                self.assertTrue(processor.save_file(str(target)))
+                consumer = ElementTree.parse(target)
+                dest_node = consumer.find('.//ESP[@id="broken"]/TRADUIT')
+                self.assertEqual(0, len(dest_node))
+                self.assertEqual(expected, dest_node.text)
+                self.assertEqual(1, len(consumer.find('.//ESP[@id="mixed"]/TRADUIT')))
+                self.assertEqual(1, len(consumer.find('.//ESP[@id="cdata-source"]/TRADUIT')))
+                self.assertIn('<TRADUIT><![CDATA[<font>已有译文</font>]]></TRADUIT>', target.read_text(encoding='utf-8'))
+                if save_as:
+                    self.assertEqual(original_bytes, Path(file_path).read_bytes())
+                reloaded = ESPXMLProcessor()
+                self.assertTrue(reloaded.load_file(str(target)))
+                self.assertEqual(expected, next(reloaded.get_strings())[3])
+                normalized_bytes = target.read_bytes()
+                self.assertTrue(reloaded.save_file())
+                self.assertEqual(normalized_bytes, target.read_bytes())
+
+    def test_update_marks_shape_only_legacy_dest_normalization_as_changed(self):
+        content = '<font face="$HandwrittenFont">中文</font>'
+        file_path = self._write_fixture(
+            f'<Root><ESP><ORIGINAL>{escape(content)}</ORIGINAL><TRADUIT>{content}</TRADUIT></ESP></Root>'
+        )
+        processor = ESPXMLProcessor()
+        self.assertTrue(processor.load_file(file_path))
+        node = next(processor.get_strings())[0]
+        self.assertTrue(processor.update_dest(node, content, overwrite=True))
+        self.assertEqual(0, len(node.find('TRADUIT')))
+        self.assertFalse(processor.update_dest(node, content, overwrite=True))
+        self.assertTrue(processor.save_file())
+        self.assertEqual(content, ElementTree.parse(file_path).find('.//TRADUIT').text)
 
     def test_update_dest_preserves_non_whitelisted_source_markup(self):
         file_path = self._write_fixture(

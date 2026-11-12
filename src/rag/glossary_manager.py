@@ -16,6 +16,7 @@ from typing import Any, Dict, Optional
 
 from src.logging_helper import emit as log_emit
 from src.rag.glossary_import import is_numeric_identity_mapping
+from src.rag.glossary_policy import has_sentence_punctuation
 
 # Process-wide lock serializing glossary mutations and disk writes.  All
 # GlossaryManager instances in this process share it: two managers pointed at
@@ -95,6 +96,7 @@ class GlossaryManager:
         self.sidecar_path = self._derive_sidecar_path(glossary_path)
         self.glossary: dict[str, str] = {}
         self._glossary_lookup: dict[str, str] = {}
+        self._surface_lookup: dict[str, str] = {}
         self._term_token_index: Dict[str, list[str]] = {}
         self._reference_token_index: Dict[str, list[str]] = {}
         self._token_df: Dict[str, int] = {}
@@ -147,6 +149,17 @@ class GlossaryManager:
         cleaned = self._WHITESPACE_RE.sub(" ", cleaned).strip()
         return cleaned
 
+    @staticmethod
+    def normalize_surface_key(text: str) -> str:
+        """Fold case/width while retaining every punctuation character."""
+        return unicodedata.normalize("NFKC", str(text or "")).strip().casefold()
+
+    def lookup_surface(self, text: str) -> Optional[str]:
+        """Resolve a complete spelling without conflating dialogue punctuation."""
+        if text in self.glossary:
+            return text
+        return self._surface_lookup.get(self.normalize_surface_key(text))
+
     def lookup_normalized(self, normalized: str) -> Optional[str]:
         """Return the canonical glossary term for a normalized key, or None."""
         return self._glossary_lookup.get(normalized)
@@ -178,27 +191,34 @@ class GlossaryManager:
     def rebuild_lookup(self) -> None:
         """Build a normalized lookup map for instant exact hits."""
         lookup = {}
+        surface_lookup = {}
         term_token_index: Dict[str, list[str]] = {}
         reference_token_index: Dict[str, list[str]] = {}
         refcount: Dict[str, int] = {}
         for term in self.glossary.keys():
+            surface_lookup.setdefault(self.normalize_surface_key(term), term)
             normalized = self.normalize_term_key(term)
             if not normalized:
                 continue
             refcount[normalized] = refcount.get(normalized, 0) + 1
             if normalized not in lookup:
                 lookup[normalized] = term
-            else:
-                if lookup[normalized] != term:
-                    log_emit(None, self.config, "WARNING",
-                             f"Glossary normalized collision '{normalized}': "
-                             f"keeping '{lookup[normalized]}', ignoring alias '{term}'",
-                             module="glossary_manager", func="rebuild_lookup")
+            elif lookup[normalized] != term:
+                # A dialogue row such as "Gerdur!" is not the default spelling
+                # of the entity "Gerdur", regardless of glossary import order.
+                if (has_sentence_punctuation(lookup[normalized])
+                        and not has_sentence_punctuation(term)):
+                    lookup[normalized] = term
+                log_emit(None, self.config, "WARNING",
+                         f"Glossary normalized collision '{normalized}': "
+                         f"using '{lookup[normalized]}' as lookup default",
+                         module="glossary_manager", func="rebuild_lookup")
             for token in set(self._term_index_tokens(term)):
                 term_token_index.setdefault(token, []).append(term)
             for token in set(self._reference_index_tokens(term, self.glossary[term])):
                 reference_token_index.setdefault(token, []).append(term)
         self._glossary_lookup = lookup
+        self._surface_lookup = surface_lookup
         self._term_token_index = term_token_index
         self._reference_token_index = reference_token_index
         self._rich_refcount = refcount

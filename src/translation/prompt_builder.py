@@ -5,7 +5,7 @@ from typing import Any, Optional
 
 from src.logging_helper import emit as log_emit
 from src.rag.glossary_manager import GlossaryManager
-from src.rag.glossary_policy import glossary_translation_issue
+from src.rag.glossary_policy import glossary_translation_issue, has_sentence_punctuation
 from src.translation.style_profiles import ResolvedStyleProfile, StyleProfileResolver
 from src.translation.text_analyzer import TextAnalyzer
 
@@ -571,7 +571,9 @@ class PromptBuilder:
             if glossary_translation_issue(term, translation, target_language):
                 continue
             v_str = "" if translation is None else str(translation)
-            raw_display_term = self._strip_term_edge_punct(term) or term
+            # Keep both sides intact. Removing only the source's punctuation
+            # turns a dialogue example into a falsely authoritative name.
+            raw_display_term = term.strip()
             # Reference-index rows are already bounded complete bilingual
             # examples.  Keep them intact so the queried fragment and its
             # aligned translation cannot be truncated by the term-entry cap.
@@ -847,6 +849,7 @@ class PromptBuilder:
                 "被命名、定义、评价或讨论的词语按句中功能翻译。"
                 "专名优先采用可靠术语，无可靠译名时使用一致的目标语言音译或约定转写；"
                 "仅格式标记、内部标识符、约定缩写或明确要求展示的原拼写可保留。"
+                "人名译词与对白标点分开处理，参考条目的感叹号、问号或省略号不得带入原文没有该语气的位置。"
                 "完整保留受保护标记的数量和结构关系；__FMT_*__ 和有序占位符保持必要顺序。"
                 "方括号括注即使位于段落内部，也须逐字保留外围符号：[]、［］、【】不得互换；"
                 "只翻译其中的自然语言，[pagebreak] 等控制标记整体不变。"
@@ -900,9 +903,12 @@ class PromptBuilder:
         term = str(term).strip()
         if not term:
             return False
-        stripped = self._strip_term_edge_punct(term)
-        if stripped:
-            term = stripped
+        # Sentence punctuation is evidence, not removable name decoration.
+        # "Gerdur!" must not count as an inline occurrence of "Gerdur".
+        if not has_sentence_punctuation(term):
+            stripped = self._strip_term_edge_punct(term)
+            if stripped:
+                term = stripped
 
         # Judge on visible text with tags/placeholders stripped.
         try:

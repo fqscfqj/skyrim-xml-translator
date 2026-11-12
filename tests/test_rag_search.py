@@ -789,10 +789,9 @@ class RAGSearchCandidateRejectionDebugTests(unittest.TestCase):
 
 
 class RAGSearchGlossaryKeyPunctuationDirectMatchTests(unittest.TestCase):
-    """Glossary keys with extra punctuation (e.g. '?') should still match
-    when the source text contains the token without that punctuation."""
+    """Punctuated dialogue examples must not become unpunctuated entity defaults."""
 
-    def test_query_without_question_mark_matches_glossary_key_with_question_mark(self):
+    def test_question_mark_variant_is_reference_only_without_source_punctuation(self):
         glossary = _DummyGlossaryManager({
             "Brurid?": "布瑞德？",
             "Stalleo": "斯塔莱奥",
@@ -820,8 +819,9 @@ class RAGSearchGlossaryKeyPunctuationDirectMatchTests(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(results["Brurid?"], "布瑞德？")
-        self.assertEqual(debug[0]["direct_match"], "Brurid?")
+        self.assertNotIn("Brurid?", results)
+        self.assertIsNone(debug[0]["direct_match"])
+        self.assertIn("Brurid?", debug[0]["reference_candidates"])
 
     def test_glossary_key_not_matched_when_query_absent_from_source(self):
         """A query that does not appear in source text should NOT match
@@ -855,7 +855,7 @@ class RAGSearchGlossaryKeyPunctuationDirectMatchTests(unittest.TestCase):
         self.assertNotIn("Brurid?", results)
         self.assertIsNone(debug[0]["direct_match"])
 
-    def test_glossary_key_with_dot_matches_source_without_dot(self):
+    def test_dot_variant_remains_reference_without_source_dot(self):
         glossary = _DummyGlossaryManager({
             "M'aiq.": "麦'奎。",
         })
@@ -882,8 +882,9 @@ class RAGSearchGlossaryKeyPunctuationDirectMatchTests(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(results["M'aiq."], "麦'奎。")
-        self.assertEqual(debug[0]["direct_match"], "M'aiq.")
+        self.assertNotIn("M'aiq.", results)
+        self.assertIsNone(debug[0]["direct_match"])
+        self.assertIn("M'aiq.", debug[0]["reference_candidates"])
 
 
 class PromptBuilderGlossaryContextTests(unittest.TestCase):

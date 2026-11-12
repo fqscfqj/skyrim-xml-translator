@@ -236,6 +236,11 @@ class QualityChecker:
         )
         issues.extend(format_issues)
 
+        punctuation_issue = self._check_glossary_punctuation(
+            source_text, translation_text, matched_terms)
+        if punctuation_issue:
+            issues.append(punctuation_issue)
+
         wrapper_issue = self._check_paired_wrapper_preservation(
             source_text,
             translation_text,
@@ -1127,6 +1132,34 @@ class QualityChecker:
                 return token
             pos += step
         return ""
+
+    def _check_glossary_punctuation(
+            self, source: str, translation: str,
+            matched_terms: Optional[dict]) -> Optional[QualityIssue]:
+        """Catch emphatic punctuation attached to an otherwise clean glossary name."""
+        if not matched_terms or re.search(r"[!！¡]", self._visible_text(source)):
+            return None
+        visible_translation = self._visible_text(translation)
+        fragments: list[str] = []
+        for term, expected in matched_terms.items():
+            term_text, expected_text = str(term or "").strip(), str(expected or "").strip()
+            if (not expected_text or len(expected_text) > 80
+                    or re.search(r"[.!?。！？…]", term_text + expected_text)
+                    or not self._term_present_in_source(term_text, source)):
+                continue
+            pattern = re.escape(expected_text) + r"\s{0,8}[!！]"
+            if expected_text[-1:].isascii() and expected_text[-1:].isalnum():
+                pattern = r"(?<![A-Za-z0-9_])" + pattern
+            fragments.extend(match.group(0) for match in re.finditer(pattern, visible_translation))
+        if not fragments:
+            return None
+        return QualityIssue(
+            issue_type=QualityIssueType.FORMAT_VIOLATION,
+            severity="error",
+            details="Unsupported exclamation attached to glossary translation; keep the name separate from dialogue punctuation",
+            rule_id="glossary_punctuation",
+            fragments=list(dict.fromkeys(fragments)),
+        )
 
     def _check_paired_wrapper_preservation(
             self,
