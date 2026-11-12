@@ -37,8 +37,8 @@ class Translator:
         "sub", "sup", "small", "big", "a",
     })
     _CACHE_POLICY_VERSION = "translation_policy_v7"
-    _FORMAT_SHELL_VERSION = "format_shell_v1"
-    _QUALITY_RULES_VERSION = "quality_rules_v9"
+    _FORMAT_SHELL_VERSION = "format_shell_v2"
+    _QUALITY_RULES_VERSION = "quality_rules_v10"
     _GLOSSARY_IMPORT_FORMAT_VERSION = "glossary_import_v1"
     _DEFAULT_FORMAT_EXTRA_RETRIES = 2
     # Q-02: at most two split layers (original -> halves -> quarters).

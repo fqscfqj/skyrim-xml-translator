@@ -129,12 +129,16 @@ class QualityChecker:
     )
     _OUTER_WRAPPER_GROUPS = (
         ("paren", (("(", ")"), ("（", "）"))),
-        ("square", (("[", "]"), ("【", "】"))),
+        ("square", (("[", "]"),)),
+        ("fullwidth_square", (("［", "］"),)),
+        ("lenticular", (("【", "】"),)),
         ("quote", _QUOTE_WRAPPER_PAIRS),
     )
     _WRAPPER_GROUP_LABELS = {
         "paren": "parentheses",
-        "square": "brackets",
+        "square": "ASCII square brackets []",
+        "fullwidth_square": "fullwidth square brackets ［］",
+        "lenticular": "lenticular brackets 【】",
         "quote": "quotes",
     }
     _SAME_CHAR_WRAPPER_SEGMENT_SEPARATOR_RE = re.compile(

@@ -280,22 +280,25 @@ class TextAnalyzerRoundThreeTests(unittest.TestCase):
             self.non_space_tokens(shell.tokens),
         )
 
-    def test_token_swallowing_comment_opener_keeps_later_comment(self):
-        # A bracket starting before "<!--" consumes that opener (leftmost
-        # match wins), but a later opener is still a valid comment.
+    def test_annotation_does_not_hide_first_comment_opener(self):
         source = "[a<!--b]<!--c-->"
 
         shell = self.assert_round_trips(source)
 
-        self.assertIn("<!--c-->", shell.tokens)
+        self.assertEqual(
+            ["[", "<!--b]<!--c-->"],
+            self.non_space_tokens(shell.tokens),
+        )
 
-    def test_bracket_that_swallows_comment_keeps_following_token(self):
+    def test_annotation_preserves_comment_and_following_token(self):
         source = "[a <!--c--> b] %s"
 
         tokens = self.analyzer.extract_protected_format_tokens(source)
 
         self.assertIn("%s", tokens)
-        self.assertFalse(any("<!--" in token for token in tokens), tokens)
+        self.assertIn("<!--c-->", tokens)
+        self.assertIn("[", tokens)
+        self.assertIn("]", tokens)
 
     def test_pure_paragraph_breaks_are_not_frozen(self):
         # Q-36: \n / \n\n / \r\n\r\n are content, not sentinels.

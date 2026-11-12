@@ -61,7 +61,10 @@ class TextAnalyzer:
         r"%\d{1,12})"
     )
     _PERCENT_LITERAL_PATTERN = r"(?:(?<=[>\d])%|%(?![A-Za-z0-9_]))"
-    _BRACKET_TOKEN_PATTERN = r"\[[^\]]{1,4096}\]"
+    # Only identifier-shaped bracket tokens are atomic. Prose annotations must
+    # expose their contents to translation and normal placeholder scanning.
+    _BRACKET_TOKEN_PATTERN = r"\[\s{0,4096}[A-Za-z][A-Za-z0-9_:-]{0,4095}\s{0,4096}\]"
+    _BRACKET_DELIMITER_PATTERN = r"[\[\]\uff3b\uff3d\u3010\u3011]"
     # XML/Skyrim tags may contain a literal ``>`` inside a quoted attribute.
     # Match quoted values as one unit so the opening tag is never truncated.
     _ANGLE_TOKEN_PATTERN = (
@@ -102,6 +105,8 @@ class TextAnalyzer:
         + _DOLLAR_TOKEN_PATTERN
         + r"|"
         + _BRACKET_TOKEN_PATTERN
+        + r"|"
+        + _BRACKET_DELIMITER_PATTERN
     )
     _PROTECTED_TOKEN_RE = re.compile(
         _COMMENT_CDATA_PATTERN
