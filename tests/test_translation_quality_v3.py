@@ -112,6 +112,36 @@ def _make_translator(llm, rag=None, config=None):
     return Translator(llm, rag or _FakeRAG(cfg))
 
 
+class GlossaryAnchorRuntimeTests(unittest.TestCase):
+    def _translator(self, translation):
+        llm = _ScriptedLLM([json.dumps({"translation": translation})])
+        terms = {"The Alik'r": "阿里克'尔", "Sleep": "睡觉"}
+        rag = _FakeRAG(_FakeConfig(), glossary=terms, terms=terms)
+        return _make_translator(llm, rag=rag)
+
+    def test_correct_apostrophized_name_is_accepted_without_retry(self):
+        translation = "阿里克'尔人还在外面，我根本无法入眠。"
+        translator = self._translator(translation)
+        result = translator.translate_text(
+            "The Alik'r are outside. I cannot sleep.", use_rag=True, max_retries=2)
+        self.assertEqual(translation, result)
+        self.assertEqual(1, translator.llm_client.calls)
+
+    def test_exhausted_quality_error_includes_rule_and_expected_anchor(self):
+        translator = self._translator("这是一座非常古老的城堡。")
+        logs = []
+        with self.assertRaises(RuntimeError) as caught:
+            translator.translate_text(
+                "The Alik'r are outside. I cannot sleep.", use_rag=True,
+                max_retries=2, log_callback=logs.append)
+        self.assertIn(": untranslated", str(caught.exception))
+        self.assertIn("glossary_anchor_coverage", str(caught.exception))
+        self.assertIn("阿里克'尔", str(caught.exception))
+        self.assertTrue(any("glossary_anchor_coverage" in line for line in logs), logs)
+        self.assertEqual(3, translator.llm_client.calls)
+        self.assertIn("glossary_anchor_coverage", translator.llm_client.messages_seen[1][-1]["content"])
+
+
 class TruncationSplitTests(unittest.TestCase):
     def test_truncated_response_splits_source_and_concatenates_parts(self):
         llm = _ScriptedLLM([

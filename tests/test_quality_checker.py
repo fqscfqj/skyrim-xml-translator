@@ -195,6 +195,47 @@ class QualityCheckerPlaceholderResidueTests(unittest.TestCase):
             issues,
         )
 
+    def test_accepts_reported_dialogue_with_apostrophe_in_glossary_name(self):
+        source = (
+            "Wind down? With the Alik'r still out there, I can barely sleep. "
+            "Clear them away for me, and I'll wind you down so slowly "
+            "you'll be begging by the end."
+        )
+        terms = {
+            "The Alik'r": "阿里克'尔", "Sleep": "睡觉", "Clear": "清零",
+            "Wind": "风", "Down": "向下", "Sleep.": "睡吧。",
+        }
+        for name in ("阿里克'尔", "阿里克’尔", "阿里克＇尔"):
+            with self.subTest(name=name):
+                translation = (
+                    f"放松？{name}人还在外面，我连觉都睡不着。"
+                    "替我把他们赶走，我会慢慢让你放松，到最后你会忍不住求我。"
+                )
+                issues = self.checker.check(source, translation, terms)
+                self.assertFalse(self.checker.should_retry(issues), issues)
+
+    def test_accepts_glossary_anchor_with_internal_separators(self):
+        for expected in ("阿里克 尔", "阿里克-尔", "阿里克·尔"):
+            with self.subTest(expected=expected):
+                issues = self.checker.check(
+                    "The Alik'r are outside. I cannot sleep.",
+                    f"{expected}人就在外面，我无法入眠。",
+                    {"The Alik'r": expected, "sleep": "睡觉"},
+                )
+                self.assertFalse(self.checker.should_retry(issues), issues)
+
+    def test_anchor_normalization_does_not_discard_latin_or_numeric_content(self):
+        for expected in ("SKSE插件", "第2阶段", "插 A 件"):
+            with self.subTest(expected=expected):
+                issues = self.checker.check(
+                    "The plugin can help you sleep.", "插件已进入第阶段，现在可以入眠。",
+                    {"plugin": expected, "sleep": "睡觉"},
+                )
+                self.assertTrue(
+                    any(issue.rule_id == "glossary_anchor_coverage" for issue in issues),
+                    issues,
+                )
+
     def test_rejects_missing_opening_tag_with_greater_than_attribute(self):
         source = '<a title="1 > 0">Hello</a>'
         translation = '你好</a>'

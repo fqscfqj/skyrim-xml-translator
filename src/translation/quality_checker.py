@@ -897,17 +897,28 @@ class QualityChecker:
         for term, expected in matched_terms.items():
             if not term or not expected or not self._term_present_in_source(str(term), source_text):
                 continue
-            expected_cjk = "".join(self._CJK_CHAR_RE.findall(str(expected)))
-            if len(expected_cjk) >= 2:
-                anchors.append(expected_cjk)
+            expected_text = self._visible_text(str(expected)).strip()
+            if len(self._CJK_CHAR_RE.findall(expected_text)) >= 2:
+                anchors.append(expected_text)
         if not anchors:
             return None
-        if any(anchor in translation_text for anchor in anchors):
+
+        def normalize_anchor(text: str) -> str:
+            # Keep internal punctuation, Latin text and numbers intact; only
+            # normalize equivalent apostrophes and visible whitespace.
+            return self._visible_text(text).casefold().translate(str.maketrans({
+                "’": "'", "‘": "'", "＇": "'",
+            }))
+
+        normalized_translation = normalize_anchor(translation_text)
+        if any(
+                normalize_anchor(anchor).strip(".!?。！？…") in normalized_translation
+                for anchor in anchors):
             return None
         return QualityIssue(
             issue_type=QualityIssueType.UNTRANSLATED,
             severity="error",
-            details="Translation contains none of the grounded glossary anchors",
+            details=f"Translation contains none of the grounded glossary anchors: {anchors[:6]}",
             rule_id="glossary_anchor_coverage",
             fragments=anchors[:6],
         )

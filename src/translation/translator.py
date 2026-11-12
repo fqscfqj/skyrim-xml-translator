@@ -38,7 +38,7 @@ class Translator:
     })
     _CACHE_POLICY_VERSION = "translation_policy_v8"
     _FORMAT_SHELL_VERSION = "format_shell_v2"
-    _QUALITY_RULES_VERSION = "quality_rules_v11"
+    _QUALITY_RULES_VERSION = "quality_rules_v12"
     _GLOSSARY_IMPORT_FORMAT_VERSION = "glossary_import_v1"
     _DEFAULT_FORMAT_EXTRA_RETRIES = 2
     # Q-02: at most two split layers (original -> halves -> quarters).
@@ -60,6 +60,7 @@ class Translator:
         "wrong_script",
         "forbidden_term",
         "glossary_fragment",
+        "glossary_anchor_coverage",
         "paragraph_loss",
         "placeholder_adjacent_latin_residue",
     }
@@ -79,6 +80,7 @@ class Translator:
         "wrong_script",
         "forbidden_term",
         "glossary_fragment",
+        "glossary_anchor_coverage",
         "paragraph_loss",
     }
 
@@ -742,25 +744,29 @@ class Translator:
                     return translation
 
                 if retry_count >= effective_retry_limit:
+                    quality_details = "; ".join(
+                        f"[{issue.rule_id or issue.issue_type.value}] {issue.details}"
+                        for issue in issues if issue.severity == "error"
+                    )
                     if has_untranslated_error:
                         log_emit(log_callback, self.rag_engine.config, "ERROR",
-                                 f"Rejecting translation after {effective_retry_limit} retries due to untranslated content",
+                                 f"Rejecting translation after {effective_retry_limit} retries due to untranslated content: {quality_details}",
                                  module="translator", func="translate_text")
                         raise RuntimeError(
-                            f"Translation failed quality check after {effective_retry_limit} retries: untranslated")
+                            f"Translation failed quality check after {effective_retry_limit} retries: untranslated; {quality_details}")
 
                     if has_format_error:
                         log_emit(log_callback, self.rag_engine.config, "ERROR",
-                                 f"Rejecting translation after {effective_retry_limit} retries due to format damage",
+                                 f"Rejecting translation after {effective_retry_limit} retries due to format damage: {quality_details}",
                                  module="translator", func="translate_text")
                         raise RuntimeError(
-                            f"Translation failed quality check after {effective_retry_limit} retries: format")
+                            f"Translation failed quality check after {effective_retry_limit} retries: format; {quality_details}")
 
                     log_emit(log_callback, self.rag_engine.config, "ERROR",
-                             f"Rejecting translation after {effective_retry_limit} retries due to quality errors",
+                             f"Rejecting translation after {effective_retry_limit} retries due to quality errors: {quality_details}",
                              module="translator", func="translate_text")
                     raise RuntimeError(
-                        f"Translation failed quality check after {effective_retry_limit} retries")
+                        f"Translation failed quality check after {effective_retry_limit} retries; {quality_details}")
 
                 retry_count += 1
 
