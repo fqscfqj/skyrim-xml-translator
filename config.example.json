@@ -106,7 +106,9 @@
         "glossary_import_max_rows": 0,
         "glossary_import_max_field_chars": 0,
         "short_text_local_keywords": true,
-        "deterministic_scan_enabled": true
+        "deterministic_scan_enabled": true,
+        "glossary_domain_filter_enabled": true,
+        "short_text_glossary_max_chars": 1200
     },
     "general": {
         "log_level": "INFO",

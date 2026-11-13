@@ -767,7 +767,7 @@ def test_rag_visualization_dialog_does_not_block_on_llm(qt_app):
         dialog.close()
 
 
-def test_dialogue_context_carries_previous_source(qt_app):
+def test_dialogue_context_does_not_invent_previous_source(qt_app):
     from src.file_formats import FILE_TYPE_ESP_XML
 
     window = MainWindow.__new__(MainWindow)
@@ -785,10 +785,7 @@ def test_dialogue_context_carries_previous_source(qt_app):
 
     context = window._build_translation_context(1)
     assert context["text_kind"] == "dialogue"
-    assert context["previous_source"] == "Hello there."
-
-    # First row has no predecessor.
-    assert "previous_source" not in window._build_translation_context(0)
-
-    # Identical adjacent source lines do not get a previous_source hint.
-    assert "previous_source" not in window._build_translation_context(2)
+    # Export neighbours do not establish dialogue order, even when their
+    # record/field types match or their source strings are identical.
+    for row in range(3):
+        assert "previous_source" not in window._build_translation_context(row)

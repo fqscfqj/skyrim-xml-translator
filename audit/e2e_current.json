@@ -1,0 +1,112 @@
+[
+  {
+    "id": "font",
+    "source": "<font face='$HandwrittenFont'>Hello, traveler. Take a seat.</font>",
+    "translation": "<font face='$HandwrittenFont'>你好，旅人。请坐。</font>",
+    "status": "success",
+    "details": "",
+    "error": "",
+    "attempts": 1,
+    "elapsed": 2.3841331005096436
+  },
+  {
+    "id": "percent",
+    "source": "Press %s to continue.",
+    "translation": "按 %s 继续。",
+    "status": "success",
+    "details": "",
+    "error": "",
+    "attempts": 1,
+    "elapsed": 2.3689963817596436
+  },
+  {
+    "id": "bracket",
+    "source": "[PlayerName] said, \"Wait here.\"",
+    "translation": "[PlayerName]说道：“在这儿等着。”",
+    "status": "success",
+    "details": "",
+    "error": "",
+    "attempts": 1,
+    "elapsed": 2.431805372238159
+  },
+  {
+    "id": "paragraph",
+    "source": "Line one.\n\nLine two continues the story, and it is longer than the first.",
+    "translation": "第一行。\n\n第二行延续故事，而且比第一行更长。",
+    "status": "success",
+    "details": "",
+    "error": "",
+    "attempts": 1,
+    "elapsed": 2.3517212867736816
+  },
+  {
+    "id": "quest",
+    "source": "Find the Dragon Stone in Bleak Falls Barrow.",
+    "translation": "在荒瀑古坟中寻找龙石。",
+    "status": "success",
+    "details": "",
+    "error": "",
+    "attempts": 1,
+    "elapsed": 3.2961413860321045
+  },
+  {
+    "id": "onehand",
+    "source": "One-Handed",
+    "translation": "One-Handed",
+    "status": "warning",
+    "details": "Identifier-like text preserved as-is",
+    "error": "",
+    "attempts": 0,
+    "elapsed": 4.267692565917969e-05
+  },
+  {
+    "id": "sneak",
+    "source": "Sneak",
+    "translation": "潜行",
+    "status": "success",
+    "details": "",
+    "error": "",
+    "attempts": 1,
+    "elapsed": 4.766608953475952
+  },
+  {
+    "id": "armor",
+    "source": "Armor Rating",
+    "translation": "护甲等级",
+    "status": "success",
+    "details": "",
+    "error": "",
+    "attempts": 1,
+    "elapsed": 1.4663496017456055
+  },
+  {
+    "id": "she",
+    "source": "She said she'd come, but she never did.",
+    "translation": "她说她会来，可她始终没来。",
+    "status": "success",
+    "details": "",
+    "error": "",
+    "attempts": 1,
+    "elapsed": 2.639634847640991
+  },
+  {
+    "id": "alias",
+    "source": "<Alias=Player> has been spotted!",
+    "translation": "<Alias=Player>被发现了！",
+    "status": "success",
+    "details": "",
+    "error": "",
+    "attempts": 1,
+    "elapsed": 3.7673490047454834
+  },
+  {
+    "id": "dmg",
+    "source": "Deals %d points of fire damage.",
+    "translation": "造成 %d 点火焰伤害。",
+    "status": "success",
+    "details": "",
+    "error": "",
+    "attempts": 1,
+    "elapsed": 2.8339574337005615
+  }
+]

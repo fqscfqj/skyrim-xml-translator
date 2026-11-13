@@ -9,6 +9,10 @@ tools_debug_*.py
 logs/
 build/
 dist/
+.build-backup/
+.runtime-tmp/
+/SkyrimXMLTranslatorDebug.spec
+/debug*.log
 /cache/
 /glossary/
 

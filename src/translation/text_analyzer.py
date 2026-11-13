@@ -995,9 +995,25 @@ class TextAnalyzer:
         if any(ch.isdigit() for ch in cleaned) or "_" in cleaned:
             return True
         if "-" in cleaned or ":" in cleaned:
+            # Hyphenated Title-Case labels are natural language ("One-Handed",
+            # "Obi-Wan"), not internal identifiers.  Only treat them as IDs when
+            # a segment is an all-caps code ("WB-Foo") or the shape is not a
+            # normal capitalized word sequence.
+            segments = [part for part in re.split(r"[-:]", cleaned) if part]
+            title_case = bool(segments) and all(
+                part[:1].isupper() and part[1:].islower() for part in segments
+            )
+            if title_case and not any(part.isupper() for part in segments):
+                return False
             return len(cleaned) >= 6 and upper_chars >= 2
         if upper_chars == len(cleaned):
-            return len(cleaned) >= 5
+            if len(cleaned) < 5:
+                return False
+            # An all-caps word with vowels is emphasized prose ("DRAGON"),
+            # not an internal code ("SKSE", "MCM").
+            if re.search(r"[AEIOUY]", cleaned):
+                return False
+            return True
         return len(cleaned) >= 6 and upper_chars >= 3 and lower_chars >= 1
 
     def should_preserve_identity_translation(

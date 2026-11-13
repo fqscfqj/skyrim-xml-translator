@@ -1,0 +1,46 @@
+[
+  {
+    "id": "health_rawdomain",
+    "text": "Restore 20 points of Health.",
+    "style": "default",
+    "kind": "ui",
+    "glossary": {
+      "Health": "生命"
+    },
+    "rich_meta": {
+      "Health": {
+        "domain": "word_of_power",
+        "note": "formid=0x5EBD62EB sst_status=0"
+      }
+    }
+  },
+  {
+    "id": "health_cndomain",
+    "text": "Restore 20 points of Health.",
+    "style": "default",
+    "kind": "ui",
+    "glossary": {
+      "Health": "生命"
+    },
+    "rich_meta": {
+      "Health": {
+        "domain": "龙语力量之语"
+      }
+    }
+  },
+  {
+    "id": "health_conflict",
+    "text": "Restore 20 points of Health.",
+    "style": "default",
+    "kind": "ui",
+    "glossary": {
+      "Health": "生命"
+    },
+    "rich_meta": {
+      "Health": {
+        "domain": "龙语力量之语",
+        "note": "该条目来自龙语词墙，与界面属性无关"
+      }
+    }
+  }
+]

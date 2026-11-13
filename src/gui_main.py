@@ -4,6 +4,7 @@ import time
 import threading
 import shutil
 import datetime
+import json
 import re
 import ctypes
 from typing import Mapping, Optional, cast
@@ -70,6 +71,7 @@ from src.esp_xml_processor import ESPXMLProcessor
 from src.xml_processor import XMLProcessor
 from src.mcm_processor import MCMProcessor
 from src.translation.text_analyzer import TextAnalyzer
+from src.translation.prompt_builder import PromptBuilder
 from src.translation.translator import Translator
 from src.cache.lru_cache import LRUCache
 from src.file_formats import (
@@ -666,25 +668,14 @@ class Worker(QThread):
 
     @staticmethod
     def _translation_context_signature(source: str, context_hint) -> tuple:
-        if not isinstance(context_hint, dict):
-            return ()
-
-        signature = []
-        for key in (
-            "domain", "text_kind", "entry_type", "whitespace_policy",
-            "record_type", "field_type", "file_type", "mod_scope",
-            "style_profile", "content_mode"):
-            value = str(context_hint.get(key, "") or "")
-            if value:
-                signature.append((key, value))
-
-        source_text = str(source or "").strip()
-        if source_text and not any(ch.isspace() for ch in source_text):
-            entry_id = str(context_hint.get("entry_id", "") or "")
-            if entry_id:
-                signature.append(("entry_id", entry_id))
-
-        return tuple(signature)
+        # Keep worker reuse aligned with the context actually rendered by the
+        # prompt builder. In particular, an explicitly supplied previous source
+        # or a record identifier can change the meaning of identical text.
+        context_data = PromptBuilder.context_fingerprint_data(context_hint, source)
+        return tuple(
+            (key, json.dumps(value, ensure_ascii=False, sort_keys=True))
+            for key, value in sorted(context_data.items())
+        )
 
     @classmethod
     def _translation_dedupe_key(cls, source: str, context_hint) -> tuple:
@@ -1170,25 +1161,48 @@ class Worker(QThread):
                     cached_tokens = int(
                         usage_summary.get("total_cached_prompt_tokens", 0) or 0
                     )
-                    cache_usage_reports = int(
-                        usage_summary.get("counters", {}).get(
-                            "prompt_cache_usage_reports", 0
-                        ) or 0
+                    reported_tokens = int(
+                        usage_summary.get("cache_reported_prompt_tokens", 0) or 0
                     )
-                    if prompt_tokens > 0 and cache_usage_reports > 0:
-                        cache_hit_rate = cached_tokens / prompt_tokens
+                    cache_usage_reports = int(
+                        usage_summary.get("cache_usage_reports", 0) or 0
+                    )
+                    if prompt_tokens > 0:
+                        cache_result = (
+                            f"hit_tokens={cached_tokens}/{reported_tokens} "
+                            f"({cached_tokens / reported_tokens:.1%})"
+                            if reported_tokens > 0
+                            else "unavailable (provider did not report cache usage)"
+                        )
                         log_emit(
                             self.log.emit,
                             self.translator.rag_engine.config,
                             "INFO",
                             (
-                                "LLM prompt-prefix cache usage: "
-                                f"hit_tokens={cached_tokens}/{prompt_tokens} "
-                                f"({cache_hit_rate:.1%})."
+                                "LLM prompt-prefix cache usage (reported requests only): "
+                                f"{cache_result}; reported_requests={cache_usage_reports}; "
+                                f"unreported_or_embedding_prompt_tokens={prompt_tokens - reported_tokens}."
                             ),
                             module="gui_main",
                             func="Worker.run",
                         )
+                        for group_name in ("by_operation", "by_model"):
+                            for name, usage in sorted(usage_summary.get(group_name, {}).items()):
+                                denominator = int(usage.get("cache_reported_prompt_tokens", 0) or 0)
+                                if denominator <= 0:
+                                    continue
+                                hits = int(usage.get("cached_prompt_tokens", 0) or 0)
+                                log_emit(
+                                    self.log.emit,
+                                    self.translator.rag_engine.config,
+                                    "INFO",
+                                    f"LLM prompt-prefix cache {group_name}={name}: "
+                                    f"hit_tokens={hits}/{denominator} ({hits / denominator:.1%}); "
+                                    f"reported_requests={usage.get('cache_usage_reports', 0)}/"
+                                    f"{usage.get('requests', 0)}.",
+                                    module="gui_main",
+                                    func="Worker.run",
+                                )
                 log_emit(self.log.emit, self.translator.rag_engine.config, 'INFO', i18n.t("msg_translation_finished"), module='gui_main', func='Worker.run')
             self.finished.emit()
         except Exception as e:
@@ -5289,6 +5303,31 @@ class MainWindow(QMainWindow):
         ))
         expert_layout.addRow(i18n.t("label_rag_glossary_context_max_chars", "Glossary context max chars:"), self.rag_glossary_context_max_chars)
 
+        self.rag_glossary_domain_filter_enabled = QCheckBox()
+        self.rag_glossary_domain_filter_enabled.setChecked(bool(self.config_manager.get(
+            "rag", "glossary_domain_filter_enabled", True)))
+        self.rag_glossary_domain_filter_enabled.setToolTip(i18n.t(
+            "tooltip_rag_glossary_domain_filter_enabled",
+            "Drop glossary defaults for short UI words that came from an unrelated record type."
+        ))
+        expert_layout.addRow(
+            i18n.t("label_rag_glossary_domain_filter_enabled", "Filter unrelated glossary domains:"),
+            self.rag_glossary_domain_filter_enabled)
+
+        self.rag_short_text_glossary_max_chars = NoWheelSpinBox()
+        self.rag_short_text_glossary_max_chars.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
+        self.rag_short_text_glossary_max_chars.setRange(0, 100000)
+        self.rag_short_text_glossary_max_chars.setSingleStep(100)
+        self.rag_short_text_glossary_max_chars.setValue(int(self.config_manager.get(
+            "rag", "short_text_glossary_max_chars", 1200)))
+        self.rag_short_text_glossary_max_chars.setToolTip(i18n.t(
+            "tooltip_rag_short_text_glossary_max_chars",
+            "Glossary context budget for sources of at most 60 characters; 0 disables the cap."
+        ))
+        expert_layout.addRow(
+            i18n.t("label_rag_short_text_glossary_max_chars", "Short-text glossary max chars:"),
+            self.rag_short_text_glossary_max_chars)
+
         self.rag_format_extra_retries = NoWheelSpinBox()
         self.rag_format_extra_retries.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         self.rag_format_extra_retries.setRange(0, 10)
@@ -6321,27 +6360,35 @@ class MainWindow(QMainWindow):
 
         if self.current_file_type == FILE_TYPE_ESP_XML and node is not None:
             entry_context = self.esp_xml_processor.get_entry_context(node)
-            record_type = str(entry_context.get("record_type", "") or "").upper()
-            field_type = str(entry_context.get("field_type", "") or "").upper()
+            record_type = str(entry_context.get("record_type", "") or "").strip().upper()
+            field_type = str(entry_context.get("field_type", "") or "").strip().upper()
+            if field_type == "FULL" and record_type in {
+                    "NPC_", "WEAP", "ARMO", "MISC", "SPEL", "ENCH", "BOOK"}:
+                return "item_name", TextAnalyzer.WHITESPACE_POLICY_STRICT
             if record_type in {"DIAL", "INFO"}:
                 return "dialogue", TextAnalyzer.WHITESPACE_POLICY_RELAXED_SPACES
             if record_type == "BOOK":
                 return "book", TextAnalyzer.WHITESPACE_POLICY_STRICT
             if record_type == "QUST":
                 return "quest", TextAnalyzer.WHITESPACE_POLICY_STRICT
-            if field_type == "FULL" and record_type in {
-                    "NPC_", "WEAP", "ARMO", "MISC", "SPEL", "ENCH"}:
-                return "ui", TextAnalyzer.WHITESPACE_POLICY_STRICT
 
         source_node = None
         dest_node = None
         if node is not None:
-            if self.current_file_type == FILE_TYPE_XML:
-                source_node = node.find("Source")
-                dest_node = node.find("Dest")
-            elif self.current_file_type == FILE_TYPE_ESP_XML:
-                source_node = node.find("ORIGINAL")
-                dest_node = node.find("TRADUIT")
+            source_tag, dest_tag = (
+                ("source", "dest") if self.current_file_type == FILE_TYPE_XML
+                else ("original", "traduit")
+            )
+            # Match the processors' namespace/case-insensitive XML lookup.
+            for child in node:
+                tag = getattr(child, "tag", None)
+                if not isinstance(tag, str):
+                    continue
+                local_tag = tag.rsplit("}", 1)[-1].rsplit(":", 1)[-1].lower()
+                if local_tag == source_tag:
+                    source_node = child
+                elif local_tag == dest_tag:
+                    dest_node = child
 
         stripped = str(source_text or "").strip()
         if node_has_child_elements(source_node) or node_has_child_elements(dest_node):
@@ -6352,7 +6399,9 @@ class MainWindow(QMainWindow):
             return "document", TextAnalyzer.WHITESPACE_POLICY_STRICT
         if not stripped:
             return "generic", TextAnalyzer.WHITESPACE_POLICY_STRICT
-        return "dialogue", TextAnalyzer.WHITESPACE_POLICY_RELAXED_SPACES
+        # A short exported string can be a name, label or description. Its
+        # length alone supplies no evidence that somebody spoke it.
+        return "generic", TextAnalyzer.WHITESPACE_POLICY_STRICT
 
     def _build_translation_context(self, row: int) -> dict:
         entry_id = ""
@@ -6380,14 +6429,9 @@ class MainWindow(QMainWindow):
             "text_kind": text_kind,
             "whitespace_policy": whitespace_policy,
         }
-        # Q-46: dialogue lines get the previous line as an anaphora/honorific
-        # hint.  Deliberately not part of Worker._translation_context_signature:
-        # identical source lines must keep deduping even with different neighbours.
-        if text_kind == "dialogue" and row > 0:
-            prev_item = self.trans_table.item(row - 1, 1)
-            prev_source = str(prev_item.text() or "").strip() if prev_item is not None else ""
-            if prev_source and prev_source != str(source_text or "").strip():
-                context["previous_source"] = prev_source[:400]
+        # Export order (even inside one record group) does not establish a
+        # dialogue sequence. Only an explicitly supplied relationship may
+        # provide previous_source; table neighbours are not such evidence.
         if self.current_file_type == FILE_TYPE_ESP_XML and node is not None:
             context.update(self.esp_xml_processor.get_entry_context(node))
         elif self.current_file_type == FILE_TYPE_XML:
@@ -6916,6 +6960,8 @@ class MainWindow(QMainWindow):
         self.rag_keyword_weight_anchor_max_df.setValue(defaults.keyword_weight_anchor_max_df)
         self.rag_keyword_weight_anchor_boost.setValue(defaults.keyword_weight_anchor_boost)
         self.rag_glossary_context_max_chars.setValue(defaults.glossary_context_max_chars)
+        self.rag_glossary_domain_filter_enabled.setChecked(defaults.glossary_domain_filter_enabled)
+        self.rag_short_text_glossary_max_chars.setValue(defaults.short_text_glossary_max_chars)
         self.rag_format_extra_retries.setValue(defaults.format_extra_retries)
         self.rag_latin_ratio_threshold.setValue(defaults.latin_ratio_threshold)
         QMessageBox.information(
@@ -7020,6 +7066,8 @@ class MainWindow(QMainWindow):
                 "keyword_weight_anchor_max_df": self.rag_keyword_weight_anchor_max_df.value(),
                 "keyword_weight_anchor_boost": self.rag_keyword_weight_anchor_boost.value(),
                 "glossary_context_max_chars": self.rag_glossary_context_max_chars.value(),
+                "glossary_domain_filter_enabled": bool(self.rag_glossary_domain_filter_enabled.isChecked()),
+                "short_text_glossary_max_chars": self.rag_short_text_glossary_max_chars.value(),
                 "format_extra_retries": self.rag_format_extra_retries.value(),
                 "latin_ratio_threshold": self.rag_latin_ratio_threshold.value(),
             },

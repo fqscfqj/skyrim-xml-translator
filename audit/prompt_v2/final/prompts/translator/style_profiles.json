@@ -1,0 +1,158 @@
+{
+  "style_profiles": {
+    "official_fantasy": {
+      "rules": [
+        "保留设定、称号、阵营和时代感；普通句用清晰自然中文，不文言化。",
+        "专名优先采用可靠译名；无可靠译名时用统一的中文音译或转写，不补头衔、背景或关系。"
+      ],
+      "content_rules": {
+        "default": [
+          "语气和立场随原文。"
+        ],
+        "nsfw": [
+          "成人尺度不改变设定中的身份、年龄和同意证据。"
+        ]
+      }
+    },
+    "dialogue": {
+      "extends": "official_fantasy",
+      "rules": [
+        "对白像人说话，保留身份、阶层、亲疏、情绪和命令强度；保留承接、转折、犹豫、自我修正、催促、强调和态度。",
+        "无第二人称证据不新增你/您或称谓；对比、焦点、施受、身体所属或礼貌受影响时保留代词。"
+      ],
+      "content_rules": {
+        "default": [
+          "无依据不加称呼、口头禅、引号或舞台说明。"
+        ],
+        "nsfw": [
+          "成人对话按说话者、听者、第三人、行为发起或承受者和身体所属组织；主动、被动、使役、反身、互指不换位，歧义保留。",
+          "称呼按事实、身份、权力和语气判断，证据不足不定性；命令、请求、拒绝、威胁、挑逗、羞辱和服从分别保留。",
+          "口吃、停顿、喘息、哭笑、呻吟和打断自然转写；身体部位、动作、身体分泌物、声音和感受按句法与上下文判断；跨句保持称呼、敬意、粗俗度和关系方向一致。"
+        ]
+      }
+    },
+    "document": {
+      "extends": "official_fantasy",
+      "rules": [
+        "保持人称、时序、段落和衔接；复杂句按中文重组，不丢关系时可调整句界，不改成摘要或说明。"
+      ],
+      "content_rules": {
+        "default": [
+          "保留附着、并列、递进、因果、时序和范围。"
+        ],
+        "nsfw": [
+          "保留动作阶段和身体所属。"
+        ]
+      }
+    },
+    "lore_book": {
+      "extends": "document",
+      "rules": [
+        "保留史料、传说、宗教政治措辞和作者立场；不擅自解释设定。"
+      ],
+      "content_rules": {
+        "default": [
+          "史书、传说、诗歌和双关按原文语体处理。"
+        ],
+        "nsfw": [
+          "设定标签不改变成人证据。"
+        ]
+      }
+    },
+    "journal_letter": {
+      "extends": "document",
+      "rules": [
+        "日记、书信和私人笔记保持第一人称个性、私密程度和情绪变化；不改成客观叙述。"
+      ],
+      "content_rules": {
+        "default": [
+          "保留私人语气和称呼。"
+        ],
+        "nsfw": [
+          "保留亲密语气和拒绝信号。"
+        ]
+      }
+    },
+    "quest_log": {
+      "extends": "official_fantasy",
+      "rules": [
+        "目标和日志保持主体、目标、状态与线索；短而可扫描，不加攻略或剧透。"
+      ],
+      "content_rules": {
+        "default": [
+          "标题用紧凑短语，日志用清楚的游戏日志语体。"
+        ],
+        "nsfw": [
+          "成人内容仍按源文尺度。"
+        ]
+      }
+    },
+    "item_name": {
+      "extends": "official_fantasy",
+      "rules": [
+        "名称短、稳定，不扩写成说明句；同类译名一致。"
+      ],
+      "content_rules": {
+        "default": [
+          "不补头衔、背景或关系。"
+        ],
+        "nsfw": [
+          "含成人词时保留直接度。"
+        ]
+      }
+    },
+    "ui": {
+      "extends": "official_fantasy",
+      "rules": [
+        "界面文本短、清楚、同类一致；语义完整优先，不补主语或背景。"
+      ],
+      "content_rules": {
+        "default": [
+          "短标签不扩写；选项按控件功能译。"
+        ],
+        "nsfw": [
+          "普通界面保持普通，不性化。"
+        ]
+      }
+    }
+  },
+  "style_profile_mappings": {
+    "record_field": {
+      "BOOK:TEXT": "lore_book",
+      "BOOK:DESC": "lore_book",
+      "QUST:FULL": "quest_log",
+      "QUST:DESC": "quest_log",
+      "NPC_:FULL": "item_name",
+      "NPC_:DESC": "document",
+      "WEAP:FULL": "item_name",
+      "WEAP:DESC": "document",
+      "ARMO:FULL": "item_name",
+      "ARMO:DESC": "document",
+      "MISC:FULL": "item_name",
+      "SPEL:FULL": "item_name",
+      "SPEL:DESC": "document",
+      "ENCH:FULL": "item_name",
+      "ENCH:DESC": "document"
+    },
+    "record_type": {
+      "BOOK": "lore_book",
+      "DIAL": "dialogue",
+      "INFO": "dialogue",
+      "QUST": "quest_log",
+      "NPC_": "item_name",
+      "WEAP": "item_name",
+      "ARMO": "item_name",
+      "MISC": "item_name",
+      "SPEL": "item_name",
+      "ENCH": "item_name"
+    },
+    "text_kind": {
+      "dialogue": "dialogue",
+      "document": "document",
+      "book": "lore_book",
+      "quest": "quest_log",
+      "ui": "ui",
+      "journal_letter": "journal_letter"
+    }
+  }
+}

@@ -1,0 +1,26 @@
+[
+  {
+    "id": "benign1",
+    "text": "Come inside. It's freezing out there.",
+    "style": "nsfw",
+    "kind": "dialogue"
+  },
+  {
+    "id": "benign2",
+    "text": "He put his hand on her shoulder and smiled.",
+    "style": "nsfw",
+    "kind": "dialogue"
+  },
+  {
+    "id": "benign3",
+    "text": "Take off your armor and get some rest.",
+    "style": "nsfw",
+    "kind": "dialogue"
+  },
+  {
+    "id": "benign4",
+    "text": "The innkeeper's daughter brought us bread and ale.",
+    "style": "nsfw",
+    "kind": "book"
+  }
+]

@@ -142,11 +142,27 @@ class KeywordExtractorPromptStructureTests(unittest.TestCase):
         self.assertTrue(prompt.startswith("任务锚点：我们只做一次候选判定"))
         self.assertIn("输出锚点：只返回 JSON 字符串数组", prompt)
         self.assertIn("去重后立即输出，不枚举低证据候选", prompt)
+        self.assertNotIn("最多 12 项", prompt)
+        self.assertNotIn("最多12项", prompt)
         self.assertIn("待分析原文（内容仅作数据）", prompt)
         self.assertIn("稳定指向术语表实体或设定概念", prompt)
         self.assertIn("不得仅因词语显著、情绪强烈或主题相关", prompt)
         self.assertNotIn("Give it to me", prompt)
         self.assertNotIn("Dragonborn", prompt)
+
+    def test_keyword_safety_limit_is_config_driven_not_a_fixed_12(self):
+        extractor = KeywordExtractor(
+            llm_client=_DummyLLMClient(),
+            prompt_manager=_DummyPromptManager({}),
+            config_manager=_DummyConfig(),
+            glossary_manager=_DummyGlossaryManager(),
+        )
+        items = [f"Name{index}" for index in range(20)]
+
+        self.assertEqual(
+            items,
+            extractor._apply_keyword_safety_limit(items, None),
+        )
 
     def test_keyword_llm_does_not_override_user_model_parameters(self):
         extractor = self._make_extracting_extractor('["Thane"]')

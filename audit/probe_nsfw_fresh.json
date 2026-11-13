@@ -1,0 +1,50 @@
+[
+  {
+    "id": "oral",
+    "source": "Take it all. Don't you dare spill a drop.",
+    "raw": "{\"translation\":\"全部吞下去。敢洒一滴试试。\"}",
+    "parsed": "全部吞下去。敢洒一滴试试。",
+    "elapsed": 1.301142930984497,
+    "label": "nsfw_fresh"
+  },
+  {
+    "id": "tight",
+    "source": "You're so tight. I'm going to come inside you.",
+    "raw": "{\"translation\":\"你好紧。我要射在你里面了。\"}",
+    "parsed": "你好紧。我要射在你里面了。",
+    "elapsed": 2.0491244792938232,
+    "label": "nsfw_fresh"
+  },
+  {
+    "id": "taste",
+    "source": "Spread your legs. I want to taste you.",
+    "raw": "{\"translation\":\"把腿张开。我想尝尝你。\"}",
+    "parsed": "把腿张开。我想尝尝你。",
+    "elapsed": 1.082902431488037,
+    "label": "nsfw_fresh"
+  },
+  {
+    "id": "refusal",
+    "source": "No... stop. Please, not like this.",
+    "raw": "{\"translation\":\"不……住手。求你了，别这样。\"}",
+    "parsed": "不……住手。求你了，别这样。",
+    "elapsed": 1.5092706680297852,
+    "label": "nsfw_fresh"
+  },
+  {
+    "id": "vulgar",
+    "source": "You filthy little slut. You liked that, didn't you?",
+    "raw": "{\"translation\":\"你这个下流的小骚货。你喜欢那样，对吧？\"}",
+    "parsed": "你这个下流的小骚货。你喜欢那样，对吧？",
+    "elapsed": 1.4534597396850586,
+    "label": "nsfw_fresh"
+  },
+  {
+    "id": "climax",
+    "source": "I'm close... don't stop, I'm going to come.",
+    "raw": "{\"translation\":\"我快到了……别停，我要去了。\"}",
+    "parsed": "我快到了……别停，我要去了。",
+    "elapsed": 1.2554988861083984,
+    "label": "nsfw_fresh"
+  }
+]

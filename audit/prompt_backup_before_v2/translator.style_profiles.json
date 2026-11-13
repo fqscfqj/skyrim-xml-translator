@@ -1,0 +1,115 @@
+{
+  "style_profiles": {
+    "official_fantasy": {
+      "rules": [
+        "保留时代感；无明显标记时用克制、清晰的中文奇幻文体，不把普通口语文言化。",
+        "宗教、政治、阵营、种族、称号和身份关系忠实，不用现代现实类比替换设定。",
+        "专名优先采用可靠译名；无可靠译名时统一使用可读的中文音译或转写，不补头衔、背景或关系。"
+      ],
+      "content_rules": {
+        "default": [
+          "庄重度、立场和情感强度服从原文。"
+        ],
+        "nsfw": [
+          "奇幻设定、称号、主从/契约、俘虏或非人标签不改变年龄、关系、同意和所有权的证据要求。",
+          "相邻文本中的身体部位、动作、称呼和粗俗度保持一致。"
+        ]
+      }
+    },
+    "dialogue": {
+      "extends": "official_fantasy",
+      "rules": [
+        "角色对话用自然中文口语，保留身份、阶层、亲疏、情绪和命令强度。",
+        "保留承接、转折、犹豫、自我修正、催促、强调和态度；无依据不增敬称、自称、口头禅、引号或舞台说明。",
+        "无第二人称证据不新增“你/您”或称谓；中文句法必须补主语时选最小中性形式；对比、焦点、施受、身体所属或礼貌受影响时保留代词/所有。",
+        "称呼按关系和场合选“你/您”或头衔，跨句一致；原文未明示不补性别。"
+      ],
+      "content_rules": {
+        "nsfw": [
+          "成人对话按说话者、听者、第三人、行为发起/承受者和身体所属组织中文；主动、被动、使役、反身不换位，歧义保留。",
+          "称呼按事实、身份、权力和语气判断，证据不足不定性；命令、请求、拒绝、威胁、挑逗、羞辱和服从分别保留。",
+          "口吃、停顿、喘息、哭笑、呻吟和打断自然转写；跨句保持称呼、敬意、粗俗度和关系方向一致。"
+        ]
+      }
+    },
+    "document": {
+      "extends": "official_fantasy",
+      "rules": [
+        "连续文档保持叙事人称、时序、段落衔接和称谓一致。",
+        "按中文篇章重组复杂句，保留附着、并列、递进、因果、时序和范围；不丢关系时可调整句界。",
+        "现代书面语或轻古典色彩由原文决定，不堆砌文言词。"
+      ]
+    },
+    "lore_book": {
+      "extends": "document",
+      "rules": [
+        "设定书籍或史料保留作者立场、时代感、宗教和政治措辞，不作百科解释。",
+        "史书、传说、论文、故事、诗歌和双关按原文语体处理，不改成事实概述。"
+      ]
+    },
+    "journal_letter": {
+      "extends": "document",
+      "rules": [
+        "日记、书信和私人笔记保持第一人称个性、私密程度和情绪变化，不改成客观史书。"
+      ]
+    },
+    "quest_log": {
+      "extends": "official_fantasy",
+      "rules": [
+        "任务名称、目标和日志保持行动主体、目标、状态和线索，不添加攻略或剧透。",
+        "标题用紧凑名词/动词短语，日志用清晰的游戏日志语体。"
+      ]
+    },
+    "item_name": {
+      "extends": "official_fantasy",
+      "rules": [
+        "人物、地点、物品、装备、法术或效果名称保持短而稳定，不扩写成说明句。"
+      ]
+    },
+    "ui": {
+      "extends": "official_fantasy",
+      "rules": [
+        "界面短文本保持紧凑、可扫描和同类用词一致，不补主语或背景；容器长度是目标，语义完整优先。"
+      ]
+    }
+  },
+  "style_profile_mappings": {
+    "record_field": {
+      "BOOK:TEXT": "lore_book",
+      "BOOK:DESC": "lore_book",
+      "QUST:FULL": "quest_log",
+      "QUST:DESC": "quest_log",
+      "NPC_:FULL": "item_name",
+      "NPC_:DESC": "document",
+      "WEAP:FULL": "item_name",
+      "WEAP:DESC": "document",
+      "ARMO:FULL": "item_name",
+      "ARMO:DESC": "document",
+      "MISC:FULL": "item_name",
+      "SPEL:FULL": "item_name",
+      "SPEL:DESC": "document",
+      "ENCH:FULL": "item_name",
+      "ENCH:DESC": "document"
+    },
+    "record_type": {
+      "BOOK": "lore_book",
+      "DIAL": "dialogue",
+      "INFO": "dialogue",
+      "QUST": "quest_log",
+      "NPC_": "item_name",
+      "WEAP": "item_name",
+      "ARMO": "item_name",
+      "MISC": "item_name",
+      "SPEL": "item_name",
+      "ENCH": "item_name"
+    },
+    "text_kind": {
+      "dialogue": "dialogue",
+      "document": "document",
+      "book": "lore_book",
+      "quest": "quest_log",
+      "ui": "ui",
+      "journal_letter": "journal_letter"
+    }
+  }
+}

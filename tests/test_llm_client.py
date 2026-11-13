@@ -341,6 +341,28 @@ class LLMClientParameterOverrideTests(unittest.TestCase):
         self.assertEqual(stats["cached_tokens"], 640)
         self.assertEqual(stats["cache_miss_tokens"], 360)
 
+    def test_chat_usage_preserves_unknown_vs_explicit_zero_cache_counts(self):
+        for cached in (None, 0, 800):
+            with self.subTest(cached=cached):
+                usage = {"prompt_tokens": 1000, "completion_tokens": 10}
+                if cached is not None:
+                    usage["prompt_tokens_details"] = {"cached_tokens": cached}
+                response = SimpleNamespace(choices=_Response.choices, usage=usage)
+                tracker = CostTracker()
+                client = LLMClient(_DummyConfig({
+                    ("llm", "model"): "test-model", ("llm", "max_retries"): 0,
+                }), cost_tracker=tracker)
+                _install_fake_client(client, _FakeClient([response]))
+
+                client.chat_completion([{"role": "user", "content": "Translate."}])
+
+                summary = tracker.get_session_summary()
+                self.assertEqual(summary["cache_usage_reports"], int(cached is not None))
+                self.assertEqual(summary["cache_reported_prompt_tokens"],
+                                 1000 if cached is not None else 0)
+                self.assertEqual(summary["total_cached_prompt_tokens"], cached or 0)
+                self.assertEqual(summary["total_prompt_tokens"], 1000)
+
     def test_reload_config_closes_old_clients_before_reinitializing(self):
         events = []
         client = object.__new__(LLMClient)

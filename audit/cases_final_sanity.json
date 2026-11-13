@@ -1,0 +1,14 @@
+[
+  {
+    "id": "nsfw_final",
+    "text": "I want you inside me. Now. Don't make me beg.",
+    "style": "nsfw",
+    "kind": "dialogue"
+  },
+  {
+    "id": "benign_final",
+    "text": "Come inside. It's freezing out there.",
+    "style": "nsfw",
+    "kind": "dialogue"
+  }
+]

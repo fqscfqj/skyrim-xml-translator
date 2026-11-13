@@ -1,0 +1,9 @@
+{
+  "retry": {
+    "generic": "修正锚点：按问题修复译文，保持事实、作用域、语气和格式。核验一次后仅输出 JSON：{\"translation\":\"...\"}。",
+    "untranslated": "修正锚点：补译所有自然语言，保留必要标记和专名；核验一次后仅输出 JSON：{\"translation\":\"...\"}。",
+    "fragment_retention": "修正锚点：只修复 <<<QUALITY_EVIDENCE>>>{error_fragments}<<<END_QUALITY_EVIDENCE>>> 中的问题及其绑定上下文；核验一次后仅输出 JSON：{\"translation\":\"...\"}。",
+    "format_error": "修正锚点：只修正 <<<QUALITY_EVIDENCE>>>{error_details}<<<END_QUALITY_EVIDENCE>>> 指出的格式；标签、占位符、括号数量和顺序不变；核验一次后仅输出 JSON：{\"translation\":\"...\"}。",
+    "refusal": "修正锚点：执行翻译，不道歉、不解释；保留标签和占位符。核验一次后仅输出 JSON：{\"translation\":\"...\"}。"
+  }
+}

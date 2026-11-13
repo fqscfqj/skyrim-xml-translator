@@ -1,0 +1,76 @@
+[
+  {
+    "id": "health_filtered",
+    "text": "Restore 20 points of Health.",
+    "style": "default",
+    "kind": "ui",
+    "glossary": {
+      "Health": "生命"
+    },
+    "rich_meta": {
+      "Health": {
+        "domain": "word_of_power",
+        "note": "formid=0x5EBD62EB sst_status=0"
+      }
+    }
+  },
+  {
+    "id": "health_neutral",
+    "text": "Restore 20 points of Health.",
+    "style": "default",
+    "kind": "ui",
+    "glossary": {
+      "Health": "生命"
+    },
+    "rich_meta": {
+      "Health": {
+        "domain": "actor_value",
+        "note": "formid=0x5EBD62EB sst_status=0"
+      }
+    }
+  },
+  {
+    "id": "health_nokind",
+    "text": "Restore 20 points of Health.",
+    "style": "default",
+    "kind": "generic",
+    "glossary": {
+      "Health": "生命"
+    },
+    "rich_meta": {
+      "Health": {
+        "domain": "word_of_power"
+      }
+    }
+  },
+  {
+    "id": "name_kept",
+    "text": "Whiterun",
+    "style": "default",
+    "kind": "ui",
+    "glossary": {
+      "Whiterun": "白漫城"
+    },
+    "rich_meta": {
+      "Whiterun": {
+        "domain": "location",
+        "note": "formid=0x1234"
+      }
+    }
+  },
+  {
+    "id": "tm_marker",
+    "text": "Wait 24 hours for the renovations to finish",
+    "style": "default",
+    "kind": "quest",
+    "glossary": {
+      "Wait 24 hours for the renovations to finish": "等待24小时装修完毕"
+    },
+    "rich_meta": {
+      "Wait 24 hours for the renovations to finish": {
+        "domain": "quest",
+        "note": "formid=0x28016BA9 sst_status=1"
+      }
+    }
+  }
+]

@@ -1,0 +1,9 @@
+{
+  "default": [
+    "任务锚点：只交付忠实、自然的简体中文译文。按五步做：1) 标出施事、动作、受事；2) 绑定长修饰、代词和省略；3) 保住否定、数量、条件、时间和语气的作用域；4) 用中文重排句子，别逐词硬译；5) 只依据源文和术语表默认译名核验一次。",
+    "例子：The blade that slew the last dragon priest now rests in the hands of a farmer who has never drawn it.→杀死最后一位龙祭司的刀，如今在一个从未拔出过它的农夫手中。Never look back.→别回头。I told him not to open it.→我叫他别打开它。Only the captain can enter.→只有船长能进去。Health→生命值。Wait here, will you?→在这儿等着，好吗？The door wasn’t locked, so nobody stayed outside.→门没锁，所以没人留在外面。",
+    "自检：事实和参与者是否对应？否定/数量/修饰是否挂对？是否漏译、臆补或翻译腔？标签、占位符、括号、方括号和换行是否原样保留？中文是否像游戏里会说的话？",
+    "中文规则：自然中文、全角标点；保留称呼、情绪和原有粗俗度；不补性别、关系、背景或警告；只翻译自然语言，格式标记和内部 ID 原样保留。",
+    "格式锚点：最终且仅输出一个合法 JSON 对象 {\"translation\":\"译文\"}；双引号须转义，换行写成\\n；禁止分析、备选、注释和 Markdown。"
+  ]
+}

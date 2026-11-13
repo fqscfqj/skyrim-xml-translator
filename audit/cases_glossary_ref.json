@@ -1,0 +1,40 @@
+[
+  {
+    "id": "health_ref",
+    "text": "Restore 20 points of Health.",
+    "style": "default",
+    "kind": "ui",
+    "reference_terms": {
+      "Health": "生命"
+    }
+  },
+  {
+    "id": "health_ref2",
+    "text": "Restore 20 points of Health.",
+    "style": "default",
+    "kind": "ui",
+    "reference_terms": {
+      "Health": "生命"
+    },
+    "rich_meta": {
+      "Health": {
+        "domain": "word_of_power"
+      }
+    }
+  },
+  {
+    "id": "health_nogloss",
+    "text": "Restore 20 points of Health.",
+    "style": "default",
+    "kind": "ui"
+  },
+  {
+    "id": "health_ref_cn",
+    "text": "Restore 20 points of Health.",
+    "style": "default",
+    "kind": "ui",
+    "reference_terms": {
+      "Health": "生命力"
+    }
+  }
+]

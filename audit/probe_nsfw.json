@@ -1,0 +1,18 @@
+[
+  {
+    "id": "nsfw1",
+    "source": "I want you inside me. Now. Don't make me beg.",
+    "raw": "{\"translation\":\"我要你插进来。就现在。别逼我求你。\"}",
+    "parsed": "我要你插进来。就现在。别逼我求你。",
+    "elapsed": 2.9334444999694824,
+    "label": "nsfw_fewshot"
+  },
+  {
+    "id": "nsfw2",
+    "source": "Ah... yes, right there. Harder. Gods, don't stop.",
+    "raw": "{\"translation\":\"啊……对，就是那里。再重点。天哪，别停。\"}",
+    "parsed": "啊……对，就是那里。再重点。天哪，别停。",
+    "elapsed": 1.4575884342193604,
+    "label": "nsfw_fewshot"
+  }
+]

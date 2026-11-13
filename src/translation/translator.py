@@ -63,6 +63,7 @@ class Translator:
         "glossary_anchor_coverage",
         "paragraph_loss",
         "placeholder_adjacent_latin_residue",
+        "numeric_content_changed",
     }
     # Warning-level identity/containment results are still suspicious; never
     # cache them (Q-53).
@@ -301,11 +302,15 @@ class Translator:
         )
 
         rag_result = self._run_rag_phase(text, use_rag=use_rag, log_callback=log_callback)
+        rag_result = self._apply_glossary_policy_to_rag_result(
+            text, rag_result, context_hint=resolved_context_hint)
         debug_info["keywords"] = rag_result["keywords"]
         debug_info["rag_tasks"] = rag_result["keywords"]
         debug_info["keyword_extraction"] = rag_result["keyword_debug"]
         debug_info["search_results"] = rag_result["search_debug"]
         debug_info["matched_terms"] = rag_result["matched_terms"]
+        debug_info["raw_matched_terms"] = rag_result["raw_matched_terms"]
+        debug_info["raw_reference_terms"] = rag_result["raw_reference_terms"]
         debug_info["reference_terms"] = rag_result.get("reference_terms", {})
         debug_info["glossary_context"] = rag_result["glossary_context"]
 
@@ -474,6 +479,8 @@ class Translator:
         # Q-46: explicit argument wins; GUI-provided context_hint is fallback.
         effective_previous_source = self._resolve_previous_source(
             previous_source, context_hint)
+        if effective_previous_source is not None:
+            resolved_context_hint["previous_source"] = effective_previous_source
 
         if not text or not source_text.strip():
             if return_debug_info:
@@ -596,6 +603,8 @@ class Translator:
             if isinstance(_precomputed_rag_result, dict)
             else self._run_rag_phase(text, use_rag=use_rag, log_callback=log_callback)
         )
+        rag_result = self._apply_glossary_policy_to_rag_result(
+            source_text, rag_result, context_hint=resolved_context_hint)
         keywords = rag_result["keywords"]
         keyword_debug = rag_result["keyword_debug"]
         matched_terms = rag_result["matched_terms"]
@@ -623,6 +632,8 @@ class Translator:
                 "keyword_extraction": keyword_debug,
                 "search_results": search_debug,
                 "matched_terms": matched_terms,
+                "raw_matched_terms": rag_result.get("raw_matched_terms", rag_result["matched_terms"]),
+                "raw_reference_terms": rag_result.get("raw_reference_terms", rag_result.get("reference_terms", {})),
                 "reference_terms": rag_result.get("reference_terms", {}),
                 "glossary_context": glossary_context,
                 "system_prompt": system_prompt,
@@ -1008,6 +1019,8 @@ class Translator:
 
             try:
                 rag_result = self._run_rag_phase(source_text, use_rag=use_rag, log_callback=log_callback)
+                rag_result = self._apply_glossary_policy_to_rag_result(
+                    source_text, rag_result, context_hint=resolved_context_hint)
             except Exception:
                 fallback_indices.add(idx)
                 continue
@@ -1023,6 +1036,8 @@ class Translator:
                 "keyword_debug": rag_result["keyword_debug"],
                 "search_debug": rag_result["search_debug"],
                 "matched_terms": rag_result["matched_terms"],
+                "raw_matched_terms": rag_result["raw_matched_terms"],
+                "raw_reference_terms": rag_result["raw_reference_terms"],
                 "reference_terms": rag_result.get("reference_terms", {}),
                 "rich_meta": self._collect_rich_meta(rag_result["matched_terms"]),
                 "previous_source": (
@@ -1112,6 +1127,8 @@ class Translator:
                             "keyword_extraction": item.get("keyword_debug", {}),
                             "search_results": item.get("search_debug", []),
                             "matched_terms": item.get("matched_terms", {}),
+                            "raw_matched_terms": item.get("raw_matched_terms", {}),
+                            "raw_reference_terms": item.get("raw_reference_terms", {}),
                             "reference_terms": item.get("reference_terms", {}),
                             "glossary_context": item.get("glossary_context", ""),
                             "system_prompt": system_prompt,
@@ -1293,6 +1310,28 @@ class Translator:
         direct_match_terms = self._direct_match_terms_from_search_debug(
             rag_result.get("search_debug", [])
         )
+        chunk_rag_results = []
+        for chunk in chunks:
+            chunk_result = dict(rag_result)
+            chunk_result["matched_terms"] = self._filter_matched_terms_present_in_source(
+                chunk, matched_terms, direct_terms=direct_match_terms)
+            chunk_rag_results.append(self._apply_glossary_policy_to_rag_result(
+                chunk, chunk_result, context_hint=resolved_context_hint))
+        # Final QC must not restore terms rejected by every chunk's prompt/QC.
+        matched_terms = {
+            term: value for chunk_result in chunk_rag_results
+            for term, value in chunk_result["matched_terms"].items()
+        }
+        rag_result["raw_matched_terms"] = dict(rag_result["matched_terms"])
+        rag_result["raw_reference_terms"] = dict(rag_result.get("reference_terms", {}))
+        rag_result["reference_terms"] = {
+            term: value for chunk_result in chunk_rag_results
+            for term, value in chunk_result["reference_terms"].items()
+        }
+        rag_result["glossary_context"] = self._prompt_builder.build_glossary_context(
+            source_text, matched_terms,
+            rich_meta=self._collect_rich_meta(matched_terms),
+            reference_terms=rag_result["reference_terms"], context_hint=resolved_context_hint)
         mcm_ui_mode = bool(self._get_runtime_flag("mcm_ui_mode", False))
 
         debug_info = None
@@ -1304,6 +1343,8 @@ class Translator:
                 "keyword_extraction": rag_result["keyword_debug"],
                 "search_results": rag_result["search_debug"],
                 "matched_terms": matched_terms,
+                "raw_matched_terms": rag_result.get("raw_matched_terms", rag_result["matched_terms"]),
+                "raw_reference_terms": rag_result.get("raw_reference_terms", rag_result.get("reference_terms", {})),
                 "reference_terms": rag_result.get("reference_terms", {}),
                 "glossary_context": rag_result["glossary_context"],
                 "system_prompt": "",
@@ -1318,14 +1359,10 @@ class Translator:
         first_user_prompt = ""
 
         for idx, chunk in enumerate(chunks, start=1):
-            # Q-08: only inject glossary terms that actually occur in this
-            # chunk; the full glossary is still used by the final check.
-            chunk_terms = self._filter_matched_terms_present_in_source(
-                chunk,
-                matched_terms,
-                direct_terms=direct_match_terms,
-            )
-            chunk_rich_meta = self._collect_rich_meta(chunk_terms)
+            # Use the same chunk-scoped evidence for rendering and QC.
+            chunk_result = chunk_rag_results[idx - 1]
+            chunk_terms = chunk_result["matched_terms"]
+            chunk_rich_meta = chunk_result["rich_meta"]
             format_shell = self._text_analyzer.build_protected_format_shell(
                 chunk,
                 whitespace_policy=chunk_whitespace_policy,
@@ -1343,7 +1380,7 @@ class Translator:
                 rich_meta=chunk_rich_meta,
                 chunk_index=idx,
                 chunk_total=len(chunks),
-                reference_terms=rag_result.get("reference_terms"),
+                reference_terms=chunk_result.get("reference_terms"),
             )
             if previous_translation:
                 context_snippet = self._truncate_previous_translation(previous_translation, 1000)
@@ -1652,6 +1689,44 @@ class Translator:
                 text = str(value).strip()
                 return text or None
         return None
+
+    def _apply_glossary_policy_to_rag_result(
+            self, source_text: str, rag_result: dict,
+            context_hint: Optional[dict] = None) -> dict:
+        """Resolve prompt/QC evidence together once record context is available.
+
+        Retrieval remains context-free. Preserve its original matches for debug
+        and recompute from them so batch fallback never inherits another scope.
+        """
+        result = dict(rag_result)
+        recalled = dict(result.get("raw_matched_terms", result.get("matched_terms", {})))
+        raw_references = dict(result.get("raw_reference_terms", result.get("reference_terms", {})))
+        rich_meta = self._collect_rich_meta(recalled)
+        dropped = {
+            term for term in recalled
+            if self._prompt_builder._should_drop_glossary_entry(
+                term, rich_meta.get(term), source_text, context_hint,
+                self.rag_engine.config)
+        }
+        matched = {term: value for term, value in recalled.items() if term not in dropped}
+        # A related row containing a rejected token must not reintroduce it.
+        references = {
+            term: value for term, value in raw_references.items()
+            if not any(self._prompt_builder._term_appears_in_source(token, term)
+                       for token in dropped)
+        }
+        result.update({
+            "raw_matched_terms": recalled,
+            "raw_reference_terms": raw_references,
+            "matched_terms": matched,
+            "reference_terms": references,
+            "rich_meta": {term: meta for term, meta in rich_meta.items() if term in matched},
+            "glossary_context": self._prompt_builder.build_glossary_context(
+                source_text, matched,
+                rich_meta={term: meta for term, meta in rich_meta.items() if term in matched},
+                reference_terms=references, context_hint=context_hint),
+        })
+        return result
 
     def _get_rich_meta(self, term: str) -> dict:
         """Read glossary rich metadata without ever raising (R-30 contract)."""
@@ -2222,52 +2297,13 @@ class Translator:
             *,
             long_text: bool = False,
             use_rag: bool = True) -> str:
-        """Explicit context-key policy.
-
-        Includes: policy fingerprint, mcm flag, domain/text_kind/entry_type/
-        record_type/field_type/file_type/mod_scope/style_profile/content_mode,
-        unconditional entry_id, shell policy and (long-text) quality policy.
-        Missing hint logs DEBUG; same text across records must not collide.
-        """
+        """Keep cache isolation aligned with worker dedupe and rendered context."""
         parts: list[str] = [f"policy:{self._translation_policy_fingerprint(use_rag)}"]
         if self._get_runtime_flag("mcm_ui_mode", False):
             parts.append("mcm_ui")
-
-        if not isinstance(context_hint, dict) or not context_hint:
-            try:
-                log_emit(None, self.rag_engine.config, "DEBUG",
-                         "Translation cache key without context_hint; "
-                         "entry-scoped isolation disabled",
-                         module="translator", func="_translation_context_key")
-            except Exception:
-                pass
-        else:
-            for key in (
-                    "domain", "text_kind", "entry_type", "record_type",
-                    "field_type", "file_type", "mod_scope", "style_profile",
-                    "content_mode"):
-                value = str(context_hint.get(key, "") or "").strip()
-                if value:
-                    parts.append(f"{key}:{value}")
-            entry_id = str(context_hint.get("entry_id", "") or "").strip()
-            # Q-52: a whitespace-free short label ("Health") is a shared UI
-            # token; isolating it per entry destroys dedupe/cache hits.  Keep
-            # text_kind/entry_type/domain (above) but drop entry_id.
-            compact_short_label = (
-                bool(source_text)
-                and len(source_text) <= 40
-                and not any(ch.isspace() for ch in source_text)
-            )
-            if entry_id and not compact_short_label:
-                parts.append(f"entry_id:{entry_id}")
-            elif not entry_id and not str(
-                    context_hint.get("record_type", "") or "").strip():
-                try:
-                    log_emit(None, self.rag_engine.config, "DEBUG",
-                             "Translation cache key missing entry_id/record_type",
-                             module="translator", func="_translation_context_key")
-                except Exception:
-                    pass
+        context_data = PromptBuilder.context_fingerprint_data(context_hint, source_text)
+        parts.append("context:" + json.dumps(
+            context_data, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
 
         shell_policy = self._resolve_shell_whitespace_policy(
             source_text,
@@ -2327,6 +2363,10 @@ class Translator:
                     "rag", "batch_prompt_max_chars", 12000),
                 "short_text_local_keywords": config.get(
                     "rag", "short_text_local_keywords", True),
+                "short_text_glossary_max_chars": config.get(
+                    "rag", "short_text_glossary_max_chars", 1200),
+                "glossary_domain_filter_enabled": config.get(
+                    "rag", "glossary_domain_filter_enabled", True),
             },
         }
         if use_rag:

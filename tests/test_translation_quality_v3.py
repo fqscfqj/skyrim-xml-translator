@@ -354,14 +354,35 @@ class PreviousSourceWiringTests(unittest.TestCase):
         self.assertIn("argument line", user_content)
         self.assertNotIn("context line", user_content)
 
-    def test_previous_source_does_not_change_cache_key(self):
+    def test_previous_source_changes_dialogue_cache_key(self):
         hint_a = {"text_kind": "dialogue", "previous_source": "line A"}
         hint_b = {"text_kind": "dialogue", "previous_source": "line B"}
         key_a = self.translator._translation_context_key(
             "Hello, traveler.", context_hint=hint_a, use_rag=False)
         key_b = self.translator._translation_context_key(
             "Hello, traveler.", context_hint=hint_b, use_rag=False)
-        self.assertEqual(key_a, key_b)
+        self.assertNotEqual(key_a, key_b)
+
+    def test_explicit_previous_source_cannot_reuse_another_dialogue_cache(self):
+        self.llm = _ScriptedLLM([
+            '{"translation":"你好，旅行者。"}',
+            '{"translation":"您好，旅行者。"}',
+        ])
+        self.translator = _make_translator(self.llm)
+        for previous in ("Who goes there?", "Welcome, my lord."):
+            self.translator.translate_text(
+                "Hello, traveler.", use_rag=False, max_retries=0,
+                context_hint={"text_kind": "dialogue"}, previous_source=previous)
+        self.assertEqual(2, len(self.llm.messages_seen))
+        self.assertIn("Welcome, my lord.", self.llm.messages_seen[1][-1]["content"])
+
+    def test_document_previous_source_does_not_split_cache(self):
+        keys = [self.translator._translation_context_key(
+            "A chronicle line.",
+            context_hint={"text_kind": "document", "previous_source": previous},
+            use_rag=False,
+        ) for previous in ("line A", "line B")]
+        self.assertEqual(keys[0], keys[1])
 
 
 class RichMetaTests(unittest.TestCase):

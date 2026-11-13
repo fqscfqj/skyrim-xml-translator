@@ -75,6 +75,13 @@ class RAGConfig:
     # literally occurs in the source is recalled even when the keyword LLM
     # misses it.
     deterministic_scan_enabled: bool = True
+    # Small-model glossary hygiene: drop single common UI words ("Health")
+    # whose glossary entry came from an unrelated record type (word wall,
+    # book, dialogue...).  Proper names and multi-word terms are untouched.
+    glossary_domain_filter_enabled: bool = True
+    # Short UI labels cannot absorb the full glossary budget; 0 disables the
+    # per-request cap.  Applies to sources of at most 60 characters.
+    short_text_glossary_max_chars: int = 1200
 
 
 @dataclass
@@ -200,6 +207,7 @@ _RANGES: dict[tuple[str, str], tuple[float | None, float | None]] = {
     ("rag", "glossary_import_max_field_chars"): (0, 100000),
     ("rag", "batch_prompt_max_chars"): (1, 1000000),
     ("rag", "glossary_entry_max_chars"): (0, 100000),
+    ("rag", "short_text_glossary_max_chars"): (0, 100000),
     ("general", "long_text_chunk_threshold_chars"): (1, 100000),
     ("general", "long_text_chunk_target_chars"): (1, 100000),
     ("general", "short_text_batch_max_chars"): (1, 4000),

@@ -1052,7 +1052,8 @@ class LLMClient:
                     "DEBUG",
                     f"{operation} usage: model={model} prompt_tokens={prompt_tokens or 0} "
                     f"completion_tokens={completion_tokens or 0} total_tokens={usage_stats.get('total_tokens') or 0} "
-                    f"cached_tokens={cached_tokens or 0} cache_miss_tokens={cache_miss_tokens or 0} "
+                    f"cached_tokens={cached_tokens if cached_tokens is not None else 'unknown'} "
+                    f"cache_miss_tokens={cache_miss_tokens if cache_miss_tokens is not None else 'unknown'} "
                     f"cache_creation_input_tokens={cache_creation_tokens or 0} "
                     f"reasoning_tokens={reasoning_tokens or 0}",
                     module="llm_client",
@@ -1069,7 +1070,7 @@ class LLMClient:
                         prompt_tokens or 0,
                         completion_tokens or 0,
                         operation,
-                        cached_prompt_tokens=cached_tokens or 0,
+                        cached_prompt_tokens=cached_tokens,
                     )
             if use_responses_api:
                 content = getattr(response, "output_text", None)

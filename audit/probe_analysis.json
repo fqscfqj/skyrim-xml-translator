@@ -1,0 +1,50 @@
+[
+  {
+    "id": "pronoun",
+    "source": "Gerdur said the dragon took her son, but he was hidden in the keep.",
+    "raw": "{\"analysis\":\"格尔杜声称龙抓走了她的儿子，但男孩其实藏在城堡里；he 指她的儿子。\",\"translation\":\"格尔杜说龙抓走了她的儿子，可孩子其实就藏在城堡里。\"}",
+    "parsed": "格尔杜说龙抓走了她的儿子，可孩子其实就藏在城堡里。",
+    "elapsed": 3.0705325603485107,
+    "label": "analysis"
+  },
+  {
+    "id": "complex",
+    "source": "The blade that slew the last dragon priest now rests in the hands of a farmer who has never drawn it.",
+    "raw": "{\"analysis\":\"那把杀死最后一位龙祭司的剑，如今在一个从未拔出过它的农夫手中；slew=杀死，draw it=拔剑。\",\"translation\":\"那把杀死最后一位龙祭司的利刃，如今落在一个从未拔出过它的农夫手中。\"}",
+    "parsed": "那把杀死最后一位龙祭司的利刃，如今落在一个从未拔出过它的农夫手中。",
+    "elapsed": 2.4106574058532715,
+    "label": "analysis"
+  },
+  {
+    "id": "ellipsis",
+    "source": "Took you long enough. I was starting to think you'd gone and got yourself eaten.",
+    "raw": "{\"analysis\":\"原文为空，没有可翻译的内容。\",\"translation\":\"请提供需要翻译的英文原文。\"}",
+    "parsed": "请提供需要翻译的英文原文。",
+    "elapsed": 5.004891633987427,
+    "label": "analysis"
+  },
+  {
+    "id": "negscope",
+    "source": "No one but the Thalmor would dare enter that ruin, and not even they return.",
+    "raw": "{\"analysis\":\"只有梭默敢进入那处遗迹，且连他们也回不来；Thalmor 为《上古卷轴》势力名，采用通行译名“梭默”。\",\"translation\":\"除了梭默，没人敢踏进那处遗迹；而即便是他们，进去了也回不来。\"}",
+    "parsed": "除了梭默，没人敢踏进那处遗迹；而即便是他们，进去了也回不来。",
+    "elapsed": 4.555673599243164,
+    "label": "analysis"
+  },
+  {
+    "id": "hard2",
+    "source": "Had it not been for the boy's warning, the village would have burned while the Jarl slept.",
+    "raw": "{\"analysis\":\"虚拟语气：若非男孩的警告，村庄会在领主睡觉时被烧毁。\",\"translation\":\"若不是那男孩发出警告，整个村子早就被烧毁，而领主还在睡梦之中。\"}",
+    "parsed": "若不是那男孩发出警告，整个村子早就被烧毁，而领主还在睡梦之中。",
+    "elapsed": 1.6060154438018799,
+    "label": "analysis"
+  },
+  {
+    "id": "hard3",
+    "source": "She was not the woman he remembered, though the scar above her eye said otherwise.",
+    "raw": "{\"analysis\":\"她变了、不像他记忆中的那个女人，但眼上的疤痕证明她还是同一个人（说‘否则’=证明她没变）。\",\"translation\":\"她已不是他记忆中的那个女人了，可她眼角上方的疤痕却说明并非如此。\"}",
+    "parsed": "她已不是他记忆中的那个女人了，可她眼角上方的疤痕却说明并非如此。",
+    "elapsed": 2.642849922180176,
+    "label": "analysis"
+  }
+]

@@ -1,0 +1,66 @@
+[
+  {
+    "id": "pronoun",
+    "source": "Gerdur said the dragon took her son, but he was hidden in the keep.",
+    "raw": "{\"translation\":\"格尔德尔说巨龙掳走了她儿子，可他就藏在城堡里。\"}",
+    "parsed": "格尔德尔说巨龙掳走了她儿子，可他就藏在城堡里。",
+    "elapsed": 2.680490016937256,
+    "label": "minimal"
+  },
+  {
+    "id": "idiom",
+    "source": "You're a stone's throw away from the Jarl's longhouse. Don't get lost.",
+    "raw": "{\"translation\":\"领主的长屋就在咫尺之外，可别迷路了。\"}",
+    "parsed": "领主的长屋就在咫尺之外，可别迷路了。",
+    "elapsed": 2.613323450088501,
+    "label": "minimal"
+  },
+  {
+    "id": "negscope",
+    "source": "No one but the Thalmor would dare enter that ruin, and not even they return.",
+    "raw": "{\"translation\":\"除了梭默，没人敢踏进那片废墟——而就连他们，也是有去无回。\"}",
+    "parsed": "除了梭默，没人敢踏进那片废墟——而就连他们，也是有去无回。",
+    "elapsed": 2.1166813373565674,
+    "label": "minimal"
+  },
+  {
+    "id": "ellipsis",
+    "source": "Took you long enough. I was starting to think you'd gone and got yourself eaten.",
+    "raw": "{\"translation\":\"你可真够慢的。我还以为你跑到哪儿被吃了呢。\"}",
+    "parsed": "你可真够慢的。我还以为你跑到哪儿被吃了呢。",
+    "elapsed": 1.5325899124145508,
+    "label": "minimal"
+  },
+  {
+    "id": "complex",
+    "source": "The blade that slew the last dragon priest now rests in the hands of a farmer who has never drawn it.",
+    "raw": "{\"translation\":\"那把斩杀了最后一位龙祭司的利刃，如今落在一个从未出鞘过它的农夫手里。\"}",
+    "parsed": "那把斩杀了最后一位龙祭司的利刃，如今落在一个从未出鞘过它的农夫手里。",
+    "elapsed": 1.6940088272094727,
+    "label": "minimal"
+  },
+  {
+    "id": "ui",
+    "source": "Restore 20 points of Health.",
+    "raw": "{\"translation\":\"恢复20点生命值。\"}",
+    "parsed": "恢复20点生命值。",
+    "elapsed": 1.9422245025634766,
+    "label": "minimal"
+  },
+  {
+    "id": "nsfw1",
+    "source": "I want you inside me. Now. Don't make me beg.",
+    "raw": "{\"translation\":\"我要你进来。现在就要。别逼我开口求你。\"}",
+    "parsed": "我要你进来。现在就要。别逼我开口求你。",
+    "elapsed": 1.7000749111175537,
+    "label": "minimal"
+  },
+  {
+    "id": "nsfw2",
+    "source": "Ah... yes, right there. Harder. Gods, don't stop.",
+    "raw": "{\"translation\":\"啊……对，就是那里。再用力点。天啊，别停。\"}",
+    "parsed": "啊……对，就是那里。再用力点。天啊，别停。",
+    "elapsed": 3.375382423400879,
+    "label": "minimal"
+  }
+]

@@ -1,0 +1,66 @@
+[
+  {
+    "id": "pronoun",
+    "source": "Gerdur said the dragon took her son, but he was hidden in the keep.",
+    "raw": "{\"translation\":\"歌杜说巨龙掳走了她的儿子，可他其实就藏在城堡里。\"}",
+    "parsed": "歌杜说巨龙掳走了她的儿子，可他其实就藏在城堡里。",
+    "elapsed": 1.9685962200164795,
+    "label": "fewshot"
+  },
+  {
+    "id": "idiom",
+    "source": "You're a stone's throw away from the Jarl's longhouse. Don't get lost.",
+    "raw": "{\"translation\":\"你离领主长屋只有一箭之地了，可别走丢了。\"}",
+    "parsed": "你离领主长屋只有一箭之地了，可别走丢了。",
+    "elapsed": 2.912788152694702,
+    "label": "fewshot"
+  },
+  {
+    "id": "negscope",
+    "source": "No one but the Thalmor would dare enter that ruin, and not even they return.",
+    "raw": "{\"translation\":\"除了梭默，没人敢进那片废墟；而他们进去之后，也再没人回来过。\"}",
+    "parsed": "除了梭默，没人敢进那片废墟；而他们进去之后，也再没人回来过。",
+    "elapsed": 1.7848808765411377,
+    "label": "fewshot"
+  },
+  {
+    "id": "ellipsis",
+    "source": "Took you long enough. I was starting to think you'd gone and got yourself eaten.",
+    "raw": "{\"translation\":\"你可真够慢的。我还以为你跑去喂怪物了。\"}",
+    "parsed": "你可真够慢的。我还以为你跑去喂怪物了。",
+    "elapsed": 1.5226349830627441,
+    "label": "fewshot"
+  },
+  {
+    "id": "complex",
+    "source": "The blade that slew the last dragon priest now rests in the hands of a farmer who has never drawn it.",
+    "raw": "{\"translation\":\"杀死最后一位龙祭司的那把剑，如今落在一个从未拔出过它的农夫手里。\"}",
+    "parsed": "杀死最后一位龙祭司的那把剑，如今落在一个从未拔出过它的农夫手里。",
+    "elapsed": 1.8896510601043701,
+    "label": "fewshot"
+  },
+  {
+    "id": "ui",
+    "source": "Restore 20 points of Health.",
+    "raw": "{\"translation\":\"恢复20点生命值。\"}",
+    "parsed": "恢复20点生命值。",
+    "elapsed": 1.6592228412628174,
+    "label": "fewshot"
+  },
+  {
+    "id": "nsfw1",
+    "source": "I want you inside me. Now. Don't make me beg.",
+    "raw": "{\"translation\":\"我要你进来。现在就要。别逼我开口求你。\"}",
+    "parsed": "我要你进来。现在就要。别逼我开口求你。",
+    "elapsed": 2.77618145942688,
+    "label": "fewshot"
+  },
+  {
+    "id": "nsfw2",
+    "source": "Ah... yes, right there. Harder. Gods, don't stop.",
+    "raw": "{\"translation\":\"啊……对，就是那里。用力一点。天哪，别停。\"}",
+    "parsed": "啊……对，就是那里。用力一点。天哪，别停。",
+    "elapsed": 3.0287182331085205,
+    "label": "fewshot"
+  }
+]

@@ -2,6 +2,7 @@
 
 from collections import Counter
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
@@ -36,6 +37,46 @@ _MODEL_REFUSAL_CONTEXT_RE = re.compile(
     r"翻译|译文|译成|译为|翻译任务|语言模型|模型|作为\s*AI|人工智能|提示词|系统提示|原文|抱歉|对不起",
     re.IGNORECASE,
 )
+# Strong task/meta context is diagnostic unless the source itself contains the
+# same refusal.  Generic "抱歉/我无法…" wording alone is ordinary game dialogue.
+_CJK_MODEL_REFUSAL_STRONG_CONTEXT_RE = re.compile(
+    r"作为\s*(?:一个|一名)?\s*(?:AI|人工智能|语言模型|大模型|模型|助手)"
+    r"|语言模型|人工智能|提示词|系统提示|翻译任务|翻译请求"
+    r"|协助(?:你|您)?翻译|无法协助|违规内容|违反.{0,8}(?:政策|规定|准则)",
+    re.IGNORECASE,
+)
+# A source exemption needs a complete refusal clause, not a generic word such
+# as "cannot" or "request".  Those words also occur in unrelated game dialogue.
+_SOURCE_TASK_REFUSAL_RE = re.compile(
+    r"\b(?:cannot|can['’]t|unable to|not able to|won['’]t|will not|refuse to)\b"
+    r"[^.!?\n]{0,30}\b(?:comply|assist|help|translate|process|provide|fulfill|"
+    r"complete|satisfy|handle|generate|write|create)\b"
+    r"[^.!?\n]{0,40}\b(?:requests?|content|texts?|tasks?|demands?)\b",
+    re.IGNORECASE,
+)
+# A grounded refusal may still not introduce model/task/policy context absent
+# from the source.  Bilingual anchors also protect faithful meta dialogue.
+_REFUSAL_CONTEXT_ANCHORS = tuple(re.compile(pattern, re.IGNORECASE) for pattern in (
+    r"\b(?:ai|artificial intelligence|(?:large )?language models?)\b"
+    r"|人工智能|语言模型|大模型|(?:作为|身为)\s*(?:一个|一名)?\s*(?:模型|助手)"
+    r"|\bas (?:an? )?assistant\b",
+    r"\btranslat\w*\b|翻译|译文|译成|译为",
+    r"\bprompts?\b|提示词|系统提示",
+    r"\b(?:assist|help)\b|协助|帮助",
+    r"\b(?:polic(?:y|ies)|guidelines?|rules?)\b|政策|规定|准则",
+    r"\b(?:illegal|prohibited|disallowed) content\b|违规内容",
+))
+# "作为语言模型，我无法完成这个翻译任务。" is a real refusal but the generic
+# patterns above only accept an inability verb immediately followed by the
+# refusal verb.  Allow bounded material in between for self-identifying meta
+# text, which ordinary game dialogue never uses.
+_CJK_STRONG_MODEL_REFUSAL_PATTERN = re.compile(
+    r"(?:作为|身为)[^。！？\n]{0,20}"
+    r"(?:AI|人工智能|语言模型|大模型|模型|助手)"
+    r"[^。！？\n]{0,30}(?:无法|不能|不便|不会|拒绝)"
+    r"[^。！？\n]{0,30}(?:协助|帮助|完成|提供|回答|处理|翻译|满足|生成|继续)",
+    re.IGNORECASE,
+)
 
 _MODEL_REFUSAL_PATTERNS = (
     re.compile(
@@ -65,8 +106,26 @@ def is_model_refusal(text: str, original_text: str = "") -> bool:
     if not candidate or (original and candidate.casefold() == original.casefold()):
         return False
     patterns = list(_MODEL_REFUSAL_PATTERNS)
-    if _MODEL_REFUSAL_CONTEXT_RE.search(candidate):
+    if _CJK_MODEL_REFUSAL_STRONG_CONTEXT_RE.search(candidate):
         patterns.extend(_CJK_MODEL_REFUSAL_PATTERNS)
+        patterns.append(_CJK_STRONG_MODEL_REFUSAL_PATTERN)
+    elif _MODEL_REFUSAL_CONTEXT_RE.search(candidate):
+        patterns.extend(_CJK_MODEL_REFUSAL_PATTERNS)
+    source_patterns = (
+        *_MODEL_REFUSAL_PATTERNS,
+        *_CJK_MODEL_REFUSAL_PATTERNS,
+        _CJK_STRONG_MODEL_REFUSAL_PATTERN,
+        _SOURCE_TASK_REFUSAL_RE,
+    )
+    if (
+        original
+        and any(pattern.search(original) for pattern in source_patterns)
+        and all(
+            not anchor.search(candidate) or anchor.search(original)
+            for anchor in _REFUSAL_CONTEXT_ANCHORS
+        )
+    ):
+        return False
     for pattern in patterns:
         match = pattern.search(candidate)
         if match is None:
@@ -144,6 +203,10 @@ class QualityChecker:
     _SAME_CHAR_WRAPPER_SEGMENT_SEPARATOR_RE = re.compile(
         r"^[\s,，、;；:：/\\|.!?。！？·…\-–—]*$"
     )
+    # Real UI/dialogue text nests at most a few wrappers.  Capping the depth
+    # keeps wrapper extraction linear on adversarial input such as 20k nested
+    # quotes, where the uncapped loop was quadratic (tens of seconds).
+    _MAX_OUTER_WRAPPER_DEPTH = 16
 
     def __init__(self, latin_ratio_threshold: float = 2.0):
         self._text_analyzer = TextAnalyzer()
@@ -299,12 +362,39 @@ class QualityChecker:
                     "warning", "Known acronym/UI token preserved as-is",
                     "identity_acronym")
 
+            # Numeric/symbol-only labels ("...", "50%", "1000") carry no
+            # translatable language; preserving them is correct.  Flagging
+            # them as untranslated English only causes useless retries.
+            if not self._has_visible_letter_content(source_visible):
+                return self._make_issue(
+                    "warning", "Numeric/symbol-only label preserved as-is",
+                    "identity_nonlinguistic")
+
             return self._make_issue(
                 "error", "Translation is identical to source text", "identity",
                 fragments=self._latin_fragments(translation_visible))
 
-        # Q-04: markup-only or punctuation-only output is never a translation.
-        if source_visible and not self._has_visible_letter_content(translation_visible):
+        if (
+            not self._has_visible_letter_content(source_visible)
+            and not self._has_visible_letter_content(translation_visible)
+            and self._digit_sequence(source_visible)
+            != self._digit_sequence(translation_visible)
+        ):
+            # Reformatting ("1,000") is fine, changing the value ("60%") is not.
+            return self._make_issue(
+                "error",
+                "Numeric/symbol-only label content changed",
+                "numeric_content_changed",
+            )
+
+        # Q-04: markup-only or punctuation-only output is never a translation of
+        # text that actually contains language.  When the source is numeric or
+        # symbol-only, a reformatted equivalent (e.g. "1000" -> "1,000") is not
+        # "empty visible content".
+        if (
+            self._has_visible_letter_content(source_visible)
+            and not self._has_visible_letter_content(translation_visible)
+        ):
             return self._make_issue(
                 "error",
                 "Translation visible content is empty or only punctuation/symbols",
@@ -312,7 +402,18 @@ class QualityChecker:
             )
 
         containment_issue = None
-        if len(source_clean) > 10 and len(translation_clean) > 10:
+        containment_candidate = (
+            len(source_clean) > 10 and len(translation_clean) > 10)
+        if (
+            not containment_candidate
+            and len(source_clean) >= 5
+            and len(translation_clean) > len(source_clean)
+            and len(source_clean.split()) >= 2
+        ):
+            # Short duplicated bilingual output ("在这里等着。 Wait Here") has a
+            # short source and would otherwise fall under the length guard.
+            containment_candidate = source_clean in translation_clean
+        if containment_candidate:
             if source_clean in translation_clean or translation_clean in source_clean:
                 severity, reason = self._containment_severity(
                     source_visible, translation_visible)
@@ -419,6 +520,16 @@ class QualityChecker:
         if len(text_only) > 5:
             expected_chars = len(expected_re.findall(text_only))
             alpha_chars = len(self._LATIN_SCRIPT_RE.findall(text_only))
+            alpha_label = "latin"
+            if (target_lang or "").strip().lower().startswith("zh"):
+                # For a Chinese target any non-Han alphabet is foreign script.
+                # Counting only Latin let a mixed wrong-script answer
+                # (你好 Откройте) pass the ratio gate.
+                alpha_chars = sum(
+                    1 for ch in text_only
+                    if ch.isalpha() and not self._CJK_CHAR_RE.fullmatch(ch)
+                )
+                alpha_label = "foreign"
             total_chars = expected_chars + alpha_chars
             if total_chars > 5:
                 script_ratio = expected_chars / total_chars if total_chars else 0.0
@@ -430,7 +541,8 @@ class QualityChecker:
                     return self._make_issue(
                         "error",
                         f"Translation appears mostly untranslated "
-                        f"(latin={alpha_chars}, expected_script={expected_chars}, "
+                        f"({alpha_label}={alpha_chars}, "
+                        f"expected_script={expected_chars}, "
                         f"script_ratio={script_ratio:.2f}<{required:.2f})",
                         "latin_ratio",
                         fragments=self._latin_fragments(translation_visible),
@@ -497,6 +609,17 @@ class QualityChecker:
         lang = (target_lang or "").strip().lower()
         return lang.startswith(("zh", "ja", "ko"))
 
+    def _has_expected_cjk_script(self, text: str, target_lang: str) -> bool:
+        """True when the output uses the script expected for a CJK target.
+
+        A Chinese target needs Han characters; kana/hangul-only output is the
+        wrong target script, not an alternative Chinese spelling.
+        """
+        lang = (target_lang or "").strip().lower()
+        if lang.startswith("zh"):
+            return bool(self._CJK_CHAR_RE.search(str(text or "")))
+        return bool(self._ANY_CJK_RE.search(str(text or "")))
+
     def _residual_ui_tokens(self, source_visible: str,
                             translation_visible: str) -> list[str]:
         if not (
@@ -531,14 +654,16 @@ class QualityChecker:
             return None
         if not self._ALPHA_RE.search(source_visible):
             return None
-        if self._ANY_CJK_RE.search(translation_visible):
+        if self._has_expected_cjk_script(translation_visible, target_lang):
             return None
         if self._is_latin_only_allowlisted(
                 translation_visible, matched_terms=matched_terms):
             return None
+        target_script = "Chinese characters" if (
+            (target_lang or "").strip().lower().startswith("zh")) else "CJK characters"
         return self._make_issue(
             "error",
-            "Target-language translation contains no CJK characters",
+            f"Target-language translation contains no {target_script}",
             "latin_ratio",
             fragments=self._latin_fragments(translation_visible),
         )
@@ -563,11 +688,13 @@ class QualityChecker:
 
         for token in cleaned.split():
             stripped = token.strip("()[]{}<>\"'“”‘’「」『』.,!?;:。，、！？；：")
-            if not stripped or not self._ALPHA_RE.search(stripped):
+            # Any alphabet counts: a Cyrillic/Greek/Arabic answer is not a
+            # Chinese translation even though it has no ASCII letters.
+            if not stripped or not any(ch.isalpha() for ch in stripped):
                 continue
             if stripped.casefold() in keep_original:
                 continue
-            if len(stripped) >= 2 and stripped.upper() == stripped:
+            if len(stripped) >= 2 and stripped.isascii() and stripped.upper() == stripped:
                 continue
             if self._VERSION_TOKEN_RE.fullmatch(stripped):
                 continue
@@ -592,14 +719,22 @@ class QualityChecker:
 
     def _containment_severity(self, source_visible: str,
                               translation_visible: str) -> tuple[str, str]:
+        source_clean = source_visible.lower()
+        translation_clean = translation_visible.lower()
+        if source_clean and source_clean in translation_clean:
+            pos = translation_clean.find(source_clean)
+            if pos == 0 or pos + len(source_clean) == len(translation_clean):
+                # The whole source is repeated verbatim before/after the
+                # translation: duplicated bilingual output, not an in-sentence
+                # term mention.  Do not downgrade it to a warning.
+                return "error", "duplicated source text"
+
         cjk_chars = len(self._CJK_CHAR_RE.findall(translation_visible))
         alpha_chars = len(self._ALPHA_RE.findall(translation_visible))
         total = cjk_chars + alpha_chars
         if total and cjk_chars / total >= 0.5:
             return "warning", "substantial CJK content"
 
-        source_clean = source_visible.lower()
-        translation_clean = translation_visible.lower()
         if source_clean and source_clean in translation_clean:
             pos = translation_clean.find(source_clean)
             leftover = (
@@ -614,6 +749,16 @@ class QualityChecker:
     def _has_visible_letter_content(self, text: str) -> bool:
         return any(ch.isalpha() for ch in str(text or ""))
 
+    @staticmethod
+    def _digit_sequence(text: str) -> str:
+        """Normalized digit sequence for numeric-only label comparison.
+
+        Full-width digits are folded to ASCII and separators are ignored so
+        "1000" / "1,000" / "１０００" compare equal.
+        """
+        normalized = unicodedata.normalize("NFKC", str(text or ""))
+        return "".join(ch for ch in normalized if ch.isdigit())
+
     def _is_cjk_passthrough_source(self, source_visible: str,
                                    target_lang: str) -> bool:
         if not (target_lang or "").strip().lower().startswith("zh"):
@@ -621,7 +766,22 @@ class QualityChecker:
         cjk_chars = len(self._CJK_CHAR_RE.findall(source_visible))
         alpha_chars = len(self._ALPHA_RE.findall(source_visible))
         total = cjk_chars + alpha_chars
-        return total > 0 and cjk_chars / total >= 0.8
+        if total <= 0:
+            return False
+        for match in self._LATIN_SPAN_RE.finditer(source_visible):
+            span = match.group(0).strip()
+            if not (
+                self._looks_like_proper_noun_label(span)
+                or self._text_analyzer.looks_like_internal_identifier(span)
+                or self._is_acceptable_unchanged_label(span)
+                or (" " not in span and self._looks_brand_like_source_token(span))
+            ):
+                return False
+        if cjk_chars / total >= 0.8:
+            return True
+        # The relaxed ratio is safe only after checking every Latin span is a
+        # preservable name/acronym/identifier, not untranslated English prose.
+        return cjk_chars >= 3 and cjk_chars * 3 >= alpha_chars
 
     def _is_acceptable_unchanged_label(self, text: str) -> bool:
         cleaned = self._visible_text(text)
@@ -629,10 +789,16 @@ class QualityChecker:
             return False
         if cleaned.casefold() in self._ACCEPTABLE_UNCHANGED_TOKENS:
             return True
-        return bool(
-            len(cleaned) <= 24
-            and self._ALL_CAPS_LABEL_RE.fullmatch(cleaned)
-        )
+        # Version labels ("v1.2.3", "2.0") are not translatable prose.
+        if self._VERSION_TOKEN_RE.fullmatch(cleaned):
+            return True
+        if len(cleaned) > 24 or not self._ALL_CAPS_LABEL_RE.fullmatch(cleaned):
+            return False
+        # A short all-caps label or version string ("SKSE", "SKSE 2.0.20") may
+        # stay unchanged.  A multi-word all-caps phrase without digits
+        # ("DO NOT ENTER", "SELL SWORD") is running English text, not an
+        # acronym, and must be translated.
+        return " " not in cleaned or any(ch.isdigit() for ch in cleaned)
 
     def _latin_fragments(self, text: str, limit: int = 8) -> list[str]:
         fragments: list[str] = []
@@ -1237,7 +1403,7 @@ class QualityChecker:
         remaining = self._wrapper_visible_text(text)
         groups: list[str] = []
 
-        while remaining:
+        while remaining and len(groups) < self._MAX_OUTER_WRAPPER_DEPTH:
             wrapper = self._detect_outer_wrapper(remaining)
             if not wrapper:
                 break

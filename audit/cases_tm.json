@@ -1,0 +1,26 @@
+[
+  {
+    "id": "tm_none",
+    "text": "Wait 24 hours for the renovations to finish",
+    "style": "default",
+    "kind": "quest"
+  },
+  {
+    "id": "tm_gloss",
+    "text": "Wait 24 hours for the renovations to finish",
+    "style": "default",
+    "kind": "quest",
+    "glossary": {
+      "Wait 24 hours for the renovations to finish": "等待24小时装修完毕"
+    }
+  },
+  {
+    "id": "tm_alt",
+    "text": "Wait 24 hours for the renovations to finish",
+    "style": "default",
+    "kind": "quest",
+    "glossary": {
+      "Wait 24 hours for the renovations to finish": "等待 24 小时，等装修完成"
+    }
+  }
+]

@@ -1,0 +1,42 @@
+[
+  {
+    "id": "health_none",
+    "text": "Restore 20 points of Health.",
+    "style": "default",
+    "kind": "ui"
+  },
+  {
+    "id": "health_bad",
+    "text": "Restore 20 points of Health.",
+    "style": "default",
+    "kind": "ui",
+    "glossary": {
+      "Health": "生命"
+    }
+  },
+  {
+    "id": "health_good",
+    "text": "Restore 20 points of Health.",
+    "style": "default",
+    "kind": "ui",
+    "glossary": {
+      "Health": "生命值"
+    }
+  },
+  {
+    "id": "jarl_none",
+    "text": "Report back to Jarl Balgruuf.",
+    "style": "default",
+    "kind": "quest"
+  },
+  {
+    "id": "jarl_gloss",
+    "text": "Report back to Jarl Balgruuf.",
+    "style": "default",
+    "kind": "quest",
+    "glossary": {
+      "Jarl Balgruuf": "巴尔古夫领主",
+      "Jarl": "雅尔"
+    }
+  }
+]

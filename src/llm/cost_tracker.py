@@ -15,6 +15,7 @@ class UsageRecord:
     estimated_cost: float
     operation: str  # "translate", "keyword_extract", "embedding", "retry", "reformat"
     cached_prompt_tokens: int = 0
+    cache_usage_reported: bool = False
 
 
 # Rough pricing per 1M tokens (input/output) for common models.
@@ -55,7 +56,7 @@ class CostTracker:
 
     def record(self, model: str, prompt_tokens: int, completion_tokens: int,
                operation: str = "translate",
-               cached_prompt_tokens: int = 0) -> None:
+               cached_prompt_tokens: Optional[int] = None) -> None:
         def _nonneg(value: object) -> int:
             try:
                 return max(0, int(value or 0))  # type: ignore[arg-type]
@@ -64,6 +65,7 @@ class CostTracker:
 
         prompt_tokens = _nonneg(prompt_tokens)
         completion_tokens = _nonneg(completion_tokens)
+        cache_usage_reported = cached_prompt_tokens is not None
         cached_prompt_tokens = max(0, min(_nonneg(cached_prompt_tokens), prompt_tokens))
         cost = self.estimate_cost(
             model,
@@ -79,6 +81,7 @@ class CostTracker:
             estimated_cost=cost,
             operation=operation,
             cached_prompt_tokens=cached_prompt_tokens,
+            cache_usage_reported=cache_usage_reported,
         )
         with self._lock:
             self._records.append(rec)
@@ -113,56 +116,64 @@ class CostTracker:
         return input_cost + output_cost
 
     def get_session_summary(self) -> dict:
-        """Return a summary of the current session's usage."""
+        """Summarize usage; cache rates cover only explicitly reported usage."""
         with self._lock:
             records = list(self._records)
             counters = dict(self._counters)
-        if not records:
-            return {
-                "total_requests": 0,
-                "total_prompt_tokens": 0,
-                "total_completion_tokens": 0,
-                "total_cached_prompt_tokens": 0,
-                "prompt_cache_hit_rate": 0.0,
-                "total_tokens": 0,
-                "estimated_cost_usd": 0.0,
-                "by_operation": {},
-                "counters": counters,
-            }
         total_prompt = sum(r.prompt_tokens for r in records)
         total_completion = sum(r.completion_tokens for r in records)
         total_cached_prompt = sum(r.cached_prompt_tokens for r in records)
         total_cost = sum(r.estimated_cost for r in records)
+        cache_reports = sum(r.cache_usage_reported for r in records)
+        reported_prompt = sum(r.prompt_tokens for r in records if r.cache_usage_reported)
 
         by_op: dict[str, dict] = {}
+        by_model: dict[str, dict] = {}
         for r in records:
-            if r.operation not in by_op:
-                by_op[r.operation] = {
-                    "requests": 0,
-                    "prompt_tokens": 0,
-                    "cached_prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "cost": 0.0,
-                }
-            entry = by_op[r.operation]
-            entry["requests"] += 1
-            entry["prompt_tokens"] += r.prompt_tokens
-            entry["cached_prompt_tokens"] += r.cached_prompt_tokens
-            entry["completion_tokens"] += r.completion_tokens
-            entry["cost"] += r.estimated_cost
+            for groups, key in ((by_op, r.operation), (by_model, r.model)):
+                if key not in groups:
+                    groups[key] = {
+                        "requests": 0,
+                        "prompt_tokens": 0,
+                        "cached_prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "cost": 0.0,
+                        "cache_usage_reports": 0,
+                        "cache_reported_prompt_tokens": 0,
+                    }
+                entry = groups[key]
+                entry["requests"] += 1
+                entry["prompt_tokens"] += r.prompt_tokens
+                entry["cached_prompt_tokens"] += r.cached_prompt_tokens
+                entry["completion_tokens"] += r.completion_tokens
+                entry["cost"] += r.estimated_cost
+                if r.cache_usage_reported:
+                    entry["cache_usage_reports"] += 1
+                    entry["cache_reported_prompt_tokens"] += r.prompt_tokens
+
+        for groups in (by_op, by_model):
+            for entry in groups.values():
+                denominator = entry["cache_reported_prompt_tokens"]
+                entry["prompt_cache_hit_rate"] = (
+                    round(entry["cached_prompt_tokens"] / denominator, 4)
+                    if denominator > 0 else 0.0
+                )
 
         return {
             "total_requests": len(records),
             "total_prompt_tokens": total_prompt,
             "total_completion_tokens": total_completion,
             "total_cached_prompt_tokens": total_cached_prompt,
+            "cache_usage_reports": cache_reports,
+            "cache_reported_prompt_tokens": reported_prompt,
             "prompt_cache_hit_rate": (
-                round(total_cached_prompt / total_prompt, 4)
-                if total_prompt > 0 else 0.0
+                round(total_cached_prompt / reported_prompt, 4)
+                if reported_prompt > 0 else 0.0
             ),
             "total_tokens": total_prompt + total_completion,
             "estimated_cost_usd": round(total_cost, 6),
             "by_operation": by_op,
+            "by_model": by_model,
             "counters": counters,
         }
 

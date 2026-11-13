@@ -1,0 +1,20 @@
+[
+  {
+    "id": "ru",
+    "text": "Дракон разрушил деревню, и люди бежали в лес.",
+    "style": "default",
+    "kind": "book"
+  },
+  {
+    "id": "ja",
+    "text": "ドラゴンが村を焼き払った。生き残った者は森へ逃げた。",
+    "style": "default",
+    "kind": "book"
+  },
+  {
+    "id": "fr",
+    "text": "Le dragon a brûlé le village, et les survivants ont fui dans la forêt.",
+    "style": "default",
+    "kind": "book"
+  }
+]
