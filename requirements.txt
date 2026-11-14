@@ -2,7 +2,8 @@
 # Build-only tools live in build-requirements.txt (pyinstaller).
 PyQt6>=6.5.0
 openai>=1.0.0
+httpx>=0.28.1
 lxml>=5.0.0
 defusedxml>=0.7.1
 numpy>=1.24.0
-# Note: httpx/tiktoken are transitive via openai; scikit-learn is not used directly.
+# httpx is used directly by retry classification; do not rely on SDK transitives.

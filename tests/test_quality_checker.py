@@ -195,6 +195,38 @@ class QualityCheckerPlaceholderResidueTests(unittest.TestCase):
             issues,
         )
 
+    def test_accepts_gendered_cjk_form_of_glossary_anchor(self):
+        source = (
+            "What, too scared to look me in the eye? "
+            "I thought you could handle a strong Nord woman like myself."
+        )
+        translation = "什么，怕得不敢直视我的眼睛？我还以为你能应付像我这样的强壮诺德女人。"
+        issues = self.checker.check(
+            source,
+            translation,
+            {"Nord": "诺德人", "handle": "处理"},
+            target_lang="zh",
+        )
+
+        self.assertFalse(
+            any(issue.rule_id == "glossary_anchor_coverage" for issue in issues),
+            issues,
+        )
+        self.assertFalse(self.checker.should_retry(issues), issues)
+
+    def test_cjk_anchor_expansion_does_not_accept_partial_anchor(self):
+        issues = self.checker.check(
+            "A Nord woman is waiting outside. I can help.",
+            "一个女人正在外面等着。我可以帮忙。",
+            {"Nord": "诺德人", "help": "帮助"},
+            target_lang="zh",
+        )
+
+        self.assertTrue(
+            any(issue.rule_id == "glossary_anchor_coverage" for issue in issues),
+            issues,
+        )
+
     def test_accepts_reported_dialogue_with_apostrophe_in_glossary_name(self):
         source = (
             "Wind down? With the Alik'r still out there, I can barely sleep. "

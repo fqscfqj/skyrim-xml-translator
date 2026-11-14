@@ -96,6 +96,17 @@ class PromptBudgetTests(unittest.TestCase):
             with self.subTest(token=token):
                 self.assertIn(token, text)
 
+    def test_nsfw_prompt_keeps_insult_terms_as_address(self):
+        text = "\n".join(self.prompts.get(
+            "translator.system_prompts.nsfw", []))
+        for token in (
+            "cunt、bitch 等用作骂语称呼而非指器官时",
+            "不加源文没有的“肏”",
+            "filthy、dirty 按本义译",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, text)
+
     def test_nsfw_prompt_is_conditional_and_does_not_sexualize_benign_text(self):
         text = "\n".join(self.prompts.get(
             "translator.system_prompts.nsfw", []))

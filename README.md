@@ -87,11 +87,12 @@ deduplication.
 
 ## 安装
 
-1. 安装 Python 3.8 或更高版本。
-2. 安装依赖：
+1. 安装 Python 3.10 或更高版本。
+2. 创建项目虚拟环境 `env` 并安装依赖：
 
-```bash
-pip install -r requirements.txt
+```powershell
+python -m venv env
+.\env\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
 主要依赖：
@@ -100,15 +101,13 @@ pip install -r requirements.txt
 - `openai`
 - `lxml`
 - `numpy`
-- `scikit-learn`
-- `pyinstaller`
 
 ## 使用说明
 
 启动程序：
 
-```bash
-python main.py
+```powershell
+.\env\Scripts\python.exe main.py
 ```
 
 基本流程：
@@ -165,13 +164,20 @@ python main.py
 
 ## 打包为 Windows 可执行文件
 
-当前受支持的构建入口是 `build_exe.py`。
+统一使用项目 `env` 构建，入口为 `build.ps1`（内部调用 `build_exe.py`）。直接使用全局 Python 构建会被拒绝。首次构建时安装已验证的锁定依赖：
+
+```powershell
+python -m venv env
+.\env\Scripts\python.exe -m pip install -r build-requirements.lock
+```
+
+`build-requirements.lock` 固定本次验证的运行、打包和测试依赖版本。升级依赖后需重新运行测试并验证打包程序启动，再更新锁定文件。Windows 构建会隔离 DLL 搜索路径，避免把 PATH 中其他工具的同名 DLL（例如 Poppler 的 ICU）误打入程序。
 
 `build_exe.py` 会在存在时包含以下资源：
 
 - `locales/`
 - `prompts/`
-- `config.json` 或 `config.example.json`
+- `config.example.json`（不包含保存 API Key 的 `config.json`）
 - `assets/`
 
 默认不会把运行期生成的术语索引、缓存或日志目录打进包内；这些内容应由用户在运行后生成或放置。
@@ -179,13 +185,13 @@ python main.py
 快速打包：
 
 ```powershell
-python build_exe.py --onefile --windowed
+.\build.ps1 --onefile --windowed
 ```
 
 或直接运行：
 
 ```powershell
-python build_exe.py --onedir --console
+.\build.ps1 --onedir --console
 ```
 
 ## 日志说明

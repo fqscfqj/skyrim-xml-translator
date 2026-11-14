@@ -86,6 +86,23 @@ class StyleProfileResolverTests(unittest.TestCase):
             profile.rules,
         )
 
+    def test_all_shipped_profiles_preserve_cultural_context_without_word_pairs(self):
+        prompts = PromptManager()
+        resolver = StyleProfileResolver(prompts, _DummyConfig())
+
+        for profile_id in prompts.get("translator.style_profiles", {}):
+            for style in ("default", "nsfw"):
+                with self.subTest(profile=profile_id, style=style):
+                    profile = resolver.resolve(style, {"style_profile": profile_id})
+                    rules = "\n".join(profile.rules)
+                    self.assertIn("保留西方奇幻世界的设定", rules)
+                    self.assertIn("职业、身份、称谓和制度按实际职能与语境选词", rules)
+                    self.assertIn("优先文化中性的准确表达", rules)
+                    self.assertIn("不套用中国古代、科举或武侠语汇", rules)
+                    self.assertIn("原文确有对应文化背景时除外", rules)
+                    self.assertNotIn("scholar", rules.lower())
+                    self.assertNotIn("书生", rules)
+
     def test_configured_profile_overrides_automatic_mapping(self):
         resolver = StyleProfileResolver(
             _DummyPromptManager(),

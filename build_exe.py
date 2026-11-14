@@ -1,24 +1,50 @@
-import PyInstaller.__main__
 import os
 import shutil
 import sys
 import argparse
 
 
-def check_environment():
-    """Abort early if the active interpreter lacks PyQt6.
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
-    PyInstaller only collects packages visible to the interpreter it runs
-    under, so building with the system Python silently produces an exe that
-    crashes with 'No module named PyQt6'.
-    """
+
+def check_project_environment():
+    expected = os.path.join(PROJECT_ROOT, 'env')
+    if os.path.normcase(os.path.realpath(sys.prefix)) != os.path.normcase(os.path.realpath(expected)):
+        raise SystemExit(
+            f'Builds must use the project env, not {sys.executable}.\n'
+            'Create it and install the locked dependencies first:\n'
+            '  python -m venv env\n'
+            '  env\\Scripts\\python.exe -m pip install -r build-requirements.lock\n'
+            'Then run: .\\build.ps1'
+        )
+
+
+def configure_build_path():
+    if os.name != 'nt':
+        return
+    windows = os.environ.get('SystemRoot') or os.environ['WINDIR']
+    # PyInstaller searches PATH for DLLs. External tools can ship incompatible
+    # copies of Windows ICU (e.g. Poppler's icuuc.dll), breaking Qt at startup.
+    paths = [
+        os.path.join(windows, 'System32'),
+        windows,
+        os.path.join(sys.prefix, 'Scripts'),
+        sys.base_prefix,
+        os.path.join(sys.base_prefix, 'DLLs'),
+    ]
+    os.environ['PATH'] = os.pathsep.join(paths)
+
+
+def check_environment():
+    """Validate the build interpreter and actual Qt DLL loading before cleanup."""
+    check_project_environment()
+    configure_build_path()
     try:
-        import PyQt6  # noqa: F401
+        from PyQt6.QtWidgets import QApplication  # noqa: F401
     except ImportError:
         raise SystemExit(
-            'PyQt6 is not importable in the current Python environment '
-            f'({sys.executable}). Build with the project venv instead:\n'
-            '  .venv\\Scripts\\python.exe build_exe.py'
+            f'QtWidgets cannot load in {sys.executable}. Reinstall the build dependencies:\n'
+            '  env\\Scripts\\python.exe -m pip install -r build-requirements.lock'
         )
 
 
@@ -81,6 +107,10 @@ def build(onefile=True, windowed=True, name='SkyrimXMLTranslator', icon=None,
           clean_build=True, copy_runtime_folders=True):
     print('Starting build process...')
     check_environment()
+    import PyInstaller.__main__
+
+    os.chdir(PROJECT_ROOT)
+    print(f'Build interpreter: {sys.executable}')
 
     if not clean_build:
         print('Incremental build requested: reusing previous dist/build without --clean.')

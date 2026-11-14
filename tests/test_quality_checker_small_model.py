@@ -96,6 +96,46 @@ class SmallModelFalseFailureTests(unittest.TestCase):
             with self.subTest(translation=translation):
                 self.assert_no_retry(source, translation)
 
+    def test_capitalized_untranslated_common_word_is_rejected(self):
+        source = (
+            "Time to decide are you a saint or sinner? "
+            "Either way mistress is gonna punish you."
+        )
+        translation = "是时候决定了，你是圣徒还是罪人？无论哪种， Mistress 都要惩罚你。"
+
+        issues = self.checker.check(source, translation, target_lang="zh")
+
+        latin_errors = [
+            issue for issue in issues
+            if issue.rule_id == "latin_ratio" and issue.severity == "error"
+        ]
+        self.assertTrue(latin_errors, issues)
+        self.assertIn("Mistress", latin_errors[0].fragments)
+        self.assertTrue(self.checker.should_retry(issues))
+
+    def test_title_case_untranslated_common_title_is_rejected(self):
+        source = (
+            "Time to decide are you a saint or sinner? "
+            "Either way Mistress is gonna punish you."
+        )
+        translation = "是时候决定了，你是圣徒还是罪人？无论哪种， Mistress 都要惩罚你。"
+
+        issues = self.checker.check(source, translation, target_lang="zh")
+
+        latin_errors = [
+            issue for issue in issues
+            if issue.rule_id == "latin_ratio" and issue.severity == "error"
+        ]
+        self.assertTrue(latin_errors, issues)
+        self.assertIn("Mistress", latin_errors[0].fragments)
+
+    def test_title_case_common_title_identity_is_rejected(self):
+        issues = self.checker.check("Mistress", "Mistress", target_lang="zh")
+
+        self.assertTrue(
+            any(issue.rule_id == "identity" and issue.severity == "error"
+                for issue in issues), issues)
+
     def test_trailing_newline_and_localized_punctuation_are_accepted(self):
         self.assert_no_retry("Hello.\n", "你好。")
         self.assert_no_retry("Wait, please.", "请稍等。")

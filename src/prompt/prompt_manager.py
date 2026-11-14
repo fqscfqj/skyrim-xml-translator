@@ -38,16 +38,40 @@ class PromptManager:
         self._lock = RLock()
 
         if getattr(sys, "frozen", False):
-            base_path = getattr(
-                sys,
-                "_MEIPASS",
-                os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-            )
+            base_path = self._resolve_frozen_base_path()
         else:
             base_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
         self.prompts_dir = os.path.join(base_path, "prompts")
         self.load()
+
+    @staticmethod
+    def _prompts_dir_has_json(path: str) -> bool:
+        """True if the directory exists and contains at least one .json file."""
+        if not os.path.isdir(path):
+            return False
+        for _root, _dirs, files in os.walk(path):
+            if any(name.lower().endswith(".json") for name in files):
+                return True
+        return False
+
+    @classmethod
+    def _resolve_frozen_base_path(cls) -> str:
+        """Prefer editable prompts next to the exe over the embedded copy.
+
+        Onefile builds extract an immutable prompt snapshot to _MEIPASS, which
+        would silently ignore user edits in the prompts folder shipped next to
+        the executable. When that folder holds prompt JSON files, use it;
+        otherwise fall back to the embedded snapshot so a stripped install
+        still works.
+        """
+        module_root = os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        external_prompts = os.path.join(exe_dir, "prompts")
+        if cls._prompts_dir_has_json(external_prompts):
+            return exe_dir
+        return getattr(sys, "_MEIPASS", module_root)
 
     def _deep_merge(self, target: dict, incoming: dict, path: str = "") -> None:
         for key, value in incoming.items():

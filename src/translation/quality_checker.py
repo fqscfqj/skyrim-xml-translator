@@ -166,9 +166,12 @@ class QualityChecker:
     )
     _WHITESPACE_RE = re.compile(r"\s+")
     _ALLOW_CONNECTORS = {"of", "the", "and", "de", "la", "du", "da"}
-    # Skyrim lore vocabulary, not proper names: these concepts must be localized
-    # even though capitalization can make them look like names in dialogue.
-    _LOCALIZE_SOURCE_TERMS = frozenset({"mer"})
+    # Skyrim lore vocabulary and common titles, not proper names: these concepts
+    # must be localized even when capitalization makes them look like names.
+    _LOCALIZE_SOURCE_TERMS = frozenset({
+        "brother", "captain", "commander", "king", "lady", "lord", "madam",
+        "master", "mer", "mistress", "queen", "sergeant", "sir", "sister",
+    })
     _ANY_CJK_RE = re.compile(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]")
     _PARAGRAPH_BREAK_RE = re.compile(r"(?:\r\n|\n|\r)[ \t]*(?:\r\n|\n|\r)")
     _VERSION_TOKEN_RE = re.compile(r"^[vV]?\d+(?:\.\d+)+[A-Za-z0-9]*$")
@@ -839,6 +842,42 @@ class QualityChecker:
         """
         return QualityChecker._target_script(target_lang) in {"cjk", "cyrillic"}
 
+    @staticmethod
+    def _source_contains_exact_latin_span(source: str, span: str) -> bool:
+        """Return whether *span* keeps the source's Latin surface casing.
+
+        A model may capitalize an untranslated ordinary word after Chinese
+        punctuation (for example ``mistress`` -> ``Mistress``).  That must not
+        be mistaken for a proper name.  Apostrophe variants and whitespace are
+        normalized because they are harmless surface differences for names.
+        """
+        source_text = str(source or "")
+        candidate = str(span or "").strip()
+        if not source_text or not candidate:
+            return False
+        normalize = lambda value: str(value).replace("’", "'").replace("‘", "'").replace("＇", "'")
+        candidate = re.sub(r"\s+", " ", normalize(candidate))
+        source_normalized = re.sub(r"\s+", " ", normalize(source_text))
+        try:
+            pattern = re.compile(
+                r"(?<![A-Za-z])" + re.escape(candidate) + r"(?![A-Za-z])"
+            )
+        except re.error:
+            return False
+        return bool(pattern.search(source_normalized))
+
+    def _is_preservable_latin_span(
+            self, source_visible: str, span: str) -> bool:
+        """Whether a Latin span is a source-preserved name/identifier."""
+        if not self._source_contains_exact_latin_span(source_visible, span):
+            return False
+        return (
+            self._looks_like_proper_noun_label(span)
+            or self._text_analyzer.looks_like_internal_identifier(span)
+            or self._is_acceptable_unchanged_label(span)
+            or self._looks_brand_like_source_token(span)
+        )
+
     def _residual_latin_spans(
             self, source_visible: str,
             translation_visible: str) -> list[str]:
@@ -855,11 +894,7 @@ class QualityChecker:
             if span.casefold() in self._LOCALIZE_SOURCE_TERMS:
                 fragments.append(span)
                 continue
-            if (
-                    self._looks_like_proper_noun_label(span)
-                    or self._text_analyzer.looks_like_internal_identifier(span)
-                    or self._is_acceptable_unchanged_label(span)
-                    or self._looks_brand_like_source_token(span)):
+            if self._is_preservable_latin_span(source_visible, span):
                 continue
             fragments.append(span)
         return list(dict.fromkeys(fragments))
@@ -938,6 +973,8 @@ class QualityChecker:
         for token in tokens:
             lower = token.lower()
             if self._text_analyzer.is_common_ui_token(token):
+                return False
+            if lower in self._LOCALIZE_SOURCE_TERMS:
                 return False
             if lower in self._ALLOW_CONNECTORS:
                 continue
@@ -1078,7 +1115,10 @@ class QualityChecker:
 
         normalized_translation = normalize_anchor(translation_text)
         if any(
-                normalize_anchor(anchor).strip(".!?。！？…") in normalized_translation
+                self._glossary_anchor_present(
+                    normalize_anchor(anchor).strip(".!?。！？…"),
+                    normalized_translation,
+                )
                 for anchor in anchors):
             return None
         return QualityIssue(
@@ -1088,6 +1128,29 @@ class QualityChecker:
             rule_id="glossary_anchor_coverage",
             fragments=anchors[:6],
         )
+
+    @staticmethod
+    def _glossary_anchor_present(anchor: str, translation: str) -> bool:
+        """Return whether a glossary anchor survives in a natural CJK form.
+
+        Glossary entries are often recorded for the base concept (``Nord`` ->
+        ``诺德人``), while the source uses a modifier such as ``woman`` and a
+        faithful translation emits ``诺德女人``.  For CJK-only anchors with at
+        least three characters, permit at most two inserted Han characters
+        between the original characters.  This covers short attributive or
+        gender modifiers without treating a partial anchor as present.  Any
+        Latin, numeric, or punctuation-bearing anchor remains exact-match
+        only, so identifiers and mixed glossary values keep their strict gate.
+        """
+        if not anchor or not translation:
+            return False
+        if anchor in translation:
+            return True
+        if len(anchor) < 3 or not all("\u3400" <= char <= "\u9fff" for char in anchor):
+            return False
+
+        pattern = "[\\u3400-\\u9fff]{0,2}".join(re.escape(char) for char in anchor)
+        return re.search(pattern, translation) is not None
 
     # --- R-30: rich glossary metadata consumption ---
 
